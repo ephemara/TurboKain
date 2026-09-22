@@ -488,6 +488,14 @@ outside this repo (warm) — `kain` is on PATH.
   as `x1e4` (or x1e5) instead of lying with decimals.
 - **Reserved words that bite:** `out`, `share`, `match` cannot be identifiers
   (params, locals, or bindings). Rename to `outn`/`sharemode`/`hit`.
+- **Keep loop kernels inline or in large callees (unexplained, workaround
+  holds).** A small helper with loops over a `ptr` param crashed when
+  called; the identical body inline runs. Cause undetermined — could be
+  my misuse (arena lifetimes, effects) — repro shape is documented
+  in `kain/core/boxcar_bank.kn` (f32 section) for whoever wants it.
+- **`use std::audio::dsp` doesn't build on this snapshot** (its source binds
+  `half`, now reserved — likely version skew, not a bug) — hand-roll the
+  small FFT/DFT you need, rewire on refresh.
 
 ---
 

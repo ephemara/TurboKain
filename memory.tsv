@@ -22,3 +22,4 @@ date	area	type	description	file
 2026-09-22	tool	remove	Removed scripts/memlog.py — Python helper replaced by the Kain memlog. No non-Kain runtimes in this repo.	scripts/memlog.py
 2026-09-22	docs	update	AGENTS.md: replaced the Python memlog instructions with the Kain build/run flow, and stated the repo rule — pure Kain + MarkScript, never add a helper in another language.	AGENTS.md
 2026-09-22	docs	update	AGENTS.md: added the memlog CLI reference to the main CLI commands section (build once, run from repo root, stamps date/seeds header/sanitizes).	AGENTS.md
+2026-09-22	tool	add	boxcar_bank.kn tool 03: single-pulse + DM sweep at transient_dm parity (converge spec-DFT vs radix-2 FFT lanes, prefix-sum boxcar, quickselect robust-z, md+csv tables); prove 3/3, sky-data exact 4-field oracle match, 3x faster than numpy	kain/core/boxcar_bank.kn,kain/core/boxcar_bank.exe

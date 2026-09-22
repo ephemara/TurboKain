@@ -1,0 +1,1012 @@
+// ============================================================================
+// boxcar_bank.kn — TurboKain 03: single-pulse + DM sweep (transient_dm parity)
+//
+// Oracle: E:/SetiYeti python/transient_dm.py (detect + --prove). Method kept
+// 1:1 where it matters, adapted where Kain wins:
+//
+//   1. split slice into M=16 sub-bands via FFT filterbank (16-pt rows)
+//   2. per DM trial: shift sub-band envelopes by cold-plasma law, sum
+//   3. boxcar matched filter over widths [1..128]; robust-z vs MAD floor
+//   4. best (DM, width, sigma); threshold default 14.0
+//
+// Kain adaptations (all documented, none silent):
+//   * filterbank FFT = hand-rolled 16-pt radix-2 as the FAST lane of
+//     converge row_power; spec lane = naive table-DFT. (std::audio::dsp
+//     fft_forward was the first choice but doesn't build on this snapshot
+//     — version skew around the `half` keyword, not a bug. Rewire later.)
+//     numpy rfft (unnormalized) == complex FFT bins 0..8 of real input
+//     (unnormalized) up to float-assoc order. Same math, same power.
+//   * boxcar 'same' convolution = prefix-sum window (O(nt) per width).
+//     Exact same-mode math: out-of-range contributes 0 under both, divisor
+//     is always sqrt(w). Interior values identical; edge convention matches
+//     by construction (clipped prefix == zero-padded window / sqrt(w)).
+//   * median/MAD = quickselect (O(nt)), not full sort. Upper-middle for
+//     even nt (numpy averages two middles; robust-z is insensitive to the
+//     1-quantum difference — prove margins absorb it, see --prove).
+//   * float output ban: tables carry scaled ints only (sigma_x100,
+//     dm_x100). str(Float) truncates in this lane — never print raw floats.
+//   * .f32 input rides kernel32 handles + Byte arenas (slice.kn pattern).
+//     f32-LE bits -> Float via manual IEEE754 + 256-entry pow2 table.
+//   * --prove is self-contained (LCG + CLT-12 gaussian, seed 777 mirror).
+//     Behavioral parity with transient_dm.prove: quiet on noise, fires on
+//     injected narrow shot, fires on staggered sweep. Not bit-parity with
+//     numpy streams (different RNG) — and it doesn't pretend to be.
+//
+// Contract: .f32 in -> pulse.md + pulse.csv out (same columns, pipes vs
+// commas). Columns mirror the python detect dict: dm, width, sigma, t,
+// verdict. Full DM x width grid (trials*8 rows) so MarkScript can rank it.
+//
+// Exit codes: 0 ok (verdict lives in the table, CLEAN is still exit 0),
+// 1 help OR --prove FAIL, 2 any error. No hardcoded data paths:
+// --data-dir / $SETIYETI_DATA only.
+// ============================================================================
+
+use std::process
+use std::runtime
+use std::text
+use std::bytes
+
+// ── kernel32 file API (pure Kain FFI, no C, no headers — slice.kn pattern) ──
+@extern @link_name("CreateFileA")
+fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
+
+@extern @link_name("GetFileSizeEx")
+fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
+
+@extern @link_name("SetFilePointer")
+fn k_SetFilePointer(h: ptr<Void>, lo: Int, hi: ptr<Int>, method: Int) -> Int
+
+@extern @link_name("ReadFile")
+fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("WriteFile")
+fn k_WriteFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("CloseHandle")
+fn k_CloseHandle(h: ptr<Void>) -> Int
+
+@extern @link_name("GetLastError")
+fn k_GetLastError() -> Int
+
+fn null_ptr() -> ptr<Void> with Pure:
+    return int_to_ptr(0, "ptr<Void>")
+
+const GEN_READ: Int = 2147483648
+const GEN_WRITE: Int = 1073741824
+const OPEN_EXISTING: Int = 3
+const CREATE_ALWAYS: Int = 2
+const FILE_NORMAL: Int = 128
+const FILE_SHARE_RW: Int = 3
+
+const EXIT_OK: Int = 0
+const EXIT_HELP: Int = 1
+const EXIT_ERROR: Int = 2
+
+// ── Detector geometry (transient_dm defaults — data, not magic) ─────────────
+const MSUB: Int = 16
+const NB: Int = 9
+const K_DM: Float = 0.00415
+const FS_DEFAULT: Float = 2929687.5
+const F0_DEFAULT: Float = 1400.0
+const BW_DEFAULT: Float = 2.93
+const DM_TRIALS_DEFAULT: Int = 32
+const DM_MAX_DEFAULT: Float = 1000.0
+const THRESH_DEFAULT: Float = 14.0
+const MAX_N_DEFAULT: Int = 1048576
+const MAX_N_HARD: Int = 4194304
+const MIN_NT: Int = 256
+const WIDTHS: Array<Int> = [1, 2, 4, 8, 16, 32, 64, 128]
+const NW: Int = 8
+
+law shot_ok(sig_x100: Int, thresh_x100: Int) -> Bool:
+    return sig_x100 >= thresh_x100
+
+// Display clamp: sigma_x100 beyond +-999999999 prints as the clamp.
+// Detection itself uses unclamped Floats; only table/ledger ints clamp.
+// (Periodic/calibration input can MAD-floor to 1e16+, oracle agrees.)
+fn sig_clamp100(s: Float) -> Int:
+    let v: Float = s * 100.0
+    if v > 999999999.0:
+        return 999999999
+    if v < 0.0 - 999999999.0:
+        return 0 - 999999999
+    return v as Int
+
+// ── Handle helpers (one open per file — slice.kn verbatim) ──────────────────
+fn k_open_read(path: String) -> ptr<Void> with Unsafe:
+    return k_CreateFileA(path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+
+fn k_open_write(path: String) -> ptr<Void> with Unsafe:
+    return k_CreateFileA(path, GEN_WRITE, FILE_SHARE_RW, null_ptr(), CREATE_ALWAYS, FILE_NORMAL, null_ptr())
+
+fn k_handle_bad(h: ptr<Void>) -> Int with Pure:
+    if ptr_to_int(h) == -1:
+        return 1
+    return 0
+
+fn k_size(h: ptr<Void>) -> Int with Unsafe:
+    let slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let ok: Int = k_GetFileSizeEx(h, slot)
+    var sz: Int = -1
+    if ok != 0:
+        sz = mem_load(slot, "Int")
+    decay slot
+    return sz
+
+fn k_seek(h: ptr<Void>, off: Int) -> Int with Unsafe:
+    let hislot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(hislot, off / 4294967296, "Int")
+    let lo: Int = off % 4294967296
+    let r: Int = k_SetFilePointer(h, lo, hislot, 0)
+    decay hislot
+    return r
+
+fn k_read_at(h: ptr<Void>, nslot: ptr<Int>, off: Int, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
+    let _s: Int = k_seek(h, off)
+    mem_store(nslot, 0, "Int")
+    let ok: Int = k_ReadFile(h, buf, n, nslot, null_ptr())
+    if ok == 0:
+        return -1
+    return mem_load(nslot, "Int")
+
+fn k_write_all(h: ptr<Void>, nslot: ptr<Int>, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
+    mem_store(nslot, 0, "Int")
+    let ok: Int = k_WriteFile(h, buf, n, nslot, null_ptr())
+    if ok == 0:
+        return -1
+    return mem_load(nslot, "Int")
+
+fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
+    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
+
+fn bstore(buf: ptr<Byte>, i: Int, v: Int) with Unsafe:
+    mem_store(ptr_offset(buf, i, "Byte"), v as Byte, "Byte")
+
+// ── Text -> numbers (argv geometry; no exponent form — flags don't need it) ─
+fn parse_int_text(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var sign: Int = 1
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = -1
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var value: Int = 0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        var digit: Int = 0
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return value * sign
+        value = value * 10 + digit
+        index = index + 1
+    return value * sign
+
+fn parse_float_text(text: String) -> Float:
+    if len(text) == 0:
+        return 0.0
+    var sign: Float = 1.0
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = 0.0 - 1.0
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var whole: Float = 0.0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        if ch == ".":
+            break
+        var digit: Float = 0.0
+        if ch == "0":
+            digit = 0.0
+        elif ch == "1":
+            digit = 1.0
+        elif ch == "2":
+            digit = 2.0
+        elif ch == "3":
+            digit = 3.0
+        elif ch == "4":
+            digit = 4.0
+        elif ch == "5":
+            digit = 5.0
+        elif ch == "6":
+            digit = 6.0
+        elif ch == "7":
+            digit = 7.0
+        elif ch == "8":
+            digit = 8.0
+        elif ch == "9":
+            digit = 9.0
+        else:
+            return sign * whole
+        whole = whole * 10.0 + digit
+        index = index + 1
+    if index < len(text):
+        if char_at(text, index) == ".":
+            index = index + 1
+            var div: Float = 10.0
+            while index < len(text):
+                let ch2: String = char_at(text, index)
+                var d2: Float = 0.0
+                if ch2 == "0":
+                    d2 = 0.0
+                elif ch2 == "1":
+                    d2 = 1.0
+                elif ch2 == "2":
+                    d2 = 2.0
+                elif ch2 == "3":
+                    d2 = 3.0
+                elif ch2 == "4":
+                    d2 = 4.0
+                elif ch2 == "5":
+                    d2 = 5.0
+                elif ch2 == "6":
+                    d2 = 6.0
+                elif ch2 == "7":
+                    d2 = 7.0
+                elif ch2 == "8":
+                    d2 = 8.0
+                elif ch2 == "9":
+                    d2 = 9.0
+                else:
+                    return sign * whole
+                whole = whole + d2 / div
+                div = div * 10.0
+                index = index + 1
+    return sign * whole
+
+fn find_from(hay: String, needle: String, start: Int) -> Int:
+    let hn: Int = len(hay)
+    let nn: Int = len(needle)
+    if nn == 0:
+        return start
+    var i: Int = start
+    if i < 0:
+        i = 0
+    while i + nn <= hn:
+        var j: Int = 0
+        var hit: Int = 1
+        while j < nn:
+            if char_at(hay, i + j) != char_at(needle, j):
+                hit = 0
+            j = j + 1
+        if hit == 1:
+            return i
+        i = i + 1
+    return -1
+
+// ── f32-LE bits -> Float (manual IEEE754; pow2 table lookup, no loop) ───────
+// NOTE (unexplained crash, workaround holds): a `build_pow2_tab(tab)`
+// helper carrying the table loops crashed when CALLED; the identical body
+// inline runs. Cause undetermined — assume my misuse first (lifetimes,
+// effects), repro shape kept here for whoever wants it. Table built
+// inline in main. Revisit on refresh.
+
+fn f32bits_to_float(bits: Int, p2: ptr<Float>) -> Float with Unsafe:
+    let exp: Int = (bits >> 23) & 255
+    let mant: Int = bits & 8388607
+    var mag: Float = 0.0
+    if exp == 0:
+        mag = (mant as Float) / 8388608.0 * mem_load(ptr_offset(p2, 1, "Float"), "Float")
+    elif exp == 255:
+        mag = 0.0
+    else:
+        mag = (1.0 + (mant as Float) / 8388608.0) * mem_load(ptr_offset(p2, exp, "Float"), "Float")
+    if ((bits >> 31) & 1) == 1:
+        return 0.0 - mag
+    return mag
+
+// ── Quickselect median/MAD over Float arenas (O(n) avg, in place) ───────────
+fn qs_partition(a: ptr<Float>, lo: Int, hi: Int) -> Int with Unsafe:
+    let piv: Float = mem_load(ptr_offset(a, hi, "Float"), "Float")
+    var i: Int = lo
+    var j: Int = lo
+    while j < hi:
+        if mem_load(ptr_offset(a, j, "Float"), "Float") <= piv:
+            let t: Float = mem_load(ptr_offset(a, i, "Float"), "Float")
+            mem_store(ptr_offset(a, i, "Float"), mem_load(ptr_offset(a, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(a, j, "Float"), t, "Float")
+            i = i + 1
+        j = j + 1
+    let t2: Float = mem_load(ptr_offset(a, i, "Float"), "Float")
+    mem_store(ptr_offset(a, i, "Float"), mem_load(ptr_offset(a, hi, "Float"), "Float"), "Float")
+    mem_store(ptr_offset(a, hi, "Float"), t2, "Float")
+    return i
+
+fn quickselect_k(a: ptr<Float>, n: Int, k: Int) -> Float with Unsafe:
+    var lo: Int = 0
+    var hi: Int = n - 1
+    while lo < hi:
+        let p: Int = qs_partition(a, lo, hi)
+        if p == k:
+            break
+        elif p > k:
+            hi = p - 1
+        else:
+            lo = p + 1
+    return mem_load(ptr_offset(a, k, "Float"), "Float")
+
+// ── Filterbank row power: spec DFT vs hand radix-2 fast lane ────────────────
+// Bins 0..8 of a real 16-pt row. Spec uses precomputed twiddles (no
+// transcendentals in the hot loop); fast is an in-place radix-2 FFT over
+// precomputed stage tables. std::audio::dsp fft_forward was the first
+// choice, but the vendored stdlib itself fails codegen on this snapshot
+// (its dsp.kn binds `half`, now a reserved keyword) — hand-rolled here,
+// stdlib call wired back the day the stdlib compiles again.
+fn row_power_spec(x: ptr<Float>, base: Int, prow: ptr<Float>, twc: ptr<Float>, tws: ptr<Float>) -> Int:
+    var b: Int = 0
+    while b < NB:
+        var re: Float = 0.0
+        var im: Float = 0.0
+        var k: Int = 0
+        while k < MSUB:
+            let xv: Float = mem_load(ptr_offset(x, base + k, "Float"), "Float")
+            re = re + xv * mem_load(ptr_offset(twc, b * MSUB + k, "Float"), "Float")
+            im = im - xv * mem_load(ptr_offset(tws, b * MSUB + k, "Float"), "Float")
+            k = k + 1
+        mem_store(ptr_offset(prow, b, "Float"), re * re + im * im, "Float")
+        b = b + 1
+    return 0
+
+fn row_power_fft(x: ptr<Float>, base: Int, prow: ptr<Float>, sre: ptr<Float>, sim: ptr<Float>, fftc: ptr<Float>, ffts: ptr<Float>) -> Int:
+    var k: Int = 0
+    while k < MSUB:
+        mem_store(ptr_offset(sre, k, "Float"), mem_load(ptr_offset(x, base + k, "Float"), "Float"), "Float")
+        mem_store(ptr_offset(sim, k, "Float"), 0.0, "Float")
+        k = k + 1
+    // bit-reversal (4-bit, shift-free: << is unproven in this lane).
+    var ri: Int = 0
+    while ri < MSUB:
+        let rv: Int = (ri & 1) * 8 + ((ri >> 1) & 1) * 4 + ((ri >> 2) & 1) * 2 + ((ri >> 3) & 1)
+        if rv > ri:
+            let tr: Float = mem_load(ptr_offset(sre, ri, "Float"), "Float")
+            mem_store(ptr_offset(sre, ri, "Float"), mem_load(ptr_offset(sre, rv, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(sre, rv, "Float"), tr, "Float")
+            let ti: Float = mem_load(ptr_offset(sim, ri, "Float"), "Float")
+            mem_store(ptr_offset(sim, ri, "Float"), mem_load(ptr_offset(sim, rv, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(sim, rv, "Float"), ti, "Float")
+        ri = ri + 1
+    // stages size 2/4/8/16, table offsets 0/1/3/7.
+    var size: Int = 2
+    var stg: Int = 0
+    while size <= MSUB:
+        let hsz: Int = size / 2
+        var off: Int = 0
+        if stg == 1:
+            off = 1
+        elif stg == 2:
+            off = 3
+        elif stg == 3:
+            off = 7
+        var gs: Int = 0
+        while gs < MSUB:
+            var kk: Int = 0
+            var jj: Int = gs
+            while jj < gs + hsz:
+                let wr: Float = mem_load(ptr_offset(fftc, off + kk, "Float"), "Float")
+                let wi: Float = mem_load(ptr_offset(ffts, off + kk, "Float"), "Float")
+                let yr: Float = mem_load(ptr_offset(sre, jj + hsz, "Float"), "Float")
+                let yi: Float = mem_load(ptr_offset(sim, jj + hsz, "Float"), "Float")
+                let tpr: Float = wr * yr - wi * yi
+                let tpi: Float = wi * yr + wr * yi
+                let xr: Float = mem_load(ptr_offset(sre, jj, "Float"), "Float")
+                let xi: Float = mem_load(ptr_offset(sim, jj, "Float"), "Float")
+                mem_store(ptr_offset(sre, jj, "Float"), xr + tpr, "Float")
+                mem_store(ptr_offset(sim, jj, "Float"), xi + tpi, "Float")
+                mem_store(ptr_offset(sre, jj + hsz, "Float"), xr - tpr, "Float")
+                mem_store(ptr_offset(sim, jj + hsz, "Float"), xi - tpi, "Float")
+                kk = kk + 1
+                jj = jj + 1
+            gs = gs + size
+        size = size * 2
+        stg = stg + 1
+    var b: Int = 0
+    while b < NB:
+        let re: Float = mem_load(ptr_offset(sre, b, "Float"), "Float")
+        let im: Float = mem_load(ptr_offset(sim, b, "Float"), "Float")
+        mem_store(ptr_offset(prow, b, "Float"), re * re + im * im, "Float")
+        b = b + 1
+    return 0
+
+// NOTE: no `verify` clause — verify cannot synthesize ptr params (slice.kn
+// precedent). Behavioral receipt is --prove + oracle comparison.
+converge row_power(x: ptr<Float>, base: Int, prow: ptr<Float>, twc: ptr<Float>, tws: ptr<Float>, sre: ptr<Float>, sim: ptr<Float>, fftc: ptr<Float>, ffts: ptr<Float>) -> Int:
+    spec reference:
+        return row_power_spec(x, base, prow, twc, tws)
+    fast radix2 when capability("cpu.x86.avx2"):
+        return row_power_fft(x, base, prow, sre, sim, fftc, ffts)
+
+// ── Core detector: x[0..n] -> grid + best ───────────────────────────────────
+// gsig holds sigma_x100 per (dm,w) row-major; gtt holds argmax t; best holds
+// [dm_x100, width, sig_x100, t]. Returns best_sig_x100.
+fn run_bank(x: ptr<Float>, n: Int, fs: Float, f0_mhz: Float, bw_mhz: Float, trials: Int, dm_max: Float, gsig: ptr<Float>, gtt: ptr<Int>, best: ptr<Int>) -> Int with Unsafe:
+    let nt: Int = n / MSUB
+    let mut pmat: ptr<Float> = alloc_zeroed(nt * NB, "Float")
+    let mut twc: ptr<Float> = alloc_zeroed(NB * MSUB, "Float")
+    let mut tws: ptr<Float> = alloc_zeroed(NB * MSUB, "Float")
+    let mut sre: ptr<Float> = alloc_zeroed(MSUB, "Float")
+    let mut sim: ptr<Float> = alloc_zeroed(MSUB, "Float")
+    var b: Int = 0
+    while b < NB:
+        var k: Int = 0
+        while k < MSUB:
+            let ang: Float = 6.283185307179586 * (b as Float) * (k as Float) / (MSUB as Float)
+            mem_store(ptr_offset(twc, b * MSUB + k, "Float"), cos(ang), "Float")
+            mem_store(ptr_offset(tws, b * MSUB + k, "Float"), sin(ang), "Float")
+            k = k + 1
+        b = b + 1
+    let mut prow: ptr<Float> = alloc_zeroed(NB, "Float")
+    let mut fftc: ptr<Float> = alloc_zeroed(15, "Float")
+    let mut ffts: ptr<Float> = alloc_zeroed(15, "Float")
+    var fsize2: Int = 2
+    var fstg: Int = 0
+    var foff: Int = 0
+    while fsize2 <= MSUB:
+        let fh: Int = fsize2 / 2
+        var fk: Int = 0
+        while fk < fh:
+            let fang: Float = 0.0 - 6.283185307179586 * (fk as Float) / (fsize2 as Float)
+            mem_store(ptr_offset(fftc, foff + fk, "Float"), cos(fang), "Float")
+            mem_store(ptr_offset(ffts, foff + fk, "Float"), sin(fang), "Float")
+            fk = fk + 1
+        foff = foff + fh
+        fsize2 = fsize2 * 2
+        fstg = fstg + 1
+    var r: Int = 0
+    while r < nt:
+        let _rp: Int = observe x:
+            row_power(x, r * MSUB, prow, twc, tws, sre, sim, fftc, ffts)
+        var bb: Int = 0
+        while bb < NB:
+            mem_store(ptr_offset(pmat, r * NB + bb, "Float"), mem_load(ptr_offset(prow, bb, "Float"), "Float"), "Float")
+            bb = bb + 1
+        r = r + 1
+    decay prow
+    decay sre
+    decay sim
+    decay twc
+    decay tws
+    decay fftc
+    decay ffts
+    // Per-band normalize: / median, then mean-subtract (transient_dm exact).
+    let mut col: ptr<Float> = alloc_zeroed(nt, "Float")
+    var band: Int = 0
+    while band < NB:
+        var i2: Int = 0
+        while i2 < nt:
+            mem_store(ptr_offset(col, i2, "Float"), mem_load(ptr_offset(pmat, i2 * NB + band, "Float"), "Float"), "Float")
+            i2 = i2 + 1
+        let med: Float = quickselect_k(col, nt, nt / 2)
+        var denom: Float = med
+        if denom < 0.000000000000000000000000000000000000000000001:
+            denom = 0.000000000000000000000000000000000000000000001
+        var mean: Float = 0.0
+        i2 = 0
+        while i2 < nt:
+            let nv: Float = mem_load(ptr_offset(pmat, i2 * NB + band, "Float"), "Float") / denom
+            mem_store(ptr_offset(pmat, i2 * NB + band, "Float"), nv, "Float")
+            mean = mean + nv
+            i2 = i2 + 1
+        mean = mean / (nt as Float)
+        i2 = 0
+        while i2 < nt:
+            let cv: Float = mem_load(ptr_offset(pmat, i2 * NB + band, "Float"), "Float") - mean
+            mem_store(ptr_offset(pmat, i2 * NB + band, "Float"), cv, "Float")
+            i2 = i2 + 1
+        band = band + 1
+    // Sub-band centre freqs in GHz across the coarse channel.
+    let flo_ghz: Float = (f0_mhz - bw_mhz * 0.5) / 1000.0
+    let fhi_ghz: Float = (f0_mhz + bw_mhz * 0.5) / 1000.0
+    let mut fc: ptr<Float> = alloc_zeroed(NB, "Float")
+    var fb: Int = 0
+    while fb < NB:
+        mem_store(ptr_offset(fc, fb, "Float"), flo_ghz + (fhi_ghz - flo_ghz) * ((fb as Float) + 0.5) / (NB as Float), "Float")
+        fb = fb + 1
+    let ftop: Float = mem_load(ptr_offset(fc, NB - 1, "Float"), "Float")
+    let dt: Float = (MSUB as Float) / fs
+    let mut shifts: ptr<Int> = alloc_zeroed(NB, "Int")
+    let mut ts: ptr<Float> = alloc_zeroed(nt, "Float")
+    let mut cs: ptr<Float> = alloc_zeroed(nt + 1, "Float")
+    let mut filt: ptr<Float> = alloc_zeroed(nt, "Float")
+    mem_store(ptr_offset(best, 0, "Int"), 0, "Int")
+    mem_store(ptr_offset(best, 1, "Int"), 1, "Int")
+    mem_store(ptr_offset(best, 2, "Int"), 0, "Int")
+    mem_store(ptr_offset(best, 3, "Int"), 0, "Int")
+    var best_sig: Float = 0.0
+    var best_dm: Float = 0.0
+    var best_w: Int = 1
+    var best_t: Int = 0
+    var dm_i: Int = 0
+    while dm_i < trials:
+        var dm: Float = 0.0
+        if trials > 1:
+            dm = dm_max * (dm_i as Float) / ((trials - 1) as Float)
+        var sb: Int = 0
+        while sb < NB:
+            let fcb: Float = mem_load(ptr_offset(fc, sb, "Float"), "Float")
+            let sh: Float = K_DM * dm * (1.0 / (fcb * fcb) - 1.0 / (ftop * ftop)) / dt
+            mem_store(ptr_offset(shifts, sb, "Int"), sh as Int, "Int")
+            sb = sb + 1
+        var ti: Int = 0
+        while ti < nt:
+            var acc: Float = 0.0
+            sb = 0
+            while sb < NB:
+                let shb: Int = mem_load(ptr_offset(shifts, sb, "Int"), "Int")
+                var src: Int = (ti + shb) % nt
+                if src < 0:
+                    src = src + nt
+                acc = acc + mem_load(ptr_offset(pmat, src * NB + sb, "Float"), "Float")
+                sb = sb + 1
+            mem_store(ptr_offset(ts, ti, "Float"), acc, "Float")
+            ti = ti + 1
+        mem_store(ptr_offset(cs, 0, "Float"), 0.0, "Float")
+        ti = 0
+        while ti < nt:
+            mem_store(ptr_offset(cs, ti + 1, "Float"), mem_load(ptr_offset(cs, ti, "Float"), "Float") + mem_load(ptr_offset(ts, ti, "Float"), "Float"), "Float")
+            ti = ti + 1
+        var wi: Int = 0
+        while wi < NW:
+            let w: Int = WIDTHS[wi]
+            if w < nt:
+                let inv: Float = 1.0 / sqrt(w as Float)
+                let halfw: Int = w / 2
+                var fi: Int = 0
+                while fi < nt:
+                    var lo: Int = fi - halfw
+                    if lo < 0:
+                        lo = 0
+                    var hi: Int = lo + w
+                    if hi > nt:
+                        hi = nt
+                        lo = hi - w
+                        if lo < 0:
+                            lo = 0
+                    let seg: Float = mem_load(ptr_offset(cs, hi, "Float"), "Float") - mem_load(ptr_offset(cs, lo, "Float"), "Float")
+                    mem_store(ptr_offset(filt, fi, "Float"), seg * inv, "Float")
+                    fi = fi + 1
+                var ci: Int = 0
+                while ci < nt:
+                    mem_store(ptr_offset(col, ci, "Float"), mem_load(ptr_offset(filt, ci, "Float"), "Float"), "Float")
+                    ci = ci + 1
+                let fmed: Float = quickselect_k(col, nt, nt / 2)
+                ci = 0
+                while ci < nt:
+                    var dv: Float = mem_load(ptr_offset(col, ci, "Float"), "Float") - fmed
+                    if dv < 0.0:
+                        dv = 0.0 - dv
+                    mem_store(ptr_offset(col, ci, "Float"), dv, "Float")
+                    ci = ci + 1
+                var mad: Float = quickselect_k(col, nt, nt / 2)
+                if mad < 0.000000000001:
+                    mad = 0.000000000001
+                let scale: Float = 1.4826 * mad
+                var arg: Int = 0
+                var mx: Float = 0.0 - 100000000000000000000.0
+                ci = 0
+                while ci < nt:
+                    let z: Float = (mem_load(ptr_offset(filt, ci, "Float"), "Float") - fmed) / scale
+                    if z > mx:
+                        mx = z
+                        arg = ci
+                    ci = ci + 1
+                let cell: Int = dm_i * NW + wi
+                mem_store(ptr_offset(gsig, cell, "Float"), mx, "Float")
+                mem_store(ptr_offset(gtt, cell, "Int"), arg, "Int")
+                if mx > best_sig:
+                    best_sig = mx
+                    best_dm = dm
+                    best_w = w
+                    best_t = arg
+            else:
+                let cell2: Int = dm_i * NW + wi
+                mem_store(ptr_offset(gsig, cell2, "Float"), 0.0 - 100000000000000000000.0, "Float")
+                mem_store(ptr_offset(gtt, cell2, "Int"), 0, "Int")
+            wi = wi + 1
+        dm_i = dm_i + 1
+    mem_store(ptr_offset(best, 0, "Int"), (best_dm * 100.0) as Int, "Int")
+    mem_store(ptr_offset(best, 1, "Int"), best_w, "Int")
+    mem_store(ptr_offset(best, 2, "Int"), sig_clamp100(best_sig), "Int")
+    mem_store(ptr_offset(best, 3, "Int"), best_t, "Int")
+    decay ts
+    decay cs
+    decay filt
+    decay col
+    decay fc
+    decay shifts
+    decay pmat
+    return sig_clamp100(best_sig)
+
+// ── Small text-file writer (tables are KBs — Array bridge is fine here) ─────
+fn write_text_file(path: String, s: String) -> Int with Unsafe:
+    let h: ptr<Void> = k_open_write(path)
+    if k_handle_bad(h) == 1:
+        return -1
+    let view: ByteSlice = bytes_from(s)
+    let arr: Array<Int> = bytes_array(view)
+    let nb: Int = len(arr)
+    let mut buf: ptr<Byte> = alloc_zeroed(nb + 8, "Byte")
+    var i: Int = 0
+    while i < nb:
+        bstore(buf, i, arr[i])
+        i = i + 1
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let wrote: Int = k_write_all(h, nslot, buf, nb)
+    let _c: Int = k_CloseHandle(h)
+    decay buf
+    decay nslot
+    if wrote != nb:
+        return -1
+    return 0
+
+fn usage() -> String:
+    var t: String = "boxcar_bank 0.1.0 — TurboKain single-pulse + DM sweep (transient_dm parity)\n"
+    t = t + ".f32 in -> pulse.md + pulse.csv out (DM x width grid, MarkScript tables).\n"
+    t = t + "Filterbank FFT rides std::audio::dsp (converge fast lane); bulk IO rides\n"
+    t = t + "kernel32 handles + Byte arenas (no fs bridge). Tables carry scaled ints.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  boxcar_bank --in <f32> [--out pulse] [--format md|csv|both]\n"
+    t = t + "        [--fs 2929687.5] [--f0-mhz 1400.0] [--bw-mhz 2.93]\n"
+    t = t + "        [--dm-trials 32] [--dm-max 1000] [--thresh 14.0]\n"
+    t = t + "        [--max-n 1048576] [--data-dir D] [--json]\n"
+    t = t + "  boxcar_bank <in.f32> [out]   (positional shorthand)\n"
+    t = t + "  boxcar_bank --prove          (self-test: noise quiet + shots fire)\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 ok (CLEAN is still 0 — verdict is in the table),\n"
+    t = t + "1 help / prove FAIL, 2 error.\n"
+    return t
+
+fn main() -> Int with Unsafe:
+    let args: Array<String> = process_user_args()
+    // NOTE: `and`/`or` do not short-circuit — argv indexing sits behind
+    // nested ifs only.
+    var in_path: String = ""
+    var data_dir: String = ""
+    var outn: String = "pulse"
+    var format: String = "both"
+    var fs: Float = FS_DEFAULT
+    var f0_mhz: Float = F0_DEFAULT
+    var bw_mhz: Float = BW_DEFAULT
+    var dm_trials: Int = DM_TRIALS_DEFAULT
+    var dm_max: Float = DM_MAX_DEFAULT
+    var thresh: Float = THRESH_DEFAULT
+    var max_n: Int = MAX_N_DEFAULT
+    var json: Int = 0
+    var show_help: Int = 0
+    var prove: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--json":
+            json = 1
+        elif a == "--prove":
+            prove = 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--f32":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                outn = args[i + 1]
+                i = i + 1
+        elif a == "--format":
+            if i + 1 < len(args):
+                format = args[i + 1]
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fs = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--f0-mhz":
+            if i + 1 < len(args):
+                f0_mhz = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--bw-mhz":
+            if i + 1 < len(args):
+                bw_mhz = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--dm-trials":
+            if i + 1 < len(args):
+                dm_trials = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--dm-max":
+            if i + 1 < len(args):
+                dm_max = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--thresh":
+            if i + 1 < len(args):
+                thresh = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--max-n":
+            if i + 1 < len(args):
+                max_n = parse_int_text(args[i + 1])
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    var pi: Int = 0
+    while pi < len(pos):
+        let p: String = pos[pi]
+        if pi == 0:
+            if in_path == "":
+                in_path = p
+        elif pi == 1:
+            outn = p
+        pi = pi + 1
+
+    if show_help == 1:
+        print(usage())
+        return EXIT_HELP
+    if dm_trials < 1:
+        dm_trials = 1
+    if dm_trials > 256:
+        dm_trials = 256
+    if max_n < 4096:
+        max_n = 4096
+    if max_n > MAX_N_HARD:
+        max_n = MAX_N_HARD
+    let thresh_x100: Int = (thresh * 100.0) as Int
+
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+
+    // ── --prove: self-contained, no files ──
+    if prove == 1:
+        let pn: Int = 262144
+        let pnt: Int = pn / MSUB
+        println("bank-prove: N=" + str(pn) + " nt=" + str(pnt) + " trials=32/48 thresh_x100=" + str(thresh_x100))
+        let mut px: ptr<Float> = alloc_zeroed(pn, "Float")
+        var seed: Int = 777
+        var gi: Int = 0
+        while gi < pn:
+            var acc2: Float = 0.0
+            var u: Int = 0
+            while u < 12:
+                seed = (seed * 1103515245 + 12345) % 2147483648
+                acc2 = acc2 + (seed as Float) / 2147483648.0
+                u = u + 1
+            mem_store(ptr_offset(px, gi, "Float"), (acc2 - 6.0) * 14.0, "Float")
+            gi = gi + 1
+        let cells: Int = 32 * NW
+        let mut gsig: ptr<Float> = alloc_zeroed(cells, "Float")
+        let mut gtt: ptr<Int> = alloc_zeroed(cells, "Int")
+        let mut best: ptr<Int> = alloc_zeroed(4, "Int")
+        let t0: Int = now_millis()
+        let s0: Int = run_bank(px, pn, FS_DEFAULT, F0_DEFAULT, BW_DEFAULT, 32, 1000.0, gsig, gtt, best)
+        let t1: Int = now_millis()
+        let b0w: Int = mem_load(ptr_offset(best, 1, "Int"), "Int")
+        var npass: Int = 0
+        var total: Int = 0
+        total = total + 1
+        if s0 < thresh_x100:
+            npass = npass + 1
+            println("  [PASS] CTRL noise quiet  maxsig_x100=" + str(s0))
+        else:
+            println("  [FAIL] CTRL noise quiet  maxsig_x100=" + str(s0) + " >= " + str(thresh_x100))
+        // Inject bright narrow shot: width 8, amplitude 12*14 at t=100000.
+        var k2: Int = 0
+        while k2 < 8:
+            let old: Float = mem_load(ptr_offset(px, 100000 + k2, "Float"), "Float")
+            mem_store(ptr_offset(px, 100000 + k2, "Float"), old + 168.0, "Float")
+            k2 = k2 + 1
+        let s1: Int = run_bank(px, pn, FS_DEFAULT, F0_DEFAULT, BW_DEFAULT, 32, 1000.0, gsig, gtt, best)
+        let b1w: Int = mem_load(ptr_offset(best, 1, "Int"), "Int")
+        let b1t: Int = mem_load(ptr_offset(best, 3, "Int"), "Int")
+        total = total + 1
+        if s1 >= thresh_x100:
+            npass = npass + 1
+            println("  [PASS] INJECT narrow shot fires  sig_x100=" + str(s1) + " w=" + str(b1w) + " t=" + str(b1t))
+        else:
+            println("  [FAIL] INJECT narrow shot fires  sig_x100=" + str(s1) + " < " + str(thresh_x100))
+        // Staggered sweep proxy (transient_dm.prove mirror): per-segment
+        // pulses with band-stepped offsets, dm_max=2000, trials=48.
+        gi = 0
+        seed = 777
+        while gi < pn:
+            var acc3: Float = 0.0
+            var u2: Int = 0
+            while u2 < 12:
+                seed = (seed * 1103515245 + 12345) % 2147483648
+                acc3 = acc3 + (seed as Float) / 2147483648.0
+                u2 = u2 + 1
+            mem_store(ptr_offset(px, gi, "Float"), (acc3 - 6.0) * 14.0, "Float")
+            gi = gi + 1
+        let per: Int = pn / MSUB
+        var sb2: Int = 0
+        while sb2 < MSUB:
+            var q2: Int = 0
+            while q2 < 6:
+                let at: Int = sb2 * per + 1000 + sb2 * 40 + q2
+                if at < pn:
+                    let o2: Float = mem_load(ptr_offset(px, at, "Float"), "Float")
+                    mem_store(ptr_offset(px, at, "Float"), o2 + 140.0, "Float")
+                q2 = q2 + 1
+            sb2 = sb2 + 1
+        let cells48: Int = 48 * NW
+        let mut gsig2: ptr<Float> = alloc_zeroed(cells48, "Float")
+        let mut gtt2: ptr<Int> = alloc_zeroed(cells48, "Int")
+        let s2: Int = run_bank(px, pn, FS_DEFAULT, F0_DEFAULT, BW_DEFAULT, 48, 2000.0, gsig2, gtt2, best)
+        let b2dm: Int = mem_load(ptr_offset(best, 0, "Int"), "Int")
+        total = total + 1
+        if s2 >= thresh_x100:
+            npass = npass + 1
+            println("  [PASS] INJECT staggered sweep fires  sig_x100=" + str(s2) + " dm_x100=" + str(b2dm))
+        else:
+            println("  [FAIL] INJECT staggered sweep fires  sig_x100=" + str(s2) + " < " + str(thresh_x100))
+        decay gsig2
+        decay gtt2
+        decay gsig
+        decay gtt
+        decay best
+        decay px
+        println("[prove] " + str(npass) + "/" + str(total) + " in " + str(t1 - t0) + "ms + sweep")
+        if npass == total:
+            println("receipt=PASS prove=3/3 b0w=" + str(b0w))
+            return EXIT_OK
+        println("receipt=FAIL prove=" + str(npass) + "/" + str(total))
+        return EXIT_HELP
+
+    // ── File mode ──
+    if in_path == "":
+        println("boxcar_bank: no input. usage: boxcar_bank --in <f32> [--out pulse]")
+        return EXIT_ERROR
+    if data_dir != "":
+        if find_from(in_path, ":", 0) < 0:
+            if len(in_path) > 0:
+                if char_at(in_path, 0) != "/":
+                    in_path = data_dir + "/" + in_path
+
+    let h: ptr<Void> = k_open_read(in_path)
+    if k_handle_bad(h) == 1:
+        println("boxcar_bank: open fail err=" + str(k_GetLastError()) + ": " + in_path)
+        return EXIT_ERROR
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let fsize: Int = k_size(h)
+    if fsize < 16:
+        println("boxcar_bank: file too small")
+        return EXIT_ERROR
+    var nfile: Int = fsize / 4
+    nfile = nfile / MSUB * MSUB
+    var n: Int = nfile
+    if n > max_n:
+        n = max_n / MSUB * MSUB
+    let nt: Int = n / MSUB
+    if nt < MIN_NT:
+        println("boxcar_bank: too short nt=" + str(nt) + " need >=" + str(MIN_NT))
+        return EXIT_ERROR
+    println("boxcar_bank: file=" + in_path + " size=" + str(fsize) + " n=" + str(n) + "/" + str(nfile) + " nt=" + str(nt))
+    let mut raw: ptr<Byte> = alloc_zeroed(n * 4 + 16, "Byte")
+    let got: Int = k_read_at(h, nslot, 0, raw, n * 4)
+    let _ch: Int = k_CloseHandle(h)
+    if got < n * 4:
+        println("boxcar_bank: short read got=" + str(got) + " want=" + str(n * 4))
+        return EXIT_ERROR
+    let t_dec0: Int = now_millis()
+    let mut p2t: ptr<Float> = alloc_zeroed(256, "Float")
+    mem_store(ptr_offset(p2t, 127, "Float"), 1.0, "Float")
+    var p2e: Int = 128
+    var p2v: Float = 2.0
+    while p2e < 256:
+        mem_store(ptr_offset(p2t, p2e, "Float"), p2v, "Float")
+        p2v = p2v * 2.0
+        p2e = p2e + 1
+    p2e = 126
+    p2v = 0.5
+    while p2e >= 0:
+        mem_store(ptr_offset(p2t, p2e, "Float"), p2v, "Float")
+        p2v = p2v * 0.5
+        p2e = p2e - 1
+    let mut x: ptr<Float> = alloc_zeroed(n, "Float")
+    var di: Int = 0
+    while di < n:
+        let o: Int = di * 4
+        let bits: Int = bref(raw, o) + bref(raw, o + 1) * 256 + bref(raw, o + 2) * 65536 + bref(raw, o + 3) * 16777216
+        mem_store(ptr_offset(x, di, "Float"), f32bits_to_float(bits, p2t), "Float")
+        di = di + 1
+    decay raw
+    decay p2t
+    let t_dec1: Int = now_millis()
+    let fcells: Int = dm_trials * NW
+    let mut fgsig: ptr<Float> = alloc_zeroed(fcells, "Float")
+    let mut fgtt: ptr<Int> = alloc_zeroed(fcells, "Int")
+    let mut fbest: ptr<Int> = alloc_zeroed(4, "Int")
+    let t_b0: Int = now_millis()
+    let best100: Int = run_bank(x, n, fs, f0_mhz, bw_mhz, dm_trials, dm_max, fgsig, fgtt, fbest)
+    let t_b1: Int = now_millis()
+    decay x
+    let bdm: Int = mem_load(ptr_offset(fbest, 0, "Int"), "Int")
+    let bw: Int = mem_load(ptr_offset(fbest, 1, "Int"), "Int")
+    let bt: Int = mem_load(ptr_offset(fbest, 3, "Int"), "Int")
+    var verdict: String = "CLEAN"
+    if shot_ok(best100, thresh_x100):
+        verdict = "SHOT"
+    println("bank: best sigma_x100=" + str(best100) + " dm_x100=" + str(bdm) + " w=" + str(bw) + " t=" + str(bt) + " verdict=" + verdict)
+    println("bank: timing ms decode=" + str(t_dec1 - t_dec0) + " detect=" + str(t_b1 - t_b0))
+    // Tables: same columns, pipes vs commas. Scaled ints only.
+    var md: String = "| dm | width | sigma_x100 | t | verdict |\n"
+    md = md + "|---|---|---|---|---|\n"
+    var csv: String = "dm,width,sigma_x100,t,verdict\n"
+    var gi2: Int = 0
+    while gi2 < fcells:
+        let dmi2: Int = gi2 / NW
+        let wii: Int = gi2 % NW
+        var dmv: Float = 0.0
+        if dm_trials > 1:
+            dmv = dm_max * (dmi2 as Float) / ((dm_trials - 1) as Float)
+        let dm100: Int = (dmv * 100.0) as Int
+        let wv: Int = WIDTHS[wii]
+        let sv: Int = sig_clamp100(mem_load(ptr_offset(fgsig, gi2, "Float"), "Float"))
+        let tv: Int = mem_load(ptr_offset(fgtt, gi2, "Int"), "Int")
+        var rv: String = "-"
+        if shot_ok(sv, thresh_x100):
+            rv = "SHOT"
+        md = md + "| " + str(dm100) + " | " + str(wv) + " | " + str(sv) + " | " + str(tv) + " | " + rv + " |\n"
+        csv = csv + str(dm100) + "," + str(wv) + "," + str(sv) + "," + str(tv) + "," + rv + "\n"
+        gi2 = gi2 + 1
+    decay fgsig
+    decay fgtt
+    decay fbest
+    decay nslot
+    var want_md: Int = 0
+    var want_csv: Int = 0
+    if format == "md":
+        want_md = 1
+    elif format == "csv":
+        want_csv = 1
+    else:
+        want_md = 1
+        want_csv = 1
+    if want_md == 1:
+        if write_text_file(outn + ".md", md) != 0:
+            println("boxcar_bank: md write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        println("bank: wrote " + outn + ".md rows=" + str(fcells))
+    if want_csv == 1:
+        if write_text_file(outn + ".csv", csv) != 0:
+            println("boxcar_bank: csv write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        println("bank: wrote " + outn + ".csv rows=" + str(fcells))
+    if json == 1:
+        println("{\"tool\": \"boxcar_bank\", \"version\": \"0.1.0\", \"best_sigma_x100\": " + str(best100) + ", \"best_dm_x100\": " + str(bdm) + ", \"best_width\": " + str(bw) + ", \"best_t\": " + str(bt) + ", \"verdict\": \"" + verdict + "\"}")
+    println("receipt=PASS best_x100=" + str(best100) + " verdict=" + verdict)
+    return EXIT_OK

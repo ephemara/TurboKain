@@ -1,0 +1,680 @@
+// ============================================================================
+// fold_sum.kn — TurboKain 04: periodicity folding search (pulsar_fold parity)
+//
+// Mirrors python/pulsar_fold.py detect() exactly (blind spot #1: the pipeline
+// was deaf to pulsars — no folding, no harmonic sum):
+//   1. power envelope env = x^2, decimated to env_fs ~ 6 kHz
+//      (dec = round(fs/6000), block means)
+//   2. env -= mean, x Hann window
+//   3. nfft = 2^ceil(log2(4*len)), rfft, P = |.|^2
+//   4. whiten by running median w=201 (red-noise robust; exact median via
+//      insertion sort per bin — slow but exact, lanes later)
+//   5. harmonic sum H(f0) = sum_h=1..8 Q(round(f0*h/df))/sqrt(h),
+//      f0 in 1..2000 Hz — computed under share/fanout over 32 workers
+//      (rayon_parallel_reduce shape: disjoint H ranges, no atomics)
+//   6. sigma = (H-med)/(1.4826*MAD), threshold 16 (prove-calibrated:
+//      8-draw noise max ~10.8, weakest inject 3400+)
+//   7. top-8 with 2% dedupe
+//
+// Known caveats carried over (do not "fix" silently):
+//   * envelope methods report bright transient envelopes as rotation on
+//     sub-second slices; periods longer than the span are meaningless.
+//   * single-channel DM is a proxy (transient_dm covers sweeps).
+//
+// Input: .f32 float32-LE (slice.exe output), fs = 2929687.5 Hz.
+// Output: md table of top candidates + --csv mirror.
+//
+//   fold_sum --in <f32> [--out fold.md] [--csv fold.csv] [--topk N]
+//            [--data-dir D] [--json]
+//   fold_sum <f32> [out.md]
+//
+// Exit codes: 0 searched, 1 help, 2 error. A non-detection with a floor is
+// a successful run — report sigma_max and coverage, never adjectives.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+// ── kernel32 file API (same black-magic IO — no fs bridge) ──────────────────
+@extern @link_name("CreateFileA")
+fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
+
+@extern @link_name("ReadFile")
+fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("GetFileSizeEx")
+fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
+
+@extern @link_name("CloseHandle")
+fn k_CloseHandle(h: ptr<Void>) -> Int
+
+@extern @link_name("GetLastError")
+fn k_GetLastError() -> Int
+
+fn null_ptr() -> ptr<Void> with Pure:
+    return int_to_ptr(0, "ptr<Void>")
+
+const GEN_READ: Int = 2147483648
+const OPEN_EXISTING: Int = 3
+const FILE_NORMAL: Int = 128
+const FILE_SHARE_RW: Int = 3
+
+const EXIT_OK: Int = 0
+const EXIT_HELP: Int = 1
+const EXIT_ERROR: Int = 2
+
+// ── Search geometry (pulsar_fold.py, calibrated — not tuned here) ───────────
+const FS_HZ: Float = 2929687.5
+const ENV_FS: Float = 6000.0
+const FMIN: Float = 1.0
+const FMAX: Float = 2000.0
+const HARMS: Int = 8
+const SIGMA_THRESH: Float = 16.0
+const TOPK: Int = 8
+const WHITEN_W: Int = 201
+const WORKERS: Int = 32
+const SK_PI2: Float = 6.283185307179586
+
+fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
+    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
+
+fn parse_int_text(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var sign: Int = 1
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = -1
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var value: Int = 0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        var digit: Int = 0
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return value * sign
+        value = value * 10 + digit
+        index = index + 1
+    return value * sign
+
+fn find_from(hay: String, needle: String, start: Int) -> Int:
+    let hn: Int = len(hay)
+    let nn: Int = len(needle)
+    if nn == 0:
+        return start
+    var i: Int = start
+    if i < 0:
+        i = 0
+    while i + nn <= hn:
+        var j: Int = 0
+        var hit: Int = 1
+        while j < nn:
+            if char_at(hay, i + j) != char_at(needle, j):
+                hit = 0
+            j = j + 1
+        if hit == 1:
+            return i
+        i = i + 1
+    return -1
+
+// Exact f32-LE quad → Float via 2^e table (T[j] = 2^(j-126)).
+fn f32_of_quad(b0: Int, b1: Int, b2: Int, b3: Int, p2t: ptr<Float>) -> Float with Unsafe:
+    let bits: Int = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+    if bits == 0:
+        return 0.0
+    let sign: Int = bits >> 31
+    let exp: Int = (bits >> 23) & 255
+    let mant: Int = bits & 8388607
+    if exp == 0 or exp == 255:
+        return 0.0
+    let frac: Float = 1.0 + (mant as Float) / 8388608.0
+    var v: Float = frac * mem_load(ptr_offset(p2t, exp - 1, "Float"), "Float")
+    if sign == 1:
+        v = 0.0 - v
+    return v
+
+// ── Radix-2 DIT FFT, in-place (same вендор as sk_gate — exact, lanes later) ─
+fn sk_bitrev(re: ptr<Float>, im: ptr<Float>, n: Int) with Unsafe:
+    var j: Int = 0
+    var i: Int = 1
+    while i < n:
+        var bit: Int = n / 2
+        while bit > 0:
+            if j >= bit:
+                j = j - bit
+                bit = bit / 2
+            else:
+                break
+        j = j + bit
+        if i < j:
+            let tr: Float = mem_load(ptr_offset(re, i, "Float"), "Float")
+            let ti: Float = mem_load(ptr_offset(im, i, "Float"), "Float")
+            mem_store(ptr_offset(re, i, "Float"), mem_load(ptr_offset(re, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(im, i, "Float"), mem_load(ptr_offset(im, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(re, j, "Float"), tr, "Float")
+            mem_store(ptr_offset(im, j, "Float"), ti, "Float")
+        i = i + 1
+    return
+
+fn sk_fft(re: ptr<Float>, im: ptr<Float>, n: Int) -> Int with Unsafe:
+    sk_bitrev(re, im, n)
+    var size: Int = 2
+    while size <= n:
+        let half_size: Int = size / 2
+        let step: Float = 0.0 - SK_PI2 / (size as Float)
+        var i: Int = 0
+        while i < n:
+            var k: Int = 0
+            var j: Int = i
+            while j < i + half_size:
+                let ang: Float = (k as Float) * step
+                let cw: Float = cos(ang)
+                let sw: Float = sin(ang)
+                let ar: Float = mem_load(ptr_offset(re, j + half_size, "Float"), "Float")
+                let ai: Float = mem_load(ptr_offset(im, j + half_size, "Float"), "Float")
+                let tpre: Float = cw * ar - sw * ai
+                let tpim: Float = sw * ar + cw * ai
+                let xr: Float = mem_load(ptr_offset(re, j, "Float"), "Float")
+                let xi: Float = mem_load(ptr_offset(im, j, "Float"), "Float")
+                mem_store(ptr_offset(re, j, "Float"), xr + tpre, "Float")
+                mem_store(ptr_offset(im, j, "Float"), xi + tpim, "Float")
+                mem_store(ptr_offset(re, j + half_size, "Float"), xr - tpre, "Float")
+                mem_store(ptr_offset(im, j + half_size, "Float"), xi - tpim, "Float")
+                k = k + 1
+                j = j + 1
+            i = i + size
+        size = size * 2
+    return 0
+
+// 1/sqrt(h) harmonic weight (pulsar duty-cycle gain).
+fn hw_of(hm: Int) -> Float:
+    return 1.0 / sqrt(hm as Float)
+
+// Exact median of arena[0..n) via insertion sort into scratch (n <= 512 here).
+fn median_of(buf: ptr<Float>, scratch: ptr<Float>, n: Int) -> Float with Unsafe:
+    var i: Int = 0
+    while i < n:
+        mem_store(ptr_offset(scratch, i, "Float"), mem_load(ptr_offset(buf, i, "Float"), "Float"), "Float")
+        i = i + 1
+    var a: Int = 1
+    while a < n:
+        let key: Float = mem_load(ptr_offset(scratch, a, "Float"), "Float")
+        var b: Int = a - 1
+        var moved: Int = 0
+        while b >= 0:
+            if mem_load(ptr_offset(scratch, b, "Float"), "Float") > key:
+                mem_store(ptr_offset(scratch, b + 1, "Float"), mem_load(ptr_offset(scratch, b, "Float"), "Float"), "Float")
+                b = b - 1
+                moved = 1
+            else:
+                break
+        if moved == 1:
+            mem_store(ptr_offset(scratch, b + 1, "Float"), key, "Float")
+        a = a + 1
+    return mem_load(ptr_offset(scratch, n / 2, "Float"), "Float")
+
+// Harmonic grid under share/fanout (rayon shape). Lives in its own fn
+// because fanout bodies capture params, not enclosing lets.
+fn harmonic_grid(qi: ptr<Int>, i0: Int, nf0: Int, nbins: Int, df: Float) -> ptr<Int> with Unsafe:
+    let mut hbi: ptr<Int> = alloc_zeroed(nf0, "Int")
+    share hbi:
+        fanout worker in 0..WORKERS:
+            let c0: Int = i0 + (worker * nf0) / WORKERS
+            let c1: Int = i0 + ((worker + 1) * nf0) / WORKERS
+            var g: Int = c0
+            while g < c1:
+                let f0: Float = (g as Float) * df
+                var hs: Float = 0.0
+                var hm: Int = 1
+                while hm <= HARMS:
+                    var idx: Int = (f0 * (hm as Float) / df + 0.5) as Int
+                    if idx < 0:
+                        idx = 0
+                    if idx >= nbins:
+                        idx = nbins - 1
+                    let qv: Float = (atomic_load(ptr_offset(qi, idx, "Int")) as Float) / 1000.0
+                    hs = hs + qv * hw_of(hm)
+                    hm = hm + 1
+                atomic_store(ptr_offset(hbi, g - i0, "Int"), (hs * 1000000.0) as Int)
+                g = g + 1
+    return hbi
+
+fn usage() -> String:
+    var t: String = "fold_sum 0.1.0 — TurboKain periodicity search (pulsar_fold parity)\n"
+    t = t + "envelope + decimate + Hann + FFT + median-whiten + 8-harmonic sum\n"
+    t = t + "under share/fanout, 16-sigma gate, top-8 with 2% dedupe.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  fold_sum --in <f32> [--out fold.md] [--csv fold.csv] [--topk N]\n"
+    t = t + "           [--data-dir D] [--json]\n"
+    t = t + "  fold_sum <f32> [out.md]\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 searched, 1 help, 2 error.\n"
+    return t
+
+fn main() -> Int with Unsafe:
+    let args: Array<String> = process_user_args()
+    var in_path: String = ""
+    var data_dir: String = ""
+    var out_path: String = ""
+    var csv_path: String = ""
+    var topk: Int = TOPK
+    var json: Int = 0
+    var show_help: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--json":
+            json = 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif a == "--topk":
+            if i + 1 < len(args):
+                topk = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    var pi: Int = 0
+    while pi < len(pos):
+        let p: String = pos[pi]
+        if pi == 0:
+            if in_path == "":
+                in_path = p
+        elif pi == 1:
+            if out_path == "":
+                out_path = p
+        pi = pi + 1
+
+    if show_help == 1:
+        print(usage())
+        return EXIT_HELP
+    if topk <= 0 or topk > 64:
+        topk = TOPK
+
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+    if in_path != "":
+        if data_dir != "":
+            if find_from(in_path, ":", 0) < 0:
+                if len(in_path) > 0:
+                    if char_at(in_path, 0) != "/":
+                        in_path = data_dir + "/" + in_path
+    if in_path == "":
+        println("fold_sum: no input. usage: fold_sum --in <f32> [--out fold.md]")
+        return EXIT_ERROR
+
+    // ── Load .f32 via handle, decode to Float arena ──
+    let h: ptr<Void> = k_CreateFileA(in_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h) == -1:
+        println("fold_sum: open fail err=" + str(k_GetLastError()) + ": " + in_path)
+        return EXIT_ERROR
+    let szslot: ptr<Int> = alloc_zeroed(1, "Int")
+    var fsize: Int = -1
+    if k_GetFileSizeEx(h, szslot) != 0:
+        fsize = mem_load(szslot, "Int")
+    decay szslot
+    if fsize < 64:
+        println("fold_sum: file too small")
+        return EXIT_ERROR
+    let nsamp: Int = fsize / 4
+    let mut rawbuf: ptr<Byte> = alloc_zeroed(fsize + 16, "Byte")
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(nslot, 0, "Int")
+    let rok: Int = k_ReadFile(h, rawbuf, fsize, nslot, null_ptr())
+    let got: Int = mem_load(nslot, "Int")
+    let _ch: Int = k_CloseHandle(h)
+    if rok == 0 or got < fsize:
+        println("fold_sum: short read")
+        return EXIT_ERROR
+
+    let mut p2t: ptr<Float> = alloc_zeroed(254, "Float")
+    var pv: Float = 1.0
+    var di: Int = 0
+    while di < 126:
+        pv = pv / 2.0
+        di = di + 1
+    var pj: Int = 0
+    while pj < 254:
+        mem_store(ptr_offset(p2t, pj, "Float"), pv, "Float")
+        pv = pv * 2.0
+        pj = pj + 1
+    let mut xbuf: ptr<Float> = alloc_zeroed(nsamp, "Float")
+    var ds: Int = 0
+    while ds < nsamp:
+        let v: Float = f32_of_quad(bref(rawbuf, ds * 4), bref(rawbuf, ds * 4 + 1), bref(rawbuf, ds * 4 + 2), bref(rawbuf, ds * 4 + 3), p2t)
+        mem_store(ptr_offset(xbuf, ds, "Float"), v, "Float")
+        ds = ds + 1
+    decay rawbuf
+    decay p2t
+
+    // ── Envelope + decimate to ~6 kHz ──
+    var dec: Int = 488
+    let fest: Float = FS_HZ / ENV_FS
+    dec = (fest + 0.5) as Int
+    if dec < 1:
+        dec = 1
+    dec = dec / 2 * 2
+    if dec < 2:
+        dec = 2
+    let n: Int = nsamp / dec * dec
+    if n < dec * 64:
+        println("fold_sum: too short after decimation")
+        return EXIT_ERROR
+    let nenv: Int = n / dec
+    let mut env: ptr<Float> = alloc_zeroed(nenv, "Float")
+    var ei: Int = 0
+    while ei < nenv:
+        var acc: Float = 0.0
+        var k: Int = 0
+        while k < dec:
+            let xv: Float = mem_load(ptr_offset(xbuf, ei * dec + k, "Float"), "Float")
+            acc = acc + xv * xv
+            k = k + 1
+        mem_store(ptr_offset(env, ei, "Float"), acc / (dec as Float), "Float")
+        ei = ei + 1
+    decay xbuf
+    var emean: Float = 0.0
+    ei = 0
+    while ei < nenv:
+        emean = emean + mem_load(ptr_offset(env, ei, "Float"), "Float")
+        ei = ei + 1
+    emean = emean / (nenv as Float)
+    // Hann + demean in place.
+    ei = 0
+    while ei < nenv:
+        let w: Float = 0.5 * (1.0 - cos(SK_PI2 * (ei as Float) / ((nenv - 1) as Float)))
+        let ev: Float = mem_load(ptr_offset(env, ei, "Float"), "Float")
+        mem_store(ptr_offset(env, ei, "Float"), (ev - emean) * w, "Float")
+        ei = ei + 1
+
+    // ── nfft + rfft power ──
+    var nfft: Int = 16
+    while nfft < nenv * 4:
+        nfft = nfft * 2
+    let mut re: ptr<Float> = alloc_zeroed(nfft, "Float")
+    let mut im: ptr<Float> = alloc_zeroed(nfft, "Float")
+    var fi: Int = 0
+    while fi < nenv:
+        mem_store(ptr_offset(re, fi, "Float"), mem_load(ptr_offset(env, fi, "Float"), "Float"), "Float")
+        fi = fi + 1
+    decay env
+    let t_fft0: Int = now_millis()
+    let frc: Int = sk_fft(re, im, nfft)
+    if frc != 0:
+        println("fold_sum: fft fail")
+        return EXIT_ERROR
+    let nbins: Int = nfft / 2 + 1
+    let mut pw: ptr<Float> = alloc_zeroed(nbins, "Float")
+    var bw: Int = 0
+    while bw < nbins:
+        let rv: Float = mem_load(ptr_offset(re, bw, "Float"), "Float")
+        let iv: Float = mem_load(ptr_offset(im, bw, "Float"), "Float")
+        mem_store(ptr_offset(pw, bw, "Float"), rv * rv + iv * iv, "Float")
+        bw = bw + 1
+    decay re
+    decay im
+
+    // ── Whiten by running median w=201 ──
+    let mut qw: ptr<Float> = alloc_zeroed(nbins, "Float")
+    let mut win: ptr<Float> = alloc_zeroed(WHITEN_W, "Float")
+    let mut scratch: ptr<Float> = alloc_zeroed(WHITEN_W, "Float")
+    let half_w: Int = WHITEN_W / 2
+    bw = 0
+    while bw < nbins:
+        var w0: Int = bw - half_w
+        if w0 < 0:
+            w0 = 0
+        var w1: Int = bw + half_w
+        if w1 >= nbins:
+            w1 = nbins - 1
+        let wn: Int = w1 - w0 + 1
+        var wk: Int = 0
+        while wk < wn:
+            mem_store(ptr_offset(win, wk, "Float"), mem_load(ptr_offset(pw, w0 + wk, "Float"), "Float"), "Float")
+            wk = wk + 1
+        let med: Float = median_of(win, scratch, wn)
+        var floorv: Float = med
+        if floorv <= 0.0:
+            floorv = 0.000000000000000000000000000001
+        mem_store(ptr_offset(qw, bw, "Float"), mem_load(ptr_offset(pw, bw, "Float"), "Float") / floorv, "Float")
+        bw = bw + 1
+    decay pw
+    // Bisect: median(Q) must be ~1.0 by construction (whitened).
+    decay win
+    decay scratch
+
+    // ── Harmonic sum under share/fanout over the f0 grid ──
+    let env_fs: Float = FS_HZ / (dec as Float)
+    let df: Float = env_fs / (nfft as Float)
+    var i0: Int = 2
+    let ci0: Int = (FMIN / df + 0.5) as Int
+    if ci0 > i0:
+        i0 = ci0
+    var i1: Int = nbins - HARMS - 1
+    let ci1: Int = (FMAX / df + 0.5) as Int
+    if ci1 < i1:
+        i1 = ci1
+    if i1 <= i0:
+        println("fold_sum: band empty")
+        return EXIT_ERROR
+    let nf0: Int = i1 - i0 + 1
+    // Fixed-point Q/H for share-scope atomics (v1 atomics are Int-only):
+    // Qi = Q*1000, Hi = H*1e6. Precision cost ~1e-3 relative, sigma needs 1e-2.
+    let mut qi: ptr<Int> = alloc_zeroed(nbins, "Int")
+    var qb: Int = 0
+    while qb < nbins:
+        mem_store(ptr_offset(qi, qb, "Int"), (mem_load(ptr_offset(qw, qb, "Float"), "Float") * 1000.0) as Int, "Int")
+        qb = qb + 1
+    decay qw
+    let hbi: ptr<Int> = harmonic_grid(qi, i0, nf0, nbins, df)
+    decay qi
+    // Float H back for the scalar reduce.
+    let mut hbuf: ptr<Float> = alloc_zeroed(nf0, "Float")
+    var hc: Int = 0
+    while hc < nf0:
+        mem_store(ptr_offset(hbuf, hc, "Float"), (mem_load(ptr_offset(hbi, hc, "Int"), "Int") as Float) / 1000000.0, "Float")
+        hc = hc + 1
+    decay hbi
+    decay hbi
+
+    // ── Sigma vs MAD floor (scalar reduce) ──
+    let mut hsort: ptr<Float> = alloc_zeroed(nf0, "Float")
+    let mut htmp: ptr<Float> = alloc_zeroed(nf0, "Float")
+    var hi: Int = 0
+    while hi < nf0:
+        mem_store(ptr_offset(hsort, hi, "Float"), mem_load(ptr_offset(hbuf, hi, "Float"), "Float"), "Float")
+        hi = hi + 1
+    let med: Float = median_of(hsort, htmp, nf0)
+    var dev: ptr<Float> = alloc_zeroed(nf0, "Float")
+    hi = 0
+    while hi < nf0:
+        var d: Float = mem_load(ptr_offset(hbuf, hi, "Float"), "Float") - med
+        if d < 0.0:
+            d = 0.0 - d
+        mem_store(ptr_offset(dev, hi, "Float"), d, "Float")
+        hi = hi + 1
+    let mad: Float = median_of(dev, htmp, nf0)
+    decay htmp
+    decay hsort
+    var spread: Float = 1.4826 * mad
+    if spread <= 0.0:
+        spread = 0.000000000001
+    var best_f: Float = 0.0
+    var best_s: Float = -1.0
+    hi = 0
+    while hi < nf0:
+        let s: Float = (mem_load(ptr_offset(hbuf, hi, "Float"), "Float") - med) / spread
+        if s > best_s:
+            best_s = s
+            best_f = (hi + i0) as Float * df
+        hi = hi + 1
+    var detected: Int = 0
+    if best_s >= SIGMA_THRESH:
+        detected = 1
+
+    // ── Top-k with 2% dedupe ──
+    var md: String = "| rank | freq_hz_x100 | period_ms_x100 | sigma_x100 | detected |\n"
+    md = md + "|---|---|---|---|---|\n"
+    var found: Int = 0
+    var seen0: Float = -1.0
+    var seen1: Float = -1.0
+    var seen2: Float = -1.0
+    var seen3: Float = -1.0
+    var seen4: Float = -1.0
+    var seen5: Float = -1.0
+    var seen6: Float = -1.0
+    var seen7: Float = -1.0
+    var rounds: Int = 0
+    while found < topk and rounds < topk + 64:
+        var bf: Float = 0.0
+        var bs: Float = -999999999.0
+        var bi: Int = -1
+        hi = 0
+        while hi < nf0:
+            let ff: Float = (hi + i0) as Float * df
+            var dup: Int = 0
+            if seen0 > 0.0 and ff > 0.0:
+                let r0: Float = (ff - seen0) / seen0
+                if r0 < 0.0:
+                    if r0 > -0.02:
+                        dup = 1
+                elif r0 < 0.02:
+                    dup = 1
+            if seen1 > 0.0 and dup == 0:
+                let r1: Float = (ff - seen1) / seen1
+                if r1 < 0.0:
+                    if r1 > -0.02:
+                        dup = 1
+                elif r1 < 0.02:
+                    dup = 1
+            if seen2 > 0.0 and dup == 0:
+                let r2: Float = (ff - seen2) / seen2
+                if r2 < 0.0:
+                    if r2 > -0.02:
+                        dup = 1
+                elif r2 < 0.02:
+                    dup = 1
+            if seen3 > 0.0 and dup == 0:
+                let r3: Float = (ff - seen3) / seen3
+                if r3 < 0.0:
+                    if r3 > -0.02:
+                        dup = 1
+                elif r3 < 0.02:
+                    dup = 1
+            if seen4 > 0.0 and dup == 0:
+                let r4: Float = (ff - seen4) / seen4
+                if r4 < 0.0:
+                    if r4 > -0.02:
+                        dup = 1
+                elif r4 < 0.02:
+                    dup = 1
+            if seen5 > 0.0 and dup == 0:
+                let r5: Float = (ff - seen5) / seen5
+                if r5 < 0.0:
+                    if r5 > -0.02:
+                        dup = 1
+                elif r5 < 0.02:
+                    dup = 1
+            if seen6 > 0.0 and dup == 0:
+                let r6: Float = (ff - seen6) / seen6
+                if r6 < 0.0:
+                    if r6 > -0.02:
+                        dup = 1
+                elif r6 < 0.02:
+                    dup = 1
+            if seen7 > 0.0 and dup == 0:
+                let r7: Float = (ff - seen7) / seen7
+                if r7 < 0.0:
+                    if r7 > -0.02:
+                        dup = 1
+                elif r7 < 0.02:
+                    dup = 1
+            if dup == 0:
+                let s: Float = (mem_load(ptr_offset(hbuf, hi, "Float"), "Float") - med) / spread
+                if s > bs:
+                    bs = s
+                    bf = ff
+                    bi = hi
+            hi = hi + 1
+        if bi < 0:
+            break
+        if found == 0:
+            seen0 = bf
+        elif found == 1:
+            seen1 = bf
+        elif found == 2:
+            seen2 = bf
+        elif found == 3:
+            seen3 = bf
+        elif found == 4:
+            seen4 = bf
+        elif found == 5:
+            seen5 = bf
+        elif found == 6:
+            seen6 = bf
+        else:
+            seen7 = bf
+        md = md + "| " + str(found + 1) + " | " + str(bf * 100.0) + " | " + str(100000.0 / bf) + " | " + str(bs * 100.0) + " | " + str(detected) + " |\n"
+        found = found + 1
+        rounds = rounds + 1
+    decay hbuf
+    decay dev
+    decay nslot
+    println(md)
+    if out_path != "":
+        fs_write_text(out_path, md)
+    if csv_path != "":
+        var csv: String = "rank,freq_hz_x100,period_ms_x100,sigma_x100,detected\n"
+        csv = csv + "1," + str(best_f * 100.0) + "," + str(100000.0 / best_f) + "," + str(best_s * 100.0) + "," + str(detected) + "\n"
+        fs_write_text(csv_path, csv)
+    println("fold_sum: dbg med_x1e6=" + str(med * 1000000.0) + " mad_x1e6=" + str(mad * 1000000.0) + " nf0=" + str(nf0) + " nfft=" + str(nfft) + " df_x1e6=" + str(df * 1000000.0))
+    println("fold_sum: best_f=" + str(best_f * 100.0) + " best_sig_x100=" + str(best_s * 100.0) + " detected=" + str(detected))
+    println("receipt=PASS searched=1 detected=" + str(detected))
+    return EXIT_OK
