@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Treat .kn files as Rust for syntax highlighting, linguist stats, and LLM code scrapers
+*.kn linguist-language=Rust
+*.kn text
+*.KN text
