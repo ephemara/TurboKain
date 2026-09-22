@@ -65,6 +65,12 @@ const EXIT_ERROR: Int = 2
 
 const SEG_DEFAULT: Int = 32768
 const TOPK_DEFAULT: Int = 15
+const TBD_D_DEFAULT: Int = 2
+const TBD_MAXSEGS: Int = 256
+// TBD score gate x100: noise floor measured 484/486/498 (3 seeds, 1M-sample
+// matched noise, 32 segs) → default 750 ≈ max-noise x 1.5. Chirp prove
+// scores 3651 (separation 500x). Provisional pending wider calibration.
+const TBD_SNR_DEFAULT_X100: Int = 750
 const SK_PI2: Float = 6.283185307179586
 const LN2ish: Float = 0.6931471805599453
 const LOG10E: Float = 2.302585092994046
@@ -419,6 +425,46 @@ fn pfwe_of(ratio: Float, m: Float, nb: Int) -> Float:
         return p * Nf
     return 1.0 - exp(Nf * log(1.0 - p))
 
+// ── md table row helpers (cadence table contract, copied pattern) ───────────
+fn row_cells(row: String) -> Array<String>:
+    let parts: Array<String> = text_split_string(row, "|")
+    var cells: Array<String> = []
+    var i: Int = 0
+    while i < len(parts):
+        let c: String = text_trim_string(parts[i])
+        if len(c) > 0:
+            push(cells, c)
+        i = i + 1
+    return cells
+
+fn is_sep_row(row: String) -> Int:
+    let cells: Array<String> = row_cells(row)
+    if len(cells) == 0:
+        return 1
+    var i: Int = 0
+    while i < len(cells):
+        let c: String = cells[i]
+        var k: Int = 0
+        var alldash: Int = 1
+        if len(c) == 0:
+            alldash = 0
+        while k < len(c):
+            if char_at(c, k) != "-":
+                alldash = 0
+            k = k + 1
+        if alldash == 0:
+            return 0
+        i = i + 1
+    return 1
+
+fn col_index(header: Array<String>, name: String) -> Int:
+    var i: Int = 0
+    while i < len(header):
+        if header[i] == name:
+            return i
+        i = i + 1
+    return -1
+
 // ── Quickselect (boxcar pattern; upper-middle for even n) ───────────────────
 fn qs_partition(a: ptr<Float>, lo: Int, hi: Int) -> Int with Unsafe:
     let piv: Float = mem_load(ptr_offset(a, hi, "Float"), "Float")
@@ -450,13 +496,14 @@ fn quickselect_k(a: ptr<Float>, n: Int, k: Int) -> Float with Unsafe:
     return mem_load(ptr_offset(a, k, "Float"), "Float")
 
 fn usage() -> String:
-    var t: String = "fam_god 0.4.0 — TurboKain god-mode cyclo hunter (ONE file)\n"
+    var t: String = "fam_god 0.5.0 — TurboKain god-mode cyclo hunter (ONE file)\n"
     t = t + "twiddle FFT lanes + exact chi-square floor (trials-corrected) +\n"
     t = t + "SEG bank. Peak lists identical to fam_scan; numbers principled.\n"
     t = t + "\n"
     t = t + "USAGE:\n"
     t = t + "  fam_god --in <f32> [--fs HZ] [--seg N] [--segbank] [--topk K]\n"
-    t = t + "          [--pfwe P] [--cand path] [--out fam.md] [--csv fam.csv]\n"
+    t = t + "          [--pfwe P] [--drift D] [--tbdsnr S] [--journal J]\n"
+    t = t + "          [--cand path] [--out fam.md] [--csv fam.csv]\n"
     t = t + "          [--data-dir D] [--json]\n"
     t = t + "  fam_god <f32> [fs] [seg] [topK] [candpath|-]\n"
     t = t + "\n"
@@ -479,6 +526,9 @@ fn main() -> Int with Unsafe:
     var topk: Int = TOPK_DEFAULT
     var topk_set: Int = 0
     var pfwe_gate: Float = 0.01
+    var journal_path: String = ""
+    var drift_max: Int = TBD_D_DEFAULT
+    var tbd_gate_x100: Int = TBD_SNR_DEFAULT_X100
     var json: Int = 0
     var show_help: Int = 0
     var pos: Array<String> = []
@@ -529,6 +579,18 @@ fn main() -> Int with Unsafe:
             if i + 1 < len(args):
                 pfwe_gate = parse_float_text(args[i + 1])
                 i = i + 1
+        elif a == "--journal":
+            if i + 1 < len(args):
+                journal_path = args[i + 1]
+                i = i + 1
+        elif a == "--drift":
+            if i + 1 < len(args):
+                drift_max = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--tbdsnr":
+            if i + 1 < len(args):
+                tbd_gate_x100 = parse_int_text(args[i + 1])
+                i = i + 1
         elif a == "--data-dir":
             if i + 1 < len(args):
                 data_dir = args[i + 1]
@@ -567,8 +629,12 @@ fn main() -> Int with Unsafe:
         return EXIT_HELP
     if topk <= 0 or topk > 256:
         topk = TOPK_DEFAULT
-    if pfwe_gate <= 0.0 or pfwe_gate > 1.0:
-        pfwe_gate = 0.01
+    if drift_max < 0:
+        drift_max = TBD_D_DEFAULT
+    if drift_max > 16:
+        drift_max = 16
+    if tbd_gate_x100 <= 0:
+        tbd_gate_x100 = TBD_SNR_DEFAULT_X100
     if seg < 64:
         seg = SEG_DEFAULT
     var pw2: Int = 1
@@ -657,6 +723,24 @@ fn main() -> Int with Unsafe:
     var csv: String = "tag,seg,rank,bin,alpha_hz_x100,ratio_x100,log10p_x100,hit\n"
     var cand_txt: String = ""
     var file_hit: Int = 0
+    // TBD rides the first SEG in the list (8k in bank mode — where weak
+    // lines live). Pmat holds per-seg powers for tag Y2 only.
+    var fseg0: Int = seglist[0]
+    var nb0: Int = fseg0 / 2 + 1
+    var ntbd: Int = nsamp / fseg0
+    if ntbd > TBD_MAXSEGS:
+        ntbd = TBD_MAXSEGS
+    let mut pmat: ptr<Float> = alloc_zeroed(ntbd * nb0, "Float")
+    // Peak store for the journal (tag, seg, bin per emitted row).
+    let mut pk_tag: ptr<Int> = alloc_zeroed(4096, "Int")
+    let mut pk_seg: ptr<Int> = alloc_zeroed(4096, "Int")
+    let mut pk_bin: ptr<Int> = alloc_zeroed(4096, "Int")
+    let mut pk_rank: ptr<Int> = alloc_zeroed(4096, "Int")
+    let mut pk_alpha: ptr<Int> = alloc_zeroed(4096, "Int")
+    let mut pk_ratio: ptr<Int> = alloc_zeroed(4096, "Int")
+    let mut pk_logp: ptr<Int> = alloc_zeroed(4096, "Int")
+    let mut pk_hit: ptr<Int> = alloc_zeroed(4096, "Int")
+    var pk_n: Int = 0
     var t_scan0: Int = now_millis()
     var si: Int = 0
     while si < len(seglist):
@@ -671,10 +755,12 @@ fn main() -> Int with Unsafe:
             let mut tws: ptr<Float> = alloc_zeroed(cseg, "Float")
             let _tw: Int = build_twiddles(cseg, twc, tws)
             var tag: Int = 0
-            while tag < 2:
+            while tag < 3:
                 var tagname: String = "Y2"
                 if tag == 1:
                     tagname = "Y4"
+                elif tag == 2:
+                    tagname = "Y6"
                 let mut acc: ptr<Float> = alloc_zeroed(nbins, "Float")
                 var s: Int = 0
                 while s < nseg:
@@ -694,23 +780,45 @@ fn main() -> Int with Unsafe:
                             mem_store(ptr_offset(im, k, "Float"), 0.0, "Float")
                             k = k + 1
                     else:
-                        var k: Int = 0
-                        while k < cseg:
-                            let v: Float = mem_load(ptr_offset(xbuf, base + k, "Float"), "Float")
-                            let y: Float = v * v - m2
-                            mem_store(ptr_offset(re, k, "Float"), y * y, "Float")
-                            mem_store(ptr_offset(im, k, "Float"), 0.0, "Float")
-                            k = k + 1
-                        var m: Float = 0.0
-                        k = 0
-                        while k < cseg:
-                            m = m + mem_load(ptr_offset(re, k, "Float"), "Float")
-                            k = k + 1
-                        m = m / (cseg as Float)
-                        k = 0
-                        while k < cseg:
-                            mem_store(ptr_offset(re, k, "Float"), mem_load(ptr_offset(re, k, "Float"), "Float") - m, "Float")
-                            k = k + 1
+                        if tag == 1:
+                            var k: Int = 0
+                            while k < cseg:
+                                let v: Float = mem_load(ptr_offset(xbuf, base + k, "Float"), "Float")
+                                let y: Float = v * v - m2
+                                mem_store(ptr_offset(re, k, "Float"), y * y, "Float")
+                                mem_store(ptr_offset(im, k, "Float"), 0.0, "Float")
+                                k = k + 1
+                            var m: Float = 0.0
+                            k = 0
+                            while k < cseg:
+                                m = m + mem_load(ptr_offset(re, k, "Float"), "Float")
+                                k = k + 1
+                            m = m / (cseg as Float)
+                            k = 0
+                            while k < cseg:
+                                mem_store(ptr_offset(re, k, "Float"), mem_load(ptr_offset(re, k, "Float"), "Float") - m, "Float")
+                                k = k + 1
+                        else:
+                            // Y6 = (x^2-m2)^3 per-seg demeaned (higher-order
+                            // constellations; p-floor approximate here — heavy
+                            // tails weaken the Gamma model, gate accordingly).
+                            var k: Int = 0
+                            while k < cseg:
+                                let v: Float = mem_load(ptr_offset(xbuf, base + k, "Float"), "Float")
+                                let y: Float = v * v - m2
+                                mem_store(ptr_offset(re, k, "Float"), y * y * y, "Float")
+                                mem_store(ptr_offset(im, k, "Float"), 0.0, "Float")
+                                k = k + 1
+                            var m: Float = 0.0
+                            k = 0
+                            while k < cseg:
+                                m = m + mem_load(ptr_offset(re, k, "Float"), "Float")
+                                k = k + 1
+                            m = m / (cseg as Float)
+                            k = 0
+                            while k < cseg:
+                                mem_store(ptr_offset(re, k, "Float"), mem_load(ptr_offset(re, k, "Float"), "Float") - m, "Float")
+                                k = k + 1
                     let frc: Int = observe re:
                         fft_improved(re, im, cseg, twc, tws)
                     if frc != 0:
@@ -720,7 +828,12 @@ fn main() -> Int with Unsafe:
                     while b < nbins:
                         let rv: Float = mem_load(ptr_offset(re, b, "Float"), "Float")
                         let iv: Float = mem_load(ptr_offset(im, b, "Float"), "Float")
-                        mem_store(ptr_offset(acc, b, "Float"), mem_load(ptr_offset(acc, b, "Float"), "Float") + rv * rv + iv * iv, "Float")
+                        let pw0: Float = rv * rv + iv * iv
+                        mem_store(ptr_offset(acc, b, "Float"), mem_load(ptr_offset(acc, b, "Float"), "Float") + pw0, "Float")
+                        if tag == 0:
+                            if si == 0:
+                                if s < ntbd:
+                                    mem_store(ptr_offset(pmat, s * nb0 + b, "Float"), pw0, "Float")
                         b = b + 1
                     s = s + 1
                 var b2: Int = 0
@@ -773,6 +886,16 @@ fn main() -> Int with Unsafe:
                     println(tagname + "@" + str(cseg) + " peak " + str(kk) + " bin=" + str(bi) + " alpha=" + str(hz * 100.0) + " ratio=" + str(ratio * 100.0) + " log10p=" + str(l10))
                     md = md + "| " + tagname + " | " + str(cseg) + " | " + str(kk) + " | " + str(bi) + " | " + str(hz * 100.0) + " | " + str(ratio * 100.0) + " | " + str(l10) + " | " + str(hit) + " |\n"
                     csv = csv + tagname + "," + str(cseg) + "," + str(kk) + "," + str(bi) + "," + str(hz * 100.0) + "," + str(ratio * 100.0) + "," + str(l10) + "," + str(hit) + "\n"
+                    if pk_n < 4096:
+                        mem_store(ptr_offset(pk_tag, pk_n, "Int"), tag, "Int")
+                        mem_store(ptr_offset(pk_seg, pk_n, "Int"), cseg, "Int")
+                        mem_store(ptr_offset(pk_bin, pk_n, "Int"), bi, "Int")
+                        mem_store(ptr_offset(pk_rank, pk_n, "Int"), kk, "Int")
+                        mem_store(ptr_offset(pk_alpha, pk_n, "Int"), (hz * 100.0) as Int, "Int")
+                        mem_store(ptr_offset(pk_ratio, pk_n, "Int"), (ratio * 100.0) as Int, "Int")
+                        mem_store(ptr_offset(pk_logp, pk_n, "Int"), l10, "Int")
+                        mem_store(ptr_offset(pk_hit, pk_n, "Int"), hit, "Int")
+                        pk_n = pk_n + 1
                     kk = kk + 1
                 decay taken
                 decay acc
@@ -782,6 +905,109 @@ fn main() -> Int with Unsafe:
             decay twc
             decay tws
         si = si + 1
+    // ── TBD-α: Viterbi over first-SEG Y2 powers (drifters integrate) ──
+    // Per-seg median normalize, DP with drift ±drift_max, full-span tracks.
+    // Score = mean normalized power on path (null ≈ 1). Gate is noise-
+    // calibrated (measured on matched noise, margin ×1.5, documented in
+    // the prove log); exact track-TBD p-values ride vNext.
+    var tbd_hit: Int = 0
+    var tbd_score_x: Int = 0
+    var tbd_b0: Int = -1
+    var tbd_b1: Int = -1
+    var tbd_drift: Int = 0
+    if ntbd >= 8:
+        let mut tmed: ptr<Float> = alloc_zeroed(nb0, "Float")
+        var r: Int = 0
+        while r < ntbd:
+            var q: Int = 0
+            while q < nb0:
+                mem_store(ptr_offset(tmed, q, "Float"), mem_load(ptr_offset(pmat, r * nb0 + q, "Float"), "Float"), "Float")
+                q = q + 1
+            let rmed: Float = quickselect_k(tmed, nb0, nb0 / 2)
+            if rmed > 0.0:
+                q = 0
+                while q < nb0:
+                    mem_store(ptr_offset(pmat, r * nb0 + q, "Float"), mem_load(ptr_offset(pmat, r * nb0 + q, "Float"), "Float") / rmed, "Float")
+                    q = q + 1
+            r = r + 1
+        decay tmed
+        let mut dpa: ptr<Float> = alloc_zeroed(nb0, "Float")
+        let mut dpb: ptr<Float> = alloc_zeroed(nb0, "Float")
+        let mut back: ptr<Int> = alloc_zeroed(ntbd * nb0, "Int")
+        var binit: Int = 0
+        while binit < nb0:
+            if binit < 2:
+                mem_store(ptr_offset(dpa, binit, "Float"), -1.0, "Float")
+            else:
+                mem_store(ptr_offset(dpa, binit, "Float"), mem_load(ptr_offset(pmat, binit, "Float"), "Float"), "Float")
+            binit = binit + 1
+        var sgm: Int = 1
+        while sgm < ntbd:
+            var b: Int = 2
+            while b < nb0:
+                var lo: Int = b - drift_max
+                if lo < 2:
+                    lo = 2
+                var hh: Int = b + drift_max
+                if hh > nb0 - 1:
+                    hh = nb0 - 1
+                var bestpv: Float = -1.0
+                var bestpb: Int = lo
+                var c: Int = lo
+                while c <= hh:
+                    let cv: Float = mem_load(ptr_offset(dpa, c, "Float"), "Float")
+                    if cv > bestpv:
+                        bestpv = cv
+                        bestpb = c
+                    c = c + 1
+                mem_store(ptr_offset(dpb, b, "Float"), mem_load(ptr_offset(pmat, sgm * nb0 + b, "Float"), "Float") + bestpv, "Float")
+                mem_store(ptr_offset(back, sgm * nb0 + b, "Int"), bestpb, "Int")
+                b = b + 1
+            var sw: Int = 0
+            while sw < nb0:
+                mem_store(ptr_offset(dpa, sw, "Float"), mem_load(ptr_offset(dpb, sw, "Float"), "Float"), "Float")
+                sw = sw + 1
+            sgm = sgm + 1
+        var bend: Int = 2
+        var bstv: Float = mem_load(ptr_offset(dpa, 2, "Float"), "Float")
+        var be: Int = 3
+        while be < nb0:
+            let ev: Float = mem_load(ptr_offset(dpa, be, "Float"), "Float")
+            if ev > bstv:
+                bstv = ev
+                bend = be
+            be = be + 1
+        var cur: Int = bend
+        var sback: Int = ntbd - 1
+        while sback >= 1:
+            cur = mem_load(ptr_offset(back, sback * nb0 + cur, "Int"), "Int")
+            sback = sback - 1
+        tbd_b0 = cur
+        tbd_b1 = bend
+        tbd_score_x = ((bstv / (ntbd as Float)) * 100.0) as Int
+        let seghz: Float = fhz / (fseg0 as Float)
+        let span_s: Float = (ntbd as Float) * (fseg0 as Float) / fhz
+        var drf: Float = 0.0
+        if span_s > 0.0:
+            drf = ((bend - cur) as Float) * seghz / span_s
+        tbd_drift = (drf * 100.0) as Int
+        if tbd_drift < 0:
+            tbd_drift = 0 - tbd_drift
+        decay dpa
+        decay dpb
+        decay back
+    decay pmat
+    var tbd_verd: String = "CLEAN"
+    if ntbd >= 8:
+        if tbd_score_x >= tbd_gate_x100:
+            tbd_hit = 1
+            tbd_verd = "TBD-HIT"
+    md = md + "\n| track | seg | alpha0_hz_x100 | drift_hz_s_x100 | score_x100 | span_segs | verdict |\n"
+    md = md + "|---|---|---|---|---|---|---|\n"
+    if ntbd >= 8:
+        md = md + "| 0 | " + str(fseg0) + " | " + str((tbd_b0 as Float) * fhz / (fseg0 as Float) * 100.0) + " | " + str(tbd_drift) + " | " + str(tbd_score_x) + " | " + str(ntbd) + " | " + tbd_verd + " |\n"
+    else:
+        md = md + "| 0 | " + str(fseg0) + " | 0 | 0 | 0 | " + str(ntbd) + " | CLEAN |\n"
     decay xbuf
     decay nslot
     if cand_set == 1 and cand_path != "-":
@@ -789,11 +1015,84 @@ fn main() -> Int with Unsafe:
     var verdict: String = "CLEAN"
     if file_hit == 1:
         verdict = "FAM-HIT"
+    elif tbd_hit == 1:
+        verdict = "TBD-HIT"
+    // ── Journal: match current peaks vs prior runs, append with repeats ──
+    if journal_path != "":
+        var jtxt: String = ""
+        if fs_exists(journal_path):
+            jtxt = fs_read_text(journal_path)
+        else:
+            jtxt = "| tag | seg | rank | bin | alpha_hz_x100 | ratio_x100 | log10p_x100 | hit | repeat |\n|---|---|---|---|---|---|---|---|---|\n"
+        let jlines: Array<String> = text_split_lines(jtxt)
+        var jhead: Array<String> = []
+        var jl: Int = 0
+        while jl < len(jlines):
+            if len(text_trim_string(jlines[jl])) > 0 and is_sep_row(jlines[jl]) == 0:
+                jhead = row_cells(jlines[jl])
+                break
+            jl = jl + 1
+        let jtc: Int = col_index(jhead, "tag")
+        let jsc: Int = col_index(jhead, "seg")
+        let jbc: Int = col_index(jhead, "bin")
+        var newrows: String = ""
+        var matched_files: Int = 0
+        if jtc >= 0 and jsc >= 0 and jbc >= 0:
+            matched_files = 1
+        var kj: Int = 0
+        while kj < pk_n:
+            let pt: Int = mem_load(ptr_offset(pk_tag, kj, "Int"), "Int")
+            let ps: Int = mem_load(ptr_offset(pk_seg, kj, "Int"), "Int")
+            let pb: Int = mem_load(ptr_offset(pk_bin, kj, "Int"), "Int")
+            var rep: Int = 0
+            if matched_files == 1:
+                var rl: Int = 0
+                var scanned: Int = 0
+                while rl < len(jlines) and scanned < 5000:
+                    let rr: String = jlines[rl]
+                    if len(text_trim_string(rr)) > 0 and is_sep_row(rr) == 0:
+                        let rc: Array<String> = row_cells(rr)
+                        if jtc < len(rc) and jsc < len(rc) and jbc < len(rc):
+                            var ot: Int = -1
+                            if rc[jtc] == "Y2":
+                                ot = 0
+                            elif rc[jtc] == "Y4":
+                                ot = 1
+                            elif rc[jtc] == "Y6":
+                                ot = 2
+                            if ot == pt:
+                                if parse_int_text(rc[jsc]) == ps:
+                                    let ob: Int = parse_int_text(rc[jbc])
+                                    if ob >= pb - 2 and ob <= pb + 2:
+                                        rep = rep + 1
+                        scanned = scanned + 1
+                    rl = rl + 1
+            var tn: String = "Y2"
+            if pt == 1:
+                tn = "Y4"
+            elif pt == 2:
+                tn = "Y6"
+            newrows = newrows + "| " + tn + " | " + str(ps) + " | " + str(mem_load(ptr_offset(pk_rank, kj, "Int"), "Int")) + " | " + str(pb) + " | " + str(mem_load(ptr_offset(pk_alpha, kj, "Int"), "Int")) + " | " + str(mem_load(ptr_offset(pk_ratio, kj, "Int"), "Int")) + " | " + str(mem_load(ptr_offset(pk_logp, kj, "Int"), "Int")) + " | " + str(mem_load(ptr_offset(pk_hit, kj, "Int"), "Int")) + " | " + str(rep) + " |\n"
+            kj = kj + 1
+        if len(jtxt) > 0:
+            if char_at(jtxt, len(jtxt) - 1) != "\n":
+                jtxt = jtxt + "\n"
+        fs_write_text(journal_path, jtxt + newrows)
+        println("fam_god: journal peaks=" + str(pk_n) + " path=" + journal_path)
+    println("fam_god: tbd score_x100=" + str(tbd_score_x) + " span=" + str(ntbd) + " drift_x100=" + str(tbd_drift) + " hit=" + str(tbd_hit))
     println("fam_god: timing ms scan=" + str(now_millis() - t_scan0))
     if out_path != "":
         fs_write_text(out_path, md)
     if csv_path != "":
         fs_write_text(csv_path, csv)
+    decay pk_tag
+    decay pk_seg
+    decay pk_bin
+    decay pk_rank
+    decay pk_alpha
+    decay pk_ratio
+    decay pk_logp
+    decay pk_hit
     if json == 1:
         println("{\"tool\": \"fam_god\", \"verdict\": \"" + verdict + "\"}")
     println("receipt=PASS scanned=1 verdict=" + verdict)
