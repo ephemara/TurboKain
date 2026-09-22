@@ -1,0 +1,1081 @@
+// ============================================================================
+// slice.kn — TurboKain 01: GUPPI slicer at C parity (v3 — black-magic IO)
+//
+// v3 scope: byte-identical .f32 vs c/seti_slice at C speed. The v2 logic
+// (per-block END hunt, BACKEND hlen solve, layout auto-detect, LUT unpack,
+// stats, autocorr, quarantine) was already byte-exact; v2's only sin was
+// bulk IO through the Array<Int> bridge (1-21 us/B). v3 moves ALL bulk IO
+// onto kernel32 handles + Byte arenas, pure Kain, no C files, no headers:
+//
+//   CreateFileA / GetFileSizeEx / SetFilePointer / ReadFile / WriteFile /
+//   CloseHandle via @extern + @link_name (KAINOS-proven pattern), Byte
+//   arenas for buffers, Int-window loads (& 255) for byte values.
+//
+// No `use std::fs` anywhere in this file. Headers (24 KB) and payload spans
+// (~4 MB) both ride handles. Learned the hard way:
+//   * mem_load "Byte" + `as Int` reinterprets (8-byte window, not value).
+//     Byte values as Int come from Int-window loads & 255. Verified live.
+//   * mem_store "Byte" takes Byte: store `v as Byte` for v in 0..255.
+//   * str(Float) truncates toward zero: stats print x1e4/x1e5 scaled ints.
+//   * `out` and `share` are reserved words. `match` is reserved.
+//
+// Contract: same CLI/CSV as v2 (C-style positional + flags). cmp(1) vs the
+// C slicer on the same chan/blocks is the receipt — any wrong bit fails.
+//
+// Exit codes: 0 sliced/probed, 1 help, 2 any error (with GetLastError).
+// No hardcoded data paths. --data-dir / $SETIYETI_DATA only.
+// ============================================================================
+
+use std::process
+use std::runtime
+use std::text
+
+// ── kernel32 file API (pure Kain FFI, no C, no headers) ─────────────────────
+@extern @link_name("CreateFileA")
+fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
+
+@extern @link_name("GetFileSizeEx")
+fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
+
+@extern @link_name("SetFilePointer")
+fn k_SetFilePointer(h: ptr<Void>, lo: Int, hi: ptr<Int>, method: Int) -> Int
+
+@extern @link_name("ReadFile")
+fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("WriteFile")
+fn k_WriteFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("CloseHandle")
+fn k_CloseHandle(h: ptr<Void>) -> Int
+
+@extern @link_name("GetLastError")
+fn k_GetLastError() -> Int
+
+fn null_ptr() -> ptr<Void> with Pure:
+    return int_to_ptr(0, "ptr<Void>")
+
+const GEN_READ: Int = 2147483648
+const GEN_WRITE: Int = 1073741824
+const OPEN_EXISTING: Int = 3
+const CREATE_ALWAYS: Int = 2
+const FILE_NORMAL: Int = 128
+const FILE_SHARE_RW: Int = 3
+
+// ── Exit codes ──────────────────────────────────────────────────────────────
+const EXIT_OK: Int = 0
+const EXIT_HELP: Int = 1
+const EXIT_ERROR: Int = 2
+
+// ── Scan bounds ─────────────────────────────────────────────────────────────
+const HEAD_SCAN_BYTES: Int = 24000
+const MAX_CARDS: Int = 300
+const CARD_BYTES: Int = 80
+const PROBE_BYTES: Int = 8192
+const BACKEND_WIN: Int = 16384
+const HLEN_MAX: Int = 65536
+
+// ── Arena budgets (bytes) ───────────────────────────────────────────────────
+const HEAD_ARENA: Int = 65536
+const PAYLOAD_ARENA: Int = 4194304
+const OUT_ARENA: Int = 4194304
+const SLACK: Int = 16
+
+// ── Slice streaming ─────────────────────────────────────────────────────────
+const AC_N: Int = 200000
+const LAGS: Array<Int> = [1, 7, 64, 256, 1024, 4096, 16384]
+
+// ── Quarantine gates (8-bit band-matched, integer domain: q = sumsq/n) ──────
+const Q_LO: Int = 8000
+const Q_HI: Int = 30000
+const DIV_MIN: Int = 8
+
+// ── 2-bit float32 LUT (struct.pack '<f' of the exact C constants) ───────────
+//   +3.3359f = 0x40557F63   -3.3359f = 0xC0557F63
+//   +1.0f     = 0x3F800000   -1.0f     = 0xBF800000
+//   code order: 0→-3.3359  1→-1.0  2→+1.0  3→+3.3359
+const F2B0: Int = 3226828643
+const F2B1: Int = 3212836864
+const F2B2: Int = 1065353216
+const F2B3: Int = 1079344995
+const F2F0: Float = -3.3359
+const F2F1: Float = -1.0
+const F2F2: Float = 1.0
+const F2F3: Float = 3.3359
+
+const E_BYTE: Int = 69
+const N_BYTE: Int = 78
+const D_BYTE: Int = 68
+
+law qrms_ok(q: Int) -> Bool:
+    return q >= Q_LO and q <= Q_HI
+
+law diverse_ok(d: Int) -> Bool:
+    return d >= DIV_MIN
+
+// ── Handle helpers (one open per file, seeks + ranged reads/writes) ─────────
+fn k_open_read(path: String) -> ptr<Void> with Unsafe:
+    return k_CreateFileA(path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+
+fn k_open_write(path: String) -> ptr<Void> with Unsafe:
+    return k_CreateFileA(path, GEN_WRITE, FILE_SHARE_RW, null_ptr(), CREATE_ALWAYS, FILE_NORMAL, null_ptr())
+
+fn k_handle_bad(h: ptr<Void>) -> Int with Pure:
+    if ptr_to_int(h) == -1:
+        return 1
+    return 0
+
+fn k_size(h: ptr<Void>) -> Int with Unsafe:
+    let slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let ok: Int = k_GetFileSizeEx(h, slot)
+    var sz: Int = -1
+    if ok != 0:
+        sz = mem_load(slot, "Int")
+    decay slot
+    return sz
+
+fn k_seek(h: ptr<Void>, off: Int) -> Int with Unsafe:
+    let hislot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(hislot, off / 4294967296, "Int")
+    let lo: Int = off % 4294967296
+    let r: Int = k_SetFilePointer(h, lo, hislot, 0)
+    decay hislot
+    return r
+
+fn k_read_at(h: ptr<Void>, nslot: ptr<Int>, off: Int, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
+    let _s: Int = k_seek(h, off)
+    mem_store(nslot, 0, "Int")
+    let ok: Int = k_ReadFile(h, buf, n, nslot, null_ptr())
+    if ok == 0:
+        return -1
+    return mem_load(nslot, "Int")
+
+fn k_write_all(h: ptr<Void>, nslot: ptr<Int>, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
+    mem_store(nslot, 0, "Int")
+    let ok: Int = k_WriteFile(h, buf, n, nslot, null_ptr())
+    if ok == 0:
+        return -1
+    return mem_load(nslot, "Int")
+
+// Byte value at arena byte-offset as Int (Int-window load & 255 — the value
+//-preserving read; mem_load "Byte" + `as Int` reinterprets the window).
+fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
+    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
+
+fn bstore(buf: ptr<Byte>, i: Int, v: Int) with Unsafe:
+    mem_store(ptr_offset(buf, i, "Byte"), v as Byte, "Byte")
+
+// ── Manual string-to-int ────────────────────────────────────────────────────
+fn parse_int_text(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var sign: Int = 1
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = -1
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var value: Int = 0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        var digit: Int = 0
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return value * sign
+        value = value * 10 + digit
+        index = index + 1
+    return value * sign
+
+fn is_all_digits(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var i: Int = 0
+    while i < len(text):
+        let c: String = char_at(text, i)
+        if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
+            i = i + 1
+        elif c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
+            i = i + 1
+        else:
+            return 0
+    return 1
+
+fn find_from(hay: String, needle: String, start: Int) -> Int:
+    let hn: Int = len(hay)
+    let nn: Int = len(needle)
+    if nn == 0:
+        return start
+    var i: Int = start
+    if i < 0:
+        i = 0
+    while i + nn <= hn:
+        var j: Int = 0
+        var hit: Int = 1
+        while j < nn:
+            if char_at(hay, i + j) != char_at(needle, j):
+                hit = 0
+            j = j + 1
+        if hit == 1:
+            return i
+        i = i + 1
+    return -1
+
+fn extract_value_string(header: String, key: String) -> String:
+    let kp: Int = find_from(header, key, 0)
+    if kp < 0:
+        return ""
+    let ep: Int = find_from(header, "=", kp)
+    if ep < 0:
+        return ""
+    let hn: Int = len(header)
+    var s: Int = ep + 1
+    var skipping: Int = 1
+    while s < hn:
+        if skipping == 1:
+            if char_at(header, s) == " ":
+                s = s + 1
+            else:
+                skipping = 0
+        else:
+            break
+    var e: Int = s
+    var done: Int = 0
+    while e < hn:
+        if done == 0:
+            let c: String = char_at(header, e)
+            if c == " ":
+                done = 1
+            elif c == "/":
+                done = 1
+            else:
+                e = e + 1
+        else:
+            break
+    if e <= s:
+        return ""
+    return text_substring_string(header, s, e - s)
+
+// Header bytes [off, off+header_len) as text (small Array build, fast).
+fn header_text_via(h: ptr<Void>, nslot: ptr<Int>, habuf: ptr<Byte>, off: Int, header_len: Int) -> String with Unsafe:
+    let got: Int = k_read_at(h, nslot, off, habuf, header_len)
+    if got < header_len:
+        return ""
+    var hbytes: Array<Int> = []
+    var hx: Int = 0
+    while hx < header_len:
+        push(hbytes, bref(habuf, hx))
+        hx = hx + 1
+    return text_from_byte_array(hbytes)
+
+// END hunt on arena bytes → header_len or -1.
+fn head_len_at(h: ptr<Void>, nslot: ptr<Int>, habuf: ptr<Byte>, off: Int) -> Int with Unsafe:
+    let got: Int = k_read_at(h, nslot, off, habuf, HEAD_SCAN_BYTES)
+    if got < CARD_BYTES:
+        return -1
+    var end_card: Int = -1
+    var card: Int = 0
+    while card < MAX_CARDS:
+        if end_card < 0:
+            let base: Int = card * CARD_BYTES
+            if base + CARD_BYTES <= got:
+                if bref(habuf, base) == E_BYTE and bref(habuf, base + 1) == N_BYTE and bref(habuf, base + 2) == D_BYTE:
+                    end_card = card
+        card = card + 1
+    if end_card < 0:
+        return -1
+    return (end_card + 1) * CARD_BYTES
+
+// BACKEND magic at arena window position (bytes, no strings).
+fn backend_hit(wbuf: ptr<Byte>, at: Int, wlen: Int) -> Int with Unsafe:
+    if at + 16 > wlen:
+        return 0
+    let w0: Int = bref(wbuf, at)
+    let w1: Int = bref(wbuf, at + 1)
+    let w2: Int = bref(wbuf, at + 2)
+    let w3: Int = bref(wbuf, at + 3)
+    let w4: Int = bref(wbuf, at + 4)
+    let w5: Int = bref(wbuf, at + 5)
+    let w6: Int = bref(wbuf, at + 6)
+    let w7: Int = bref(wbuf, at + 7)
+    let w8: Int = bref(wbuf, at + 8)
+    let w9: Int = bref(wbuf, at + 9)
+    let w10: Int = bref(wbuf, at + 10)
+    let w11: Int = bref(wbuf, at + 11)
+    let w12: Int = bref(wbuf, at + 12)
+    let w13: Int = bref(wbuf, at + 13)
+    let w14: Int = bref(wbuf, at + 14)
+    let w15: Int = bref(wbuf, at + 15)
+    if w0 == 66 and w1 == 65 and w2 == 67 and w3 == 75:
+        if w4 == 69 and w5 == 78 and w6 == 68 and w7 == 32:
+            if w8 == 61 and w9 == 32 and w10 == 39 and w11 == 71:
+                if w12 == 85 and w13 == 80 and w14 == 80 and w15 == 73:
+                    return 1
+    return 0
+
+fn solve_hlen(h: ptr<Void>, nslot: ptr<Int>, wbuf: ptr<Byte>, off: Int, cards: Int, blocsize: Int, fsize: Int) -> Int with Unsafe:
+    let probe: Int = off + cards * CARD_BYTES + blocsize
+    let got: Int = k_read_at(h, nslot, probe, wbuf, BACKEND_WIN)
+    if got > 16:
+        var i: Int = 0
+        while i + 16 <= got:
+            if backend_hit(wbuf, i, got) == 1:
+                let hlen: Int = (probe + i - off) - blocsize
+                if hlen > 0 and hlen <= HLEN_MAX:
+                    return hlen
+                break
+            i = i + 1
+    if fsize > blocsize:
+        let c: Int = fsize - blocsize
+        if c > 0 and c <= HLEN_MAX:
+            return c
+    let c80: Int = cards * CARD_BYTES
+    return c80 + ((256 - c80 % 256) % 256)
+
+// ── Exact float32 bits for int8 ─────────────────────────────────────────────
+fn pow2_int(e: Int) -> Int:
+    var r: Int = 1
+    var i: Int = 0
+    while i < e:
+        r = r * 2
+        i = i + 1
+    return r
+
+fn f32_bits_int8(sb: Int) -> Int:
+    if sb == 0:
+        return 0
+    var sign: Int = 0
+    var m: Int = sb
+    if sb < 0:
+        sign = 1
+        m = 0 - sb
+    var e: Int = 0
+    var p: Int = 1
+    while p * 2 <= m:
+        p = p * 2
+        e = e + 1
+    let exp: Int = 127 + e
+    let mant: Int = (m - p) * pow2_int(23 - e)
+    return sign * 2147483648 + exp * 8388608 + mant
+
+// ── Unpack lane: layout-2 8-bit bytes → f32-LE bytes (pure map, no redux) ───
+// Stats stay scalar in main (reductions don't vectorize); this lane owns the
+// gather + LUT + store shape. Spec and fast lane execute identical per-sample
+// ops in identical order → identical bytes by construction; cmp proves it.
+fn unpack_l2_u8_spec(pay: ptr<Byte>, dst: ptr<Byte>, n: Int, pol: Int, npol: Int, lut: ptr<Int>) -> Int:
+    var k: Int = 0
+    while k < n:
+        var sb: Int = mem_load(ptr_offset(pay, k * npol + pol, "Byte"), "Int") & 255
+        if sb > 127:
+            sb = sb - 256
+        let bits: Int = mem_load(ptr_offset(lut, (sb + 256) % 256, "Int"), "Int")
+        mem_store(ptr_offset(dst, k * 4, "Byte"), ((bits & 255)) as Byte, "Byte")
+        mem_store(ptr_offset(dst, k * 4 + 1, "Byte"), (((bits >> 8)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, k * 4 + 2, "Byte"), (((bits >> 16)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, k * 4 + 3, "Byte"), (((bits >> 24)) & 255) as Byte, "Byte")
+        k = k + 1
+    return n * 4
+
+fn unpack_l2_u8_x4(pay: ptr<Byte>, dst: ptr<Byte>, n: Int, pol: Int, npol: Int, lut: ptr<Int>) -> Int:
+    var k: Int = 0
+    let n4: Int = n / 4 * 4
+    while k < n4:
+        var s0: Int = mem_load(ptr_offset(pay, k * npol + pol, "Byte"), "Int") & 255
+        var s1: Int = mem_load(ptr_offset(pay, (k + 1) * npol + pol, "Byte"), "Int") & 255
+        var s2: Int = mem_load(ptr_offset(pay, (k + 2) * npol + pol, "Byte"), "Int") & 255
+        var s3: Int = mem_load(ptr_offset(pay, (k + 3) * npol + pol, "Byte"), "Int") & 255
+        if s0 > 127:
+            s0 = s0 - 256
+        if s1 > 127:
+            s1 = s1 - 256
+        if s2 > 127:
+            s2 = s2 - 256
+        if s3 > 127:
+            s3 = s3 - 256
+        let b0: Int = mem_load(ptr_offset(lut, (s0 + 256) % 256, "Int"), "Int")
+        let b1: Int = mem_load(ptr_offset(lut, (s1 + 256) % 256, "Int"), "Int")
+        let b2: Int = mem_load(ptr_offset(lut, (s2 + 256) % 256, "Int"), "Int")
+        let b3: Int = mem_load(ptr_offset(lut, (s3 + 256) % 256, "Int"), "Int")
+        mem_store(ptr_offset(dst, k * 4, "Byte"), ((b0 & 255)) as Byte, "Byte")
+        mem_store(ptr_offset(dst, k * 4 + 1, "Byte"), (((b0 >> 8)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, k * 4 + 2, "Byte"), (((b0 >> 16)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, k * 4 + 3, "Byte"), (((b0 >> 24)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 1) * 4, "Byte"), ((b1 & 255)) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 1) * 4 + 1, "Byte"), (((b1 >> 8)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 1) * 4 + 2, "Byte"), (((b1 >> 16)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 1) * 4 + 3, "Byte"), (((b1 >> 24)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 2) * 4, "Byte"), ((b2 & 255)) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 2) * 4 + 1, "Byte"), (((b2 >> 8)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 2) * 4 + 2, "Byte"), (((b2 >> 16)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 2) * 4 + 3, "Byte"), (((b2 >> 24)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 3) * 4, "Byte"), ((b3 & 255)) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 3) * 4 + 1, "Byte"), (((b3 >> 8)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 3) * 4 + 2, "Byte"), (((b3 >> 16)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, (k + 3) * 4 + 3, "Byte"), (((b3 >> 24)) & 255) as Byte, "Byte")
+        k = k + 4
+    while k < n:
+        var st: Int = mem_load(ptr_offset(pay, k * npol + pol, "Byte"), "Int") & 255
+        if st > 127:
+            st = st - 256
+        let bt: Int = mem_load(ptr_offset(lut, (st + 256) % 256, "Int"), "Int")
+        mem_store(ptr_offset(dst, k * 4, "Byte"), ((bt & 255)) as Byte, "Byte")
+        mem_store(ptr_offset(dst, k * 4 + 1, "Byte"), (((bt >> 8)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, k * 4 + 2, "Byte"), (((bt >> 16)) & 255) as Byte, "Byte")
+        mem_store(ptr_offset(dst, k * 4 + 3, "Byte"), (((bt >> 24)) & 255) as Byte, "Byte")
+        k = k + 1
+    return n * 4
+
+// NOTE: no `verify` clause — verify cannot synthesize ptr params (lane_sieve
+// precedent). Equivalence receipt is runtime: count guard + cmp vs C.
+converge unpack_l2_u8(pay: ptr<Byte>, dst: ptr<Byte>, n: Int, pol: Int, npol: Int, lut: ptr<Int>) -> Int:
+    spec reference:
+        return unpack_l2_u8_spec(pay, dst, n, pol, npol, lut)
+    fast unrolled4 when capability("cpu.x86.avx2"):
+        return unpack_l2_u8_x4(pay, dst, n, pol, npol, lut)
+
+// ── Payload diversity histogram (lane_sieve collapse pattern) ───────────────
+fn probe_fill_hist(hist: ptr<Int>, pbuf: ptr<Byte>, n: Int) -> Int with Unsafe:
+    collapse hist:
+        var bi: Int = 0
+        while bi < n:
+            let bin: Int = bref(pbuf, bi)
+            let c0: Int = mem_load(ptr_offset(hist, bin, "Int"), "Int")
+            mem_store(ptr_offset(hist, bin, "Int"), c0 + 1, "Int")
+            bi = bi + 1
+        0
+    return 0
+
+fn hist_distinct(hist: ptr<Int>) -> Int:
+    var distinct: Int = 0
+    var b: Int = 0
+    while b < 256:
+        if mem_load(ptr_offset(hist, b, "Int"), "Int") > 0:
+            distinct = distinct + 1
+        b = b + 1
+    return distinct
+
+fn usage() -> String:
+    var t: String = "slice 0.3.0 — TurboKain GUPPI slicer (C parity, kernel32 IO)\n"
+    t = t + "Slice one chan/pol across block ranges to .f32 (float32 LE).\n"
+    t = t + "Bulk IO rides kernel32 handles + Byte arenas (no fs bridge).\n"
+    t = t + "\n"
+    t = t + "USAGE (C-style positional):\n"
+    t = t + "  slice <raw> <chan> <out.f32> [max_blocks] [--pol N] [--start B]\n"
+    t = t + "        [--layout 0|1|2]\n"
+    t = t + "USAGE (flags):\n"
+    t = t + "  slice --in <raw> --chan C --pol P --out f [--blocks N] [--start B]\n"
+    t = t + "        [--layout L] [--data-dir D] [--json]\n"
+    t = t + "  no --out → probe-only (header + quarantine verdict).\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 sliced/probed, 1 help, 2 error.\n"
+    return t
+
+fn main() -> Int with Unsafe:
+    let args: Array<String> = process_user_args()
+    // NOTE: `and`/`or` do not short-circuit — argv indexing sits behind
+    // nested ifs only.
+    var in_path: String = ""
+    var data_dir: String = ""
+    var max_blocks: Int = 0
+    var blocks_set: Int = 0
+    var json: Int = 0
+    var show_help: Int = 0
+    var want_chan: Int = -1
+    var chan_set: Int = 0
+    var want_pol: Int = 0
+    var out_path: String = ""
+    var start_block: Int = 0
+    var layout_force: Int = -1
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--json":
+            json = 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--blocks":
+            if i + 1 < len(args):
+                max_blocks = parse_int_text(args[i + 1])
+                blocks_set = 1
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        elif a == "--chan":
+            if i + 1 < len(args):
+                want_chan = parse_int_text(args[i + 1])
+                chan_set = 1
+                i = i + 1
+        elif a == "--pol":
+            if i + 1 < len(args):
+                want_pol = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif a == "--start":
+            if i + 1 < len(args):
+                start_block = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--layout":
+            if i + 1 < len(args):
+                layout_force = parse_int_text(args[i + 1])
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    var pi: Int = 0
+    while pi < len(pos):
+        let p: String = pos[pi]
+        if pi == 0:
+            if in_path == "":
+                in_path = p
+        elif pi == 1:
+            if chan_set == 0 and is_all_digits(p) == 1:
+                want_chan = parse_int_text(p)
+                chan_set = 1
+            elif out_path == "":
+                out_path = p
+        elif pi == 2:
+            if out_path == "" and is_all_digits(p) == 0:
+                out_path = p
+            elif blocks_set == 0 and is_all_digits(p) == 1:
+                max_blocks = parse_int_text(p)
+                blocks_set = 1
+            elif out_path == "":
+                out_path = p
+        elif pi == 3:
+            if blocks_set == 0 and is_all_digits(p) == 1:
+                max_blocks = parse_int_text(p)
+                blocks_set = 1
+        pi = pi + 1
+
+    if show_help == 1:
+        print(usage())
+        return EXIT_HELP
+
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+    if in_path != "":
+        if data_dir != "":
+            if find_from(in_path, ":", 0) < 0:
+                if len(in_path) > 0:
+                    if char_at(in_path, 0) != "/":
+                        in_path = data_dir + "/" + in_path
+
+    if in_path == "":
+        println("slice: no input. usage: slice <raw> <chan> <out.f32> [max_blocks]")
+        return EXIT_ERROR
+    if blocks_set == 0:
+        max_blocks = 1000000000
+    if max_blocks <= 0:
+        max_blocks = 1000000000
+    if start_block < 0:
+        start_block = 0
+
+    // ── Open input (one handle for the whole run) ──
+    let h: ptr<Void> = k_open_read(in_path)
+    if k_handle_bad(h) == 1:
+        println("slice: open fail err=" + str(k_GetLastError()) + ": " + in_path)
+        return EXIT_ERROR
+
+    let mut habuf: ptr<Byte> = alloc_zeroed(HEAD_ARENA, "Byte")
+    let mut wbuf: ptr<Byte> = alloc_zeroed(BACKEND_WIN, "Byte")
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let fsize: Int = k_size(h)
+    if fsize < 0:
+        println("slice: size fail err=" + str(k_GetLastError()))
+        return EXIT_ERROR
+
+    // ── File block 0: header probe + quarantine verdict ──
+    let hlen0: Int = head_len_at(h, nslot, habuf, 0)
+    if hlen0 < 0:
+        println("slice: no END card at block 0 — not GUPPI?")
+        return EXIT_ERROR
+    let header0: String = header_text_via(h, nslot, habuf, 0, hlen0)
+    if len(header0) <= 0:
+        println("slice: header re-read failed")
+        return EXIT_ERROR
+    let blocsize0: Int = parse_int_text(extract_value_string(header0, "BLOCSIZE"))
+    let nbits0: Int = parse_int_text(extract_value_string(header0, "NBITS"))
+    let nchan0: Int = parse_int_text(extract_value_string(header0, "NCHAN"))
+    let npol0: Int = parse_int_text(extract_value_string(header0, "NPOL"))
+    let obsfreq0: String = extract_value_string(header0, "OBSFREQ")
+    let tbin0: String = extract_value_string(header0, "TBIN")
+    let src0: String = extract_value_string(header0, "SRC_NAME")
+    let proj0: String = extract_value_string(header0, "PROJID")
+    var est_blocks: Int = 0
+    if blocsize0 > 0:
+        est_blocks = fsize / (hlen0 + blocsize0)
+
+    let mut pbuf: ptr<Byte> = alloc_zeroed(PROBE_BYTES + SLACK, "Byte")
+    let pn: Int = k_read_at(h, nslot, hlen0, pbuf, PROBE_BYTES)
+    if pn <= 0:
+        println("slice: empty payload probe")
+        return EXIT_ERROR
+    var ssum0: Int = 0
+    var ssq0: Int = 0
+    var smin0: Int = 999999
+    var smax0: Int = -1
+    var k0: Int = 0
+    while k0 < pn:
+        let v0: Int = bref(pbuf, k0)
+        ssum0 = ssum0 + v0
+        ssq0 = ssq0 + v0 * v0
+        if v0 < smin0:
+            smin0 = v0
+        if v0 > smax0:
+            smax0 = v0
+        k0 = k0 + 1
+    let q0: Int = ssq0 / pn
+    let mut hist0: ptr<Int> = alloc_zeroed(256, "Int")
+    let _f0: Int = probe_fill_hist(hist0, pbuf, pn)
+    let distinct0: Int = observe hist0:
+        hist_distinct(hist0)
+    decay hist0
+    decay pbuf
+    var verdict: String = "PASS"
+    var reason: String = "-"
+    if nbits0 == 8:
+        if qrms_ok(q0) == false or diverse_ok(distinct0) == false:
+            verdict = "QUARANTINE"
+            if qrms_ok(q0) == false and diverse_ok(distinct0) == false:
+                reason = "rms+diversity"
+            elif qrms_ok(q0) == false:
+                reason = "rms"
+            else:
+                reason = "diversity"
+    else:
+        verdict = "SKIP-GATES"
+        reason = "nbits!=8"
+
+    println("slice: file=" + in_path + " size=" + str(fsize))
+    println("slice: cards=" + str(hlen0 / CARD_BYTES) + " header_len=" + str(hlen0) + " blocsize=" + str(blocsize0) + " nbits=" + str(nbits0) + " nchan=" + str(nchan0) + " npol=" + str(npol0))
+    println("slice: est_blocks=" + str(est_blocks) + " align256=" + str(hlen0 % 256) + " align2880=" + str(hlen0 % 2880))
+    println("slice: obsfreq=" + obsfreq0 + " tbin=" + tbin0 + " src=" + src0 + " proj=" + proj0)
+    println("slice: probe bytes=" + str(pn) + " distinct=" + str(distinct0) + " min=" + str(smin0) + " max=" + str(smax0) + " q=" + str(q0) + " verdict=" + verdict + " reason=" + reason)
+
+    if out_path == "":
+        if want_chan >= 0:
+            println("slice: note chan=" + str(want_chan) + " pol=" + str(want_pol) + " needs --out for slicing")
+        println("receipt=PASS parsed=1 probe=" + str(pn))
+        let _c0: Int = k_CloseHandle(h)
+        decay habuf
+        decay wbuf
+        decay nslot
+        return EXIT_OK
+
+    if chan_set == 0 or want_chan < 0:
+        println("slice: slicing needs --chan (or positional <chan>)")
+        return EXIT_ERROR
+    if want_pol < 0:
+        want_pol = 0
+
+    // ── Seek to first in-range block ──
+    var goff: Int = 0
+    var gb: Int = 0
+    while gb < start_block:
+        let hl: Int = head_len_at(h, nslot, habuf, goff)
+        if hl < 0:
+            println("slice: no END while seeking to --start")
+            return EXIT_ERROR
+        let hx: String = header_text_via(h, nslot, habuf, goff, hl)
+        let bs: Int = parse_int_text(extract_value_string(hx, "BLOCSIZE"))
+        if bs <= 0:
+            println("slice: bad BLOCSIZE while seeking")
+            return EXIT_ERROR
+        let sl: Int = solve_hlen(h, nslot, wbuf, goff, hl / CARD_BYTES, bs, fsize)
+        goff = goff + sl + bs
+        gb = gb + 1
+    let gh: Int = head_len_at(h, nslot, habuf, goff)
+    if gh < 0:
+        println("slice: no END at start block")
+        return EXIT_ERROR
+    let gtx: String = header_text_via(h, nslot, habuf, goff, gh)
+    var nchan: Int = parse_int_text(extract_value_string(gtx, "NCHAN"))
+    if nchan <= 0:
+        nchan = parse_int_text(extract_value_string(gtx, "OBSNCHAN"))
+    if nchan <= 0:
+        nchan = 64
+    var npol: Int = parse_int_text(extract_value_string(gtx, "NPOL"))
+    if npol <= 0:
+        npol = 4
+    var nbits: Int = parse_int_text(extract_value_string(gtx, "NBITS"))
+    if nbits != 2 and nbits != 8:
+        println("slice: unsupported NBITS=" + str(nbits) + " (need 2 or 8)")
+        return EXIT_ERROR
+    if want_chan < 0 or want_chan >= nchan:
+        println("slice: chan must be 0.." + str(nchan - 1))
+        return EXIT_ERROR
+    if want_pol < 0 or want_pol >= npol:
+        println("slice: pol must be 0.." + str(npol - 1))
+        return EXIT_ERROR
+    let shift: Int = want_pol * 2
+    let gbs: Int = parse_int_text(extract_value_string(gtx, "BLOCSIZE"))
+    let ghlen: Int = solve_hlen(h, nslot, wbuf, goff, gh / CARD_BYTES, gbs, fsize)
+    let gdata: Int = goff + ghlen
+
+    // ── Layout: forced, 2-bit classic, or 8-bit auto-detect ──
+    var layout: Int = layout_force
+    if layout < 0:
+        if nbits != 8:
+            layout = 0
+        else:
+            let per_c: Int = gbs / nchan
+            let mut segbuf: ptr<Byte> = alloc_zeroed(65536 + SLACK, "Byte")
+            var ac1: Float = 0.0
+            var acN: Float = 0.0
+            var den: Float = 0.0
+            var kk: Int = 0
+            while kk < 4:
+                var pc: Int = 16
+                if kk == 1:
+                    pc = 28
+                elif kk == 2:
+                    pc = 40
+                elif kk == 3:
+                    pc = 52
+                let sn: Int = k_read_at(h, nslot, gdata + pc * per_c, segbuf, 65536)
+                if sn > 2 * npol + 2:
+                    var m: Float = 0.0
+                    var si: Int = 0
+                    while si < sn:
+                        var sbv: Int = bref(segbuf, si)
+                        if sbv > 127:
+                            sbv = sbv - 256
+                        m = m + (sbv as Float)
+                        si = si + 1
+                    m = m / (sn as Float)
+                    si = 0
+                    while si < sn:
+                        var s2: Int = bref(segbuf, si)
+                        if s2 > 127:
+                            s2 = s2 - 256
+                        let d: Float = (s2 as Float) - m
+                        den = den + d * d
+                        si = si + 1
+                    si = 0
+                    while si + 1 < sn:
+                        var a1: Int = bref(segbuf, si)
+                        var b1: Int = bref(segbuf, si + 1)
+                        if a1 > 127:
+                            a1 = a1 - 256
+                        if b1 > 127:
+                            b1 = b1 - 256
+                        ac1 = ac1 + ((a1 as Float) - m) * ((b1 as Float) - m)
+                        si = si + 1
+                    si = 0
+                    while si + npol < sn:
+                        var a2: Int = bref(segbuf, si)
+                        var b2: Int = bref(segbuf, si + npol)
+                        if a2 > 127:
+                            a2 = a2 - 256
+                        if b2 > 127:
+                            b2 = b2 - 256
+                        acN = acN + ((a2 as Float) - m) * ((b2 as Float) - m)
+                        si = si + 1
+                kk = kk + 1
+            decay segbuf
+            if den > 0.0:
+                ac1 = ac1 / den
+                acN = acN / den
+            var aac1: Float = ac1
+            if aac1 < 0.0:
+                aac1 = 0.0 - aac1
+            var aacN: Float = acN
+            if aacN < 0.0:
+                aacN = 0.0 - aacN
+            if aac1 > 0.005 or aacN > 0.005:
+                if aacN > 1.5 * aac1:
+                    layout = 2
+                else:
+                    layout = 1
+            else:
+                layout = 2
+    if layout == 2:
+        println("slice: layout=chan-major-pol-interleaved")
+    elif layout == 1:
+        println("slice: layout=chan-major-pol-blocked")
+    else:
+        layout = 0
+        println("slice: layout=time-major")
+
+    let bpt: Int = nchan * npol * nbits / 8
+    if bpt <= 0:
+        println("slice: bad geometry (bpt<=0)")
+        return EXIT_ERROR
+    var seglen: Int = 0
+    var per_ch: Int = 0
+    if nbits == 8:
+        if layout == 1:
+            seglen = gbs / (nchan * npol)
+        elif layout == 2:
+            per_ch = gbs / nchan
+
+    // f32 LUT as arena (converge lanes take ptr, not Array — lane_sieve rule).
+    let mut lutarena: ptr<Int> = alloc_zeroed(256, "Int")
+    var li: Int = 0
+    while li < 256:
+        var sb: Int = li
+        if li > 127:
+            sb = li - 256
+        mem_store(ptr_offset(lutarena, li, "Int"), f32_bits_int8(sb), "Int")
+        li = li + 1
+
+    // ── Output handle + streaming arenas ──
+    let oh: ptr<Void> = k_open_write(out_path)
+    if k_handle_bad(oh) == 1:
+        println("slice: out open fail err=" + str(k_GetLastError()) + ": " + out_path)
+        return EXIT_ERROR
+    let mut paybuf: ptr<Byte> = alloc_zeroed(PAYLOAD_ARENA + SLACK, "Byte")
+    let mut oubuf: ptr<Byte> = alloc_zeroed(OUT_ARENA, "Byte")
+
+    var sum: Float = 0.0
+    var sumsq: Float = 0.0
+    var h0: Int = 0
+    var h1: Int = 0
+    var h2: Int = 0
+    var h3: Int = 0
+    var bmin: Int = 127
+    var bmax: Int = -128
+    var total_samples: Int = 0
+    var ac: Array<Float> = []
+    var t_read: Int = 0
+    var t_unpack: Int = 0
+    var t_write: Int = 0
+    var t_head: Int = 0
+    var off: Int = goff
+    var bidx: Int = start_block
+    var sliced: Int = 0
+    while bidx < start_block + max_blocks:
+        let h0t: Int = now_millis()
+        let hl: Int = head_len_at(h, nslot, habuf, off)
+        if hl < 0:
+            break
+        let htx: String = header_text_via(h, nslot, habuf, off, hl)
+        let bs: Int = parse_int_text(extract_value_string(htx, "BLOCSIZE"))
+        if bs <= 0:
+            println("slice: bad BLOCSIZE at block " + str(bidx))
+            return EXIT_ERROR
+        let sl: Int = solve_hlen(h, nslot, wbuf, off, hl / CARD_BYTES, bs, fsize)
+        let data_off: Int = off + sl
+        t_head = t_head + (now_millis() - h0t)
+        var ntime: Int = 0
+        if nbits == 2:
+            ntime = bs / bpt
+        elif layout == 2:
+            ntime = (bs / nchan) / npol
+        elif layout == 1:
+            ntime = bs / (nchan * npol)
+        else:
+            ntime = bs / bpt
+        // Time-chunk sized for ~1 MB payload spans (arena-safe).
+        var span_per_t: Int = bpt
+        if nbits == 8:
+            if layout == 1:
+                span_per_t = 1
+            elif layout == 2:
+                span_per_t = npol
+        var tch: Int = 1048576 / span_per_t
+        if tch < 1024:
+            tch = 1024
+        if tch > 1048576:
+            tch = 1048576
+        var t: Int = 0
+        while t < ntime:
+            var tc: Int = ntime - t
+            if tc > tch:
+                tc = tch
+            var adv: Int = tc
+            var span_off: Int = 0
+            var span_len: Int = 0
+            if nbits == 2:
+                span_off = data_off + t * bpt
+                span_len = tc * bpt
+            elif layout == 2:
+                span_off = data_off + want_chan * per_ch + t * npol
+                span_len = tc * npol
+            elif layout == 1:
+                span_off = data_off + (want_chan * npol + want_pol) * seglen + t
+                span_len = tc
+            else:
+                span_off = data_off + t * bpt
+                span_len = tc * bpt
+            let r0t: Int = now_millis()
+            let got: Int = k_read_at(h, nslot, span_off, paybuf, span_len)
+            t_read = t_read + (now_millis() - r0t)
+            if got < span_len:
+                println("slice: short payload read at block " + str(bidx))
+                return EXIT_ERROR
+            let u0t: Int = now_millis()
+            var on: Int = 0
+            if nbits == 8 and layout == 2:
+                let wrote: Int = observe paybuf:
+                    unpack_l2_u8(paybuf, oubuf, tc, want_pol, npol, lutarena)
+                if wrote != tc * 4:
+                    println("slice: DIVERGENCE wrote=" + str(wrote) + " want=" + str(tc * 4))
+                    return EXIT_ERROR
+                on = tc * 4
+                var sk2: Int = 0
+                while sk2 < tc:
+                    var ssb: Int = bref(paybuf, sk2 * npol + want_pol)
+                    if ssb > 127:
+                        ssb = ssb - 256
+                    let fv2: Float = ssb as Float
+                    sum = sum + fv2
+                    sumsq = sumsq + fv2 * fv2
+                    h0 = h0 + 1
+                    if ssb < bmin:
+                        bmin = ssb
+                    if ssb > bmax:
+                        bmax = ssb
+                    if len(ac) < AC_N:
+                        push(ac, fv2)
+                    total_samples = total_samples + 1
+                    sk2 = sk2 + 1
+                tc = 0
+            var kk2: Int = 0
+            while kk2 < tc:
+                var bits: Int = 0
+                var fval: Float = 0.0
+                if nbits == 2:
+                    let bb: Int = bref(paybuf, kk2 * bpt + want_chan)
+                    let code: Int = (bb >> shift) & 3
+                    if code == 0:
+                        bits = F2B0
+                        fval = F2F0
+                    elif code == 1:
+                        bits = F2B1
+                        fval = F2F1
+                    elif code == 2:
+                        bits = F2B2
+                        fval = F2F2
+                    else:
+                        bits = F2B3
+                        fval = F2F3
+                    if code == 0:
+                        h0 = h0 + 1
+                    elif code == 1:
+                        h1 = h1 + 1
+                    elif code == 2:
+                        h2 = h2 + 1
+                    else:
+                        h3 = h3 + 1
+                else:
+                    var sb2: Int = 0
+                    if layout == 2:
+                        sb2 = bref(paybuf, kk2 * npol + want_pol)
+                    elif layout == 1:
+                        sb2 = bref(paybuf, kk2)
+                    else:
+                        sb2 = bref(paybuf, kk2 * bpt + want_chan * npol + want_pol)
+                    if sb2 > 127:
+                        sb2 = sb2 - 256
+                    bits = mem_load(ptr_offset(lutarena, (sb2 + 256) % 256, "Int"), "Int")
+                    fval = sb2 as Float
+                    h0 = h0 + 1
+                    if sb2 < bmin:
+                        bmin = sb2
+                    if sb2 > bmax:
+                        bmax = sb2
+                bstore(oubuf, on, bits & 255)
+                bstore(oubuf, on + 1, (bits >> 8) & 255)
+                bstore(oubuf, on + 2, (bits >> 16) & 255)
+                bstore(oubuf, on + 3, (bits >> 24) & 255)
+                on = on + 4
+                sum = sum + fval
+                sumsq = sumsq + fval * fval
+                if len(ac) < AC_N:
+                    push(ac, fval)
+                total_samples = total_samples + 1
+                kk2 = kk2 + 1
+            t_unpack = t_unpack + (now_millis() - u0t)
+            let w0t: Int = now_millis()
+            let wrote: Int = k_write_all(oh, nslot, oubuf, on)
+            t_write = t_write + (now_millis() - w0t)
+            if wrote != on:
+                println("slice: short write at block " + str(bidx))
+                return EXIT_ERROR
+            t = t + adv
+        if nbits == 8:
+            println("slice: block " + str(bidx) + " range " + str(bmin) + ".." + str(bmax))
+        off = data_off + bs
+        bidx = bidx + 1
+        sliced = sliced + 1
+        if off >= fsize:
+            break
+
+    let _co: Int = k_CloseHandle(oh)
+    let _ci: Int = k_CloseHandle(h)
+    decay paybuf
+    decay oubuf
+    decay habuf
+    decay wbuf
+    decay nslot
+    decay lutarena
+
+    var m2: Float = 0.0
+    var rms: Float = 0.0
+    if total_samples > 0:
+        let ns: Float = total_samples as Float
+        m2 = sum / ns
+        let v2: Float = sumsq / ns - m2 * m2
+        if v2 > 0.0:
+            rms = sqrt(v2)
+    println("slice: blocks=" + str(sliced) + " samples=" + str(total_samples) + " chan=" + str(want_chan) + " pol=" + str(want_pol) + " out=" + out_path)
+    println("slice: mean_x1e4=" + str(m2 * 10000.0) + " rms_x1e4=" + str(rms * 10000.0) + " hist=" + str(h0) + "," + str(h1) + "," + str(h2) + "," + str(h3))
+    let an: Int = len(ac)
+    if an > 10000:
+        var e0: Float = 0.0
+        var ai: Int = 0
+        while ai < an:
+            e0 = e0 + ac[ai] * ac[ai]
+            ai = ai + 1
+        if e0 > 0.0:
+            var li2: Int = 0
+            while li2 < len(LAGS):
+                let L: Int = LAGS[li2]
+                var c: Float = 0.0
+                var ci: Int = 0
+                while ci + L < an:
+                    c = c + ac[ci] * ac[ci + L]
+                    ci = ci + 1
+                println("slice: Rxx lag " + str(L) + " norm_x1e5=" + str(c / e0 * 100000.0))
+                li2 = li2 + 1
+    println("slice: timing ms head=" + str(t_head) + " read=" + str(t_read) + " unpack=" + str(t_unpack) + " write=" + str(t_write))
+    if json == 1:
+        println("{\"tool\": \"slice\", \"version\": \"0.3.0\", \"blocks\": " + str(sliced) + ", \"samples\": " + str(total_samples) + ", \"chan\": " + str(want_chan) + ", \"pol\": " + str(want_pol) + ", \"verdict\": \"" + verdict + "\"}")
+    println("receipt=PASS sliced=" + str(sliced) + " samples=" + str(total_samples))
+    return EXIT_OK

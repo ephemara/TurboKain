@@ -12,6 +12,10 @@ Read this before touching code.
 > Python/C truth. TurboKain is the raw-power build: one Kain file per tool,
 > native `.exe`, arenas instead of churn, verified lanes instead of drift.
 > Same sky, same mission, different instrument.
+>
+> **SetiYeti path: `E:/SetiYeti`** ← edit this one line per machine/build if
+> it moves. That is the Python/C ground truth, the prove harnesses, and the
+> `catalog.tsv` ledger TurboKain shadows.
 
 ---
 
@@ -139,10 +143,12 @@ whole useful surface:
 kain check kain/tool.kn                 # typecheck, no artifacts
 kain check kain/tool.kn --json          # machine-readable diagnostics
 
-kain build kain/tool.kn --target llvm -o out/tool.exe   # THE build command
-kain build kain/tool.kn --emit staticlib                # -> .lib / .a
-kain build kain/tool.kn --emit sharedlib                # -> .dll / .so
-kain build kain/tool.kn --emit object                   # -> .obj / .o
+kain build <tool>.kn --target llvm                # THE build command
+                                                   # (run from the tool's dir:
+                                                   #  exe lands beside source)
+kain build <tool>.kn --emit staticlib              # -> .lib / .a
+kain build <tool>.kn --emit sharedlib              # -> .dll / .so
+kain build <tool>.kn --emit object                 # -> .obj / .o
 
 kain run kain/tool.kn --target llvm -- --flag arg   # compile + run, pass argv
 kain run dev kain/tool.kn               # watch + re-run on change
@@ -152,13 +158,74 @@ kain fmt kain/ --check                  # formatting check (--write to fix)
 kain clean --scope build               # drop build artifacts
 kain doctor                            # environment / wiring diagnostics
 kain repl                              # TUI: edit + compile to LLVM live
+kain -c 'println("hi")' -r -t llvm  # one-shot probe, like python -c (no argv
+                                     # allowed with -c; needs -r to execute)
 kain amalgamate kain/ -o out.kn         # pack a crate into one capsule
 kain init my-crate                     # scaffold a new crate
 ```
 
+TurboKain repo helper — **log every file change** (see the Ledgers section):
+
+```bash
+cd scripts && kain build memlog.kn --target llvm && cd ..   # build once
+scripts/memlog.exe <area> <type> "what changed and why" "path/one,path/two"
+# e.g.
+scripts/memlog.exe tool build "slice.kn at C parity" "kain/core/slice.kn"
+```
+
+`memlog` stamps the ISO date, seeds the `date area type description file`
+header on a new ledger, and sanitizes tabs/newlines so a field can never break
+the TSV. It appends to `./memory.tsv` — run it from the repo root.
+
 `--target llvm` is the default path for TurboKain — native CPU exes, no GPU.
 Remember: **`kain build` is the gate**; `kain check` cannot verify `converge`
 over `ptr` params.
+
+### Two commands, do not confuse them
+
+| Command | What it is | Use it? |
+|---|---|---|
+| **`kain`** | the **fast** compiler binary (no Bazel, launches instantly) | ✅ **always, for all TurboKain work** |
+| `kaindev` | the Bazel dev **auto-sync shim** (rebuilds the compiler from source) | only when deliberately working on the Kain compiler itself |
+
+Agents: **never add `D:/kain/.kain/bin` or `D:/tools/bazel` to PATH expecting to
+fix something, and never blindly prepend random paths.** `kain` is already on
+PATH and is self-contained — it resolves its own `KAIN_HOME` and runtime
+library via its wrapper, so it works even in a bare shell. If you see
+`failed to start bazel`, you are running the dev shim (`kaindev`) by mistake;
+use plain `kain` instead. Do not try to "fix" the toolchain — it is not broken.
+
+Fast binary is a snapshot of the last compiler build. After rebuilding the
+compiler, refresh it in one command:
+
+```
+D:\tools\kain\refresh.bat    # re-copies newest build to both tools/ and .kain/bin/
+```
+
+### Stdlib + runtime discovery (why the env vars exist)
+
+Kain finds the standard library by searching, in order:
+
+1. `KAIN_STDLIB_PATH` (explicit)
+2. `$KAIN_HOME/stdlib`  → `D:\kain\.kain\stdlib` (junction to the repo stdlib)
+3. ancestors of the running `kain.exe`
+4. ancestors of the cwd (this is why running from inside `kain/` works)
+
+**Builtins** (`print`, `fs_exists`, low-level `runtime_*`) are compiled into
+the binary. **Module symbols** (`process_user_args`, `text_from_byte_array`,
+`os_getenv`, `runtime_simd_*`, …) come from `stdlib/*.kn` **on disk**. If no
+stdlib root is found, whole modules silently vanish and the compiler tells you
+to "add `use std::…`" — even though it is already there. That hint is
+misleading.
+
+The native runtime archive is resolved the same way: `KAIN_RUNTIME_LIB_PATH`
+→ `$KAIN_HOME/lib/kain_runtime.lib`.
+
+**So: if a correctly-imported stdlib module shows as `Unknown identifier`, it
+is an environment/discovery problem, not your code.** Do not rewrite the
+import, do not edit the toolchain. Check `KAIN_HOME`, `KAIN_STDLIB_PATH`,
+`KAIN_RUNTIME_LIB_PATH` are set (User + Machine scope are both configured on
+this box), and that `D:\kain\.kain\stdlib` points at `D:\kain\stdlib`.
 
 ## Where the stdlib is
 
@@ -187,6 +254,52 @@ shadows. The C/numpy version stays as the `spec` lane's oracle until the prove
 harness says the Kain lane matches.
 
 ---
+
+## Ledgers — memory.tsv + catalog.tsv
+
+Two append-mostly ledgers carry the history. Both are modeled on the Kain
+repo's `memory.tsv` and SetiYeti's `catalog.tsv`. **Update them as part of the
+change, not after.**
+
+### `memory.tsv` — the change log
+
+Columns: `date  area  type  description  file` (tab-separated).
+
+- **Every file change gets a row.** Created, edited, deleted, moved — if it
+  touched the tree, log it. No silent edits.
+- `area`: subsystem (`repo`, `docs`, `env`, `tool`, `catalog`, `build`, …)
+- `type`: `add` / `update` / `fix` / `build` / `verify` / `vendor` / `scaffold` / …
+- `description`: what changed and **why**, in one line (include the receipt if
+  there is one — a fix without its evidence is a rumor)
+- `file`: affected paths, comma-separated
+
+Append a new line; never rewrite history. Today's date comes from the script.
+Use the Kain helper (built once, then run from the repo root):
+
+```bash
+kain build scripts/memlog.kn --target llvm     # once → scripts/memlog.exe
+scripts/memlog.exe <area> <type> "what changed and why" "path/one,path/two"
+```
+
+It stamps the ISO date, seeds the header if the ledger is missing, and
+sanitizes tabs/newlines so a field can never break the TSV. **This repo is
+pure Kain + MarkScript** — never add a Python/other-language helper; write it
+in Kain (see `kain/_template/cli.kn` for the CLI pattern).
+
+### `catalog.tsv` — the tool ledger
+
+Columns: `tool  source  exe  kind  status  prove  receipt  consumes  produces  notes  updated`.
+
+- One row per tool/artifact. Update it whenever a tool is built, proven, or
+  changes status (`draft` → `builds` → `proven` → `retired`).
+- **Sky-data files are NOT catalogued here.** SetiYeti's `catalog.tsv` is the
+  single scientific record of every raw/slice file; reference it by filename.
+  Do not fork it — one ledger for the sky, one for our tools.
+- `prove` / `receipt` must be real: the prove harness and the actual result.
+  `status=proven` with an empty receipt is a lie.
+
+A tool is not done until both ledgers say so: a `memory.tsv` row for the
+change, and a `catalog.tsv` row with its status and receipt.
 
 ## Where the data is
 
@@ -256,6 +369,9 @@ reports/     receipts, hits, evidence — machine-checkable outputs only
 _tmp/        scratch, gitignored, nothing load-bearing
 docs/        spec.md + the vendored Kain baseline under docs/kain/
 _objective/  the mission (objective_1.md)
+scripts/     Kain helpers (memlog.kn — append a memory.tsv row)
+memory.tsv   append-only change log — EVERY file change gets a row
+catalog.tsv  TurboKain tool/artifact ledger (see the Ledgers section above)
 AGENTS.md    this file
 ```
 
@@ -264,17 +380,47 @@ AGENTS.md    this file
 ## Build & run
 
 ```bash
-# Build one tool to native
-kain build kain/<tool>.kn --target llvm -o out/<tool>.exe
+# Build one tool to native (exe lands next to the source — see below)
+cd kain/<crate>
+kain build <tool>.kn --target llvm
+
+# or explicitly, from anywhere:
+kain build kain/<crate>/<tool>.kn --target llvm -o kain/<crate>/<tool>.exe
 
 # Check (parse + types; cannot verify ptr lanes — see rules)
-kain check kain/<tool>.kn
+kain check kain/<crate>/<tool>.kn
 
 # Run
-out/<tool>.exe <args...>
+kain/<crate>/<tool>.exe <args...>
 ```
 
-No Bazel in this repo. No Python in the hot path. The Kain toolchain lives
+### Where builds put things (read this before building)
+
+`kain build <file>.kn --target llvm` **with no `-o`**:
+
+- **the `.exe` is copied to the current working directory**, named after the
+  source stem (`tool.kn` → `tool.exe`)
+- **intermediates stay next to the source**: `<source-dir>/.kain/out/…` (`.ll`,
+  `runtime_contract.json`, `kain-artifacts.json`) and
+  `<source-dir>/.kain/reports/build/…`
+- `-o` takes a **file path, not a directory** — `-o outdir` fails with a
+  `copy_file` access-denied; pass `-o path/tool.exe`
+
+**Convention: `cd` into the tool's own folder and build there.** Then the exe
+lands right beside its source (`kain/lane_sieve/lane_sieve.kn` →
+`…/lane_sieve.exe`) and nothing scatters. One-off tests especially: a temp
+folder with a `.kn` in it, `cd` there, build, run — no hunting through
+`.kain/out/` trees for the binary.
+
+This is a **convention, not a requirement** — explicit `-o` is always valid,
+and CI/release lanes may want a single `out/` dir. But for research work,
+side-by-side is easier to find, easier to delete, and keeps `.kain/` strictly
+for intermediate artifacts. Exact-build-location context matters when you are
+comparing tools or proving parity with the C/numpy lane next door.
+
+No Bazel in this repo. Repo code is **pure Kain + MarkScript** — helpers
+included. Python/C live next door in SetiYeti as the spec-truth lane; invoke
+them from there, never add a helper in another language here. The Kain toolchain lives
 outside this repo (warm) — `kain` is on PATH.
 
 ---
@@ -309,6 +455,9 @@ outside this repo (warm) — `kain` is on PATH.
 
 ## Common pitfalls (bled for — do not rediscover)
 
+- **`failed to start bazel`** → you invoked the dev shim. Use `kain` (fast);
+  `kaindev` is compiler-work only. Never prepend `.kain/bin`/`bazel` to PATH
+  to "fix" it.
 - `converge` over `ptr` params can never pass `check`; go through `build`.
 - `use std::collections` is required for `int_max`; `std::io` was missing it.
 - String interpolation `"{var}"` prints literally in some paths — use
@@ -318,6 +467,27 @@ outside this repo (warm) — `kain` is on PATH.
   buffers, single-threaded.
 - GPU/shader/UI paths are out of scope for Objective 1 on this box. CPU lanes
   (`capability("cpu.x86.avx2")`) are the fast path.
+- **Probes go through `kain -c`, not `_tmp` files.** `kain -c '<code>' -r -t llvm`
+  runs inline Kain (multi-line + `use` fine). `kain repl` is for humans;
+  agents use `-c`. Caveat: `-c` cannot take argv — argv tests still need a file.
+- **Bulk bytes never ride `Array<Int>`.** `fs_read_bytes_range` /
+  `fs_append_bytes` cost 1–21 us/B (measured, superlinear) — ~1000x off
+  memcpy. Small reads (24 KB headers) are fine; payload-scale IO must use
+  kernel32 handles + Byte arenas (below), never the `fs_*` bridge.
+- **Fast bulk IO = `@extern` kernel32 + `ptr<Byte>` arenas** (KAINOS-proven,
+  no C files, no headers, no `use std::fs`): `CreateFileA` / `GetFileSizeEx` /
+  `SetFilePointer` (hi/lo slot for >4 GB) / `ReadFile` / `WriteFile` /
+  `CloseHandle`, `null_ptr()` = `int_to_ptr(0, "ptr<Void>")`, validity =
+  `ptr_to_int(h) == -1`. One handle per file, sequential chunk reads/writes.
+- **Byte load/store semantics (exact, bled for):** read byte `i` as Int via
+  Int-window load `mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255`
+  (NOT `mem_load "Byte" + as Int` — that reinterprets the 8-byte window).
+  Store via `mem_store(ptr_offset(buf, i, "Byte"), v as Byte, "Byte")`
+  for v in 0..255. `alloc_zeroed(n, "Byte")` arenas are byte-granular.
+- **`str(Float)` truncates toward zero** in this lane — print `str(x * 10000.0)`
+  as `x1e4` (or x1e5) instead of lying with decimals.
+- **Reserved words that bite:** `out`, `share`, `match` cannot be identifiers
+  (params, locals, or bindings). Rename to `outn`/`sharemode`/`hit`.
 
 ---
 

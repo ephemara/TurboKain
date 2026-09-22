@@ -1,0 +1,448 @@
+// -- KAIN RAW AMALGAMATION -- src ----------------------------------------------------------
+// kind:       directory
+// contents:   source
+// structure:  2 files | 2 modules
+//
+// -- PUBLIC INTERFACE DIRECTORY -----------------------------------------------
+//
+// [functions]
+//   fn is_subcommand(s: String) -> Bool
+//   fn main() -> Int
+//   fn cmd_run(cfg: CliConfig) -> Int
+//   fn cmd_check(cfg: CliConfig) -> Int
+//   fn cmd_exec(cfg: CliConfig) -> Int
+//
+// ============================================================================
+// cli.kn
+// ============================================================================
+// ============================================================================
+//  cli.kn — CLI argument parser and dispatcher for Kain starter projects
+//
+//  Design follows markscript's proven pattern:
+//    get_user_args()  → portable argv wrapper (strips executable path)
+//    parse_args()     → flag + subcommand parsing → CliConfig
+//    usage()          → clap-like help text, exit codes, subcommands
+//
+//  Ladder: Layer 0 — plain fn with Pure effect. No world, no actor.
+//  Just CLI hygiene that translates argv into a typed config struct.
+//
+//  Subcommands:
+//    run <file>       Execute the default pipeline (default when <file> given)
+//    check <file>     Validate and verify (compile-only)
+//    help             Show this help message
+//    version          Show version
+//    exec <expr>      Execute a one-shot expression
+//
+//  Exit codes:
+//    0   — success
+//    1   — help or version shown (not an error)
+//    2   — error — file not found, parse failure, runtime
+//    3   — unknown subcommand or flag
+// ============================================================================
+
+use std::process
+
+// ============================================================================
+//  EXIT CODE CONSTANTS
+// ============================================================================
+
+pub const EXIT_OK:      Int = 0
+pub const EXIT_HELP:    Int = 1   // help or version shown (no error)
+pub const EXIT_ERROR:   Int = 2   // file not found, parse failure, runtime error
+pub const EXIT_UNKNOWN: Int = 3   // unknown subcommand or flag
+
+// ============================================================================
+//  SUBCOMMAND CONSTANTS
+// ============================================================================
+
+pub const SUBCMD_RUN:     String = "run"
+pub const SUBCMD_CHECK:   String = "check"
+pub const SUBCMD_HELP:    String = "help"
+pub const SUBCMD_VERSION: String = "version"
+pub const SUBCMD_EXEC:    String = "exec"
+pub const SUBCMD_NONE:    String = ""
+
+// ============================================================================
+//  CLI CONFIG — typed result of CLI argument parsing
+// ============================================================================
+
+pub struct CliConfig:
+    subcommand:   String     // "run", "check", "help", "version", "exec"
+    filepath:     String     // path to input file
+    output_path:  String     // --output / -o value
+    quiet:        Bool       // suppress runtime logging (--quiet, -q)
+    json:         Bool       // structured JSON output (--json)
+    show_help:    Bool       // --help / -h flag
+    show_version: Bool       // --version / -v flag
+
+// ============================================================================
+//  DEFAULT CONFIG  —  sensible zero values
+// ============================================================================
+
+pub fn default_config() -> CliConfig:
+    return CliConfig {
+        subcommand: SUBCMD_RUN,
+        filepath: "",
+        output_path: "",
+        quiet: false,
+        json: false,
+        show_help: false,
+        show_version: false,
+    }
+
+// ============================================================================
+//  GET USER ARGS  —  strips argv[0] (executable path)
+//
+//  Uses process_user_args() which portably handles the argv[0] stripping
+//  across native and interpreter lanes.
+// ============================================================================
+
+pub fn get_user_args() -> Array<String>:
+    return process_user_args()
+
+// ============================================================================
+//  USAGE  —  clap-like help text
+// ============================================================================
+
+pub fn usage() -> String:
+    var text = "Starter CLI 0.1.0\n"
+    text = text + "A Kain starter project for CLI tools.\n"
+    text = text + "\n"
+    text = text + "USAGE:\n"
+    text = text + "  starter <subcommand> [options] [args]\n"
+    text = text + "  starter [<file>]                Default subcommand: run\n"
+    text = text + "\n"
+    text = text + "SUBCOMMANDS:\n"
+    text = text + "  run <file>          Execute the default pipeline (default)\n"
+    text = text + "  check <file>        Validate and verify, no execution\n"
+    text = text + "  exec <expr>         Execute a one-shot expression\n"
+    text = text + "  help                Show this help message\n"
+    text = text + "  version             Show version and exit\n"
+    text = text + "\n"
+    text = text + "FLAGS:\n"
+    text = text + "  -h, --help          Show this help message and exit\n"
+    text = text + "  -v, --version       Show version and exit\n"
+    text = text + "  -q, --quiet         Suppress runtime logging and telemetry\n"
+    text = text + "      --json          Output structured JSON (where supported)\n"
+    text = text + "  -o, --output <path> Output path for results\n"
+    text = text + "\n"
+    text = text + "EXAMPLES:\n"
+    text = text + "  starter run input.txt          Run with input file\n"
+    text = text + "  starter check input.txt        Validate input\n"
+    text = text + "  starter exec 'compute 42'      One-shot expression\n"
+    text = text + "  starter --help                 Show this help\n"
+    text = text + "  starter --version              Show version\n"
+    text = text + "  starter -q --json run data     Quiet JSON output\n"
+    text = text + "\n"
+    text = text + "EXIT CODES:\n"
+    text = text + "  0   Success\n"
+    text = text + "  1   Help or version shown (no error)\n"
+    text = text + "  2   Error — file not found, parse failure, runtime\n"
+    text = text + "  3   Unknown subcommand or flag\n"
+    return text
+
+pub fn version() -> String:
+    return "Starter CLI 0.1.0\n"
+
+// ============================================================================
+//  RECOGNIZED SUBCOMMAND SET
+// ============================================================================
+
+fn is_subcommand(s: String) -> Bool:
+    if s == SUBCMD_RUN:     return true
+    if s == SUBCMD_CHECK:   return true
+    if s == SUBCMD_HELP:    return true
+    if s == SUBCMD_VERSION: return true
+    if s == SUBCMD_EXEC:    return true
+    return false
+
+// ============================================================================
+//  PARSE ARGS  —  translate argv into CliConfig
+//
+//  Subcommand-first parsing:
+//    starter run file.txt     → subcommand="run",   filepath="file.txt"
+//    starter check file.txt   → subcommand="check",  filepath="file.txt"
+//    starter exec '<expr>'    → subcommand="exec",   filepath='<expr>'
+//    starter file.txt         → no subcommand, defaults to "run"
+//    starter                  → no args, shows help
+//    starter --help           → show_help=true
+//
+//  Flags can appear anywhere (after subcommand, before file, etc.).
+//  -- stops flag parsing.
+// ============================================================================
+
+pub fn parse_args(argv: Array<String>) -> CliConfig:
+    var cfg = default_config()
+    var found_subcommand = false
+    var found_positional = false
+    var flags_done = false     // after --, everything is positional
+
+    var index = 0
+    while index < len(argv):
+        let arg = argv[index]
+
+        // After --, no more flag parsing
+        if arg == "--":
+            flags_done = true
+            index = index + 1
+            continue
+
+        // Flag parsing (before --)
+        if flags_done == false and char_at(arg, 0) == "-":
+            if arg == "--help" or arg == "-h":
+                cfg.show_help = true
+
+            elif arg == "--version" or arg == "-v":
+                cfg.show_version = true
+
+            elif arg == "--quiet" or arg == "-q":
+                cfg.quiet = true
+
+            elif arg == "--json":
+                cfg.json = true
+
+            elif arg == "--output" or arg == "-o":
+                if index + 1 < len(argv):
+                    cfg.output_path = argv[index + 1]
+                    index = index + 1
+
+            // Unknown flags are silently skipped for extensibility
+
+            index = index + 1
+            continue
+
+        // Positional argument parsing
+        if found_subcommand == false:
+            if is_subcommand(arg):
+                cfg.subcommand = arg
+                found_subcommand = true
+
+                // Special subcommands that take no filepath
+                if arg == SUBCMD_HELP or arg == SUBCMD_VERSION:
+                    index = index + 1
+                    continue
+
+                // Subcommands that consume the next positional
+                index = index + 1
+                continue
+
+            else:
+                // No subcommand found — first positional is a filepath,
+                // subcommand defaults to "run"
+                cfg.filepath = arg
+                found_positional = true
+                found_subcommand = true   // implicit "run"
+                index = index + 1
+                continue
+
+        // We have a subcommand but haven't consumed positional values yet
+        if found_subcommand and found_positional == false:
+            if cfg.subcommand == SUBCMD_RUN:
+                cfg.filepath = arg
+                found_positional = true
+
+            elif cfg.subcommand == SUBCMD_CHECK:
+                cfg.filepath = arg
+                found_positional = true
+
+            elif cfg.subcommand == SUBCMD_EXEC:
+                cfg.filepath = arg     // store expression as filepath
+                found_positional = true
+
+            else:
+                // Unexpected positional for this subcommand
+                found_positional = true
+
+            index = index + 1
+            continue
+
+        // Extra positional args — silently ignored for extensibility
+        index = index + 1
+
+    // Post-processing: if no subcommand detected and no filepath,
+    // default to showing help
+    if found_subcommand == false:
+        cfg.subcommand = SUBCMD_HELP
+
+    return cfg
+
+// ============================================================================
+//  SUBCOMMAND DISPATCH HELPERS
+// ============================================================================
+
+// Check if a subcommand requires a filepath and it's missing
+pub fn needs_filepath(subcommand: String) -> Bool:
+    if subcommand == SUBCMD_RUN:     return true
+    if subcommand == SUBCMD_CHECK:   return true
+    return false
+
+// Check if a subcommand needs execution (not just info display)
+pub fn needs_execution(subcommand: String) -> Bool:
+    if subcommand == SUBCMD_RUN:     return true
+    if subcommand == SUBCMD_CHECK:   return true
+    if subcommand == SUBCMD_EXEC:    return true
+    return false
+
+// Human-readable subcommand name for error messages
+pub fn subcommand_name(subcommand: String) -> String:
+    if subcommand == SUBCMD_RUN:     return "run"
+    if subcommand == SUBCMD_CHECK:   return "check"
+    if subcommand == SUBCMD_HELP:    return "help"
+    if subcommand == SUBCMD_VERSION: return "version"
+    if subcommand == SUBCMD_EXEC:    return "exec"
+    return "unknown"
+
+// ============================================================================
+// main.kn
+// ============================================================================
+// ============================================================================
+//  STARTER CLI — Kain CLI project template
+//
+//  Entry point for the starter CLI. Wires cli → dispatch → execution.
+//  This is the file users customize to add their own subcommand logic.
+//
+//  Usage (see cli.kn for full subcommand reference):
+//    starter run <file>          — execute with input file (default)
+//    starter check <file>        — validate only, no execution
+//    starter exec '<expr>'       — one-shot expression
+//    starter --help              — show full usage
+//    starter --version           — show version
+//
+//  Value semantics throughout (no ptr<T>) for codegen compatibility.
+// ============================================================================
+
+use std::process
+use cli             // CliConfig, get_user_args, parse_args, usage, version,
+                    // EXIT_OK, EXIT_HELP, EXIT_ERROR, EXIT_UNKNOWN,
+                    // SUBCMD_RUN, SUBCMD_CHECK, SUBCMD_HELP, SUBCMD_VERSION, SUBCMD_EXEC
+
+// ============================================================================
+//  MAIN ENTRY POINT
+// ============================================================================
+
+fn main() -> Int:
+    // ---- Parse CLI arguments via cli.kn -----------------------------------
+
+    let argv = get_user_args()
+    let cfg = parse_args(argv)
+
+    // --help / -h: show usage and exit immediately (no runtime needed)
+    if cfg.show_help:
+        print(usage())
+        return EXIT_HELP
+
+    // --version / -v
+    if cfg.show_version:
+        print(version())
+        return EXIT_HELP
+
+    // ---- Subcommand dispatch ----------------------------------------------
+
+    if cfg.subcommand == SUBCMD_HELP:
+        print(usage())
+        return EXIT_HELP
+
+    if cfg.subcommand == SUBCMD_VERSION:
+        print(version())
+        return EXIT_HELP
+
+    if cfg.subcommand == SUBCMD_RUN:
+        return cmd_run(cfg)
+
+    if cfg.subcommand == SUBCMD_CHECK:
+        return cmd_check(cfg)
+
+    if cfg.subcommand == SUBCMD_EXEC:
+        return cmd_exec(cfg)
+
+    // Unknown subcommand (shouldn't reach here if parse_args is correct)
+    print("Unknown subcommand: " + cfg.subcommand + "\n")
+    print("Run 'starter --help' for usage.\n")
+    return EXIT_UNKNOWN
+
+
+// ============================================================================
+//  SUBCOMMAND: run  —  default execution pipeline
+// ============================================================================
+
+fn cmd_run(cfg: CliConfig) -> Int:
+    // ---- Welcome banner ---------------------------------------------------
+    println("=== Starter CLI 0.1.0 ===")
+    println("")
+
+    // ---- Validate input ---------------------------------------------------
+    if cfg.filepath == "":
+        println("[CLI] No input file specified.")
+        println("Usage: starter run <file>")
+        println("  or:  starter <file>")
+        return EXIT_ERROR
+
+    // ---- Config report (quiet mode suppresses this) -----------------------
+    if cfg.quiet == false:
+        println("[CONFIG]")
+        println("  subcommand:  " + cfg.subcommand)
+        println("  filepath:    " + cfg.filepath)
+        println("  output:      " + cfg.output_path)
+        println("  json:        " + str(cfg.json))
+        println("  quiet:       " + str(cfg.quiet))
+        println("")
+
+    // ---- Execute the pipeline ---------------------------------------------
+    // Replace this with your own logic. This is a placeholder that:
+    //   1. Reads the input file
+    //   2. Processes each line
+    //   3. Reports results
+
+    println("[RUN] Processing file: " + cfg.filepath)
+    println("[RUN] Done.")
+
+    // Report output path if set
+    if cfg.output_path != "":
+        println("[OUTPUT] Results written to: " + cfg.output_path)
+
+    println("")
+    println("=== Execution complete ===")
+    return EXIT_OK
+
+
+// ============================================================================
+//  SUBCOMMAND: check  —  compile-only validation
+// ============================================================================
+
+fn cmd_check(cfg: CliConfig) -> Int:
+    if cfg.filepath == "":
+        println("[CLI] check requires a file path")
+        println("Usage: starter check <file>")
+        return EXIT_ERROR
+
+    println("=== Starter CLI 0.1.0 — Check ===")
+    println("")
+    println("[CHECK] Validating: " + cfg.filepath)
+    // Replace this with your own validation logic
+    println("[CHECK] Validation complete.")
+    println("")
+    println("=== Check complete ===")
+    return EXIT_OK
+
+
+// ============================================================================
+//  SUBCOMMAND: exec  —  one-shot expression execution
+// ============================================================================
+
+fn cmd_exec(cfg: CliConfig) -> Int:
+    if cfg.filepath == "":
+        println("[CLI] exec requires an expression")
+        println("Usage: starter exec '<expr>'")
+        println("Example: starter exec 'process input.txt'")
+        return EXIT_ERROR
+
+    println("=== Starter CLI 0.1.0 — Exec ===")
+    println("")
+    println("[EXEC] Expression: " + cfg.filepath)
+    // Replace this with your own expression evaluator
+    // Hint: parse cfg.filepath as a mini-command + args
+    println("[EXEC] Result: (placeholder)")
+    println("")
+    println("=== Exec complete ===")
+    return EXIT_OK
+

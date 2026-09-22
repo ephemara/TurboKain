@@ -1,0 +1,86 @@
+// ============================================================================
+//  memlog.kn — append a row to TurboKain's memory.tsv change log
+//
+//  Pure Kain replacement for the old Python helper. Every file change in this
+//  repo gets a row here (see AGENTS.md, "Ledgers"). Tab-separated, append-only.
+//
+//  USAGE:
+//    memlog <area> <type> "<description>" "<file1,file2>" [ledger]
+//
+//  EXAMPLE:
+//    memlog tool build "slice.kn builds at C parity" "kain/core/slice.kn"
+//
+//  Columns: date  area  type  description  file
+//  Default ledger: memory.tsv in the current directory (run from repo root).
+//
+//  Exit codes: 0 ok · 2 usage error · 3 write refused
+// ============================================================================
+
+use std::fs
+use std::process
+use std::text
+use std::time
+
+const DEFAULT_LEDGER: String = "memory.tsv"
+
+// --- zero-pad a month/day to two digits -------------------------------------
+fn pad2(value: Int) -> String:
+    if value < 10:
+        return "0" + str(value)
+    return str(value)
+
+// --- today's date as YYYY-MM-DD, from the system clock ----------------------
+fn iso_date() -> String:
+    let dt = datetime_from_epoch_millis(now_millis())
+    return str(dt.year) + "-" + pad2(dt.month) + "-" + pad2(dt.day)
+
+// --- flatten a field so it can never break the TSV --------------------------
+fn sanitize(value: String) -> String:
+    var clean: String = text_replace_string(value, "\t", " ")
+    clean = text_replace_string(clean, "\n", " ")
+    clean = text_replace_string(clean, "\r", " ")
+    return clean
+
+fn usage() -> String:
+    var t: String = "memlog — append a row to memory.tsv\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  memlog <area> <type> \"<description>\" \"<file1,file2>\" [ledger]\n"
+    t = t + "\n"
+    t = t + "EXAMPLE:\n"
+    t = t + "  memlog tool build \"slice.kn builds at C parity\" \"kain/core/slice.kn\"\n"
+    t = t + "\n"
+    t = t + "Columns: date  area  type  description  file (tab-separated, append-only).\n"
+    t = t + "Default ledger: memory.tsv in the current directory.\n"
+    return t
+
+fn main() -> Int:
+    let args: Array<String> = process_user_args()
+    if len(args) < 4:
+        print(usage())
+        return 2
+
+    let area: String = sanitize(args[0])
+    let kind: String = sanitize(args[1])
+    let description: String = sanitize(args[2])
+    let files: String = sanitize(args[3])
+
+    var ledger: String = DEFAULT_LEDGER
+    if len(args) >= 5:
+        ledger = args[4]
+
+    // Seed the header if the ledger does not exist yet.
+    if fs_exists(ledger) == false:
+        let header: String = "date\tarea\ttype\tdescription\tfile\n"
+        let seed = fs_try_append_text(ledger, header)
+        if seed.ok == false:
+            println("error: cannot create ledger '" + ledger + "': " + seed.error.message)
+            return 3
+
+    let row: String = iso_date() + "\t" + area + "\t" + kind + "\t" + description + "\t" + files + "\n"
+    let result = fs_try_append_text(ledger, row)
+    if result.ok == false:
+        println("error: cannot append to '" + ledger + "': " + result.error.message)
+        return 3
+    print("logged: " + row)
+    return 0
