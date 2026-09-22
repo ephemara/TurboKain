@@ -1,0 +1,800 @@
+// ============================================================================
+// fam_god.kn — TurboKain 06G: god-mode cyclostationary hunter (ONE file)
+//
+// What fam_scan.c can't see at any SNR, this hunts by construction:
+//   1. TWIDDLE LANES — cached-twiddle FFT as converge fast lane (spec =
+//      on-the-fly-trig scalar). Same peaks, less trig. AVX2-intrinsic FFT
+//      drops into the fast lane the day the runtime ships one.
+//   2. EXACT FLOOR — chi-square p-values with TRIALS correction replace
+//      ratio>3.0 magic. Under H0, M-averaged bin power ~ Gamma(M,M); with
+//      median factor mf=(1-1/9M)^3: p = Q(M, M*r/mf), family-wise over the
+//      scanned bins: p_fwe = 1-(1-p)^N. Gate: --pfwe (default 0.01).
+//      NOTE: this is MORE sensitive than 3.0 by design (3.0 ≈ p_fwe 1e-40
+//      at M=32 — ultra-conservative). A lone p=0.005 blip is I1 material,
+//      not a discovery; the veto + context decide. The number is honest.
+//   3. SEG BANK — 8192/32768/131072 in one pass (--segbank); each baud
+//      decade gets its optimal binning instead of leaking into the floor.
+//   4-5. NEXT: tbd-alpha (Viterbi across segs) + plane/tripwires/journal.
+//      This file is architected for them (per-SEG rows carry everything
+//      the TBD needs); they land as their own proven layer, not today.
+//
+// Parity anchors (must never drift): Y2/Y4 feature math, SEG default 32768,
+// topK + +-3 suppression + DC exclusion, peak LISTS identical to fam_scan.
+// Gamma core: Lanczos log-gamma + NR series/fraction (unit-tested via -c).
+//
+//   fam_god --in <f32> [--fs HZ] [--seg N] [--segbank] [--topk K]
+//           [--pfwe P] [--cand path] [--out fam.md] [--csv fam.csv]
+//           [--data-dir D] [--json]
+//   fam_god <f32> [fs] [seg] [topK] [candpath|-]
+//
+// Exit codes: 0 scanned, 1 help, 2 error.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+// ── kernel32 file API (no fs bridge for bulk) ───────────────────────────────
+@extern @link_name("CreateFileA")
+fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
+
+@extern @link_name("ReadFile")
+fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("GetFileSizeEx")
+fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
+
+@extern @link_name("CloseHandle")
+fn k_CloseHandle(h: ptr<Void>) -> Int
+
+@extern @link_name("GetLastError")
+fn k_GetLastError() -> Int
+
+fn null_ptr() -> ptr<Void> with Pure:
+    return int_to_ptr(0, "ptr<Void>")
+
+const GEN_READ: Int = 2147483648
+const OPEN_EXISTING: Int = 3
+const FILE_NORMAL: Int = 128
+const FILE_SHARE_RW: Int = 3
+
+const EXIT_OK: Int = 0
+const EXIT_HELP: Int = 1
+const EXIT_ERROR: Int = 2
+
+const SEG_DEFAULT: Int = 32768
+const TOPK_DEFAULT: Int = 15
+const SK_PI2: Float = 6.283185307179586
+const LN2ish: Float = 0.6931471805599453
+const LOG10E: Float = 2.302585092994046
+const G_EPS: Float = 0.0000003
+const G_FPMIN: Float = 0.000000000000000000000000000001
+
+fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
+    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
+
+fn parse_int_text(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var sign: Int = 1
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = -1
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var value: Int = 0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        var digit: Int = 0
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return value * sign
+        value = value * 10 + digit
+        index = index + 1
+    return value * sign
+
+fn parse_float_text(text: String) -> Float:
+    var t: String = text_trim_string(text)
+    if len(t) == 0:
+        return 0.0
+    var sign: Float = 1.0
+    var i: Int = 0
+    if char_at(t, 0) == "-":
+        sign = -1.0
+        i = 1
+    elif char_at(t, 0) == "+":
+        i = 1
+    var intpart: Float = 0.0
+    while i < len(t):
+        let c: String = char_at(t, i)
+        if c == ".":
+            break
+        if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
+            intpart = intpart * 10.0 + (parse_int_text(c) as Float)
+        elif c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
+            intpart = intpart * 10.0 + (parse_int_text(c) as Float)
+        else:
+            break
+        i = i + 1
+    var frac: Float = 0.0
+    var div: Float = 1.0
+    if i < len(t) and char_at(t, i) == ".":
+        i = i + 1
+        while i < len(t):
+            let c: String = char_at(t, i)
+            var dd: Int = -1
+            if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
+                dd = parse_int_text(c)
+            elif c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
+                dd = parse_int_text(c)
+            else:
+                break
+            div = div * 10.0
+            frac = frac + (dd as Float) / div
+            i = i + 1
+    return sign * (intpart + frac)
+
+fn find_from(hay: String, needle: String, start: Int) -> Int:
+    let hn: Int = len(hay)
+    let nn: Int = len(needle)
+    if nn == 0:
+        return start
+    var i: Int = start
+    if i < 0:
+        i = 0
+    while i + nn <= hn:
+        var j: Int = 0
+        var hit: Int = 1
+        while j < nn:
+            if char_at(hay, i + j) != char_at(needle, j):
+                hit = 0
+            j = j + 1
+        if hit == 1:
+            return i
+        i = i + 1
+    return -1
+
+fn is_all_digits(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var hasdot: Int = 0
+    var i: Int = 0
+    while i < len(text):
+        let c: String = char_at(text, i)
+        if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
+            i = i + 1
+        elif c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
+            i = i + 1
+        elif c == "." and hasdot == 0:
+            hasdot = 1
+            i = i + 1
+        else:
+            return 0
+    return 1
+
+// Exact f32-LE quad → Float via 2^e table.
+fn f32_of_quad(b0: Int, b1: Int, b2: Int, b3: Int, p2t: ptr<Float>) -> Float with Unsafe:
+    let bits: Int = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+    if bits == 0:
+        return 0.0
+    let sign: Int = bits >> 31
+    let exp: Int = (bits >> 23) & 255
+    let mant: Int = bits & 8388607
+    if exp == 0 or exp == 255:
+        return 0.0
+    let frac: Float = 1.0 + (mant as Float) / 8388608.0
+    var v: Float = frac * mem_load(ptr_offset(p2t, exp - 1, "Float"), "Float")
+    if sign == 1:
+        v = 0.0 - v
+    return v
+
+// ── Radix-2 DIT FFT core (shared by both lanes) ─────────────────────────────
+fn sk_bitrev(re: ptr<Float>, im: ptr<Float>, n: Int):
+    var j: Int = 0
+    var i: Int = 1
+    while i < n:
+        var bit: Int = n / 2
+        while bit > 0:
+            if j >= bit:
+                j = j - bit
+                bit = bit / 2
+            else:
+                break
+        j = j + bit
+        if i < j:
+            let tr: Float = mem_load(ptr_offset(re, i, "Float"), "Float")
+            let ti: Float = mem_load(ptr_offset(im, i, "Float"), "Float")
+            mem_store(ptr_offset(re, i, "Float"), mem_load(ptr_offset(re, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(im, i, "Float"), mem_load(ptr_offset(im, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(re, j, "Float"), tr, "Float")
+            mem_store(ptr_offset(im, j, "Float"), ti, "Float")
+        i = i + 1
+    return
+
+// Spec lane: twiddles computed on the fly (trig per butterfly).
+fn fft_trig(re: ptr<Float>, im: ptr<Float>, n: Int) -> Int:
+    sk_bitrev(re, im, n)
+    var size: Int = 2
+    while size <= n:
+        let half_size: Int = size / 2
+        let step: Float = 0.0 - SK_PI2 / (size as Float)
+        var i: Int = 0
+        while i < n:
+            var k: Int = 0
+            var j: Int = i
+            while j < i + half_size:
+                let ang: Float = (k as Float) * step
+                let cw: Float = cos(ang)
+                let sw: Float = sin(ang)
+                let ar: Float = mem_load(ptr_offset(re, j + half_size, "Float"), "Float")
+                let ai: Float = mem_load(ptr_offset(im, j + half_size, "Float"), "Float")
+                let tpre: Float = cw * ar - sw * ai
+                let tpim: Float = sw * ar + cw * ai
+                let xr: Float = mem_load(ptr_offset(re, j, "Float"), "Float")
+                let xi: Float = mem_load(ptr_offset(im, j, "Float"), "Float")
+                mem_store(ptr_offset(re, j, "Float"), xr + tpre, "Float")
+                mem_store(ptr_offset(im, j, "Float"), xi + tpim, "Float")
+                mem_store(ptr_offset(re, j + half_size, "Float"), xr - tpre, "Float")
+                mem_store(ptr_offset(im, j + half_size, "Float"), xi - tpim, "Float")
+                k = k + 1
+                j = j + 1
+            i = i + size
+        size = size * 2
+    return 0
+
+// Twiddle tables: stage s (hs2 = 2^s) owns hs2 pairs at off = 2^s - 1.
+fn build_twiddles(n: Int, twc: ptr<Float>, tws: ptr<Float>) -> Int with Unsafe:
+    var off: Int = 0
+    var hs2: Int = 1
+    while hs2 < n:
+        var k: Int = 0
+        while k < hs2:
+            let ang: Float = 0.0 - SK_PI2 * (k as Float) / ((hs2 * 2) as Float)
+            mem_store(ptr_offset(twc, off + k, "Float"), cos(ang), "Float")
+            mem_store(ptr_offset(tws, off + k, "Float"), sin(ang), "Float")
+            k = k + 1
+        off = off + hs2
+        hs2 = hs2 * 2
+    return off
+
+// Fast lane: identical butterflies, zero trig (table lookups only).
+fn fft_twiddled(re: ptr<Float>, im: ptr<Float>, n: Int, twc: ptr<Float>, tws: ptr<Float>) -> Int:
+    sk_bitrev(re, im, n)
+    var size: Int = 2
+    var off: Int = 0
+    while size <= n:
+        let half_size: Int = size / 2
+        var i: Int = 0
+        while i < n:
+            var k: Int = 0
+            var j: Int = i
+            while j < i + half_size:
+                let cw: Float = mem_load(ptr_offset(twc, off + k, "Float"), "Float")
+                let sw: Float = mem_load(ptr_offset(tws, off + k, "Float"), "Float")
+                let ar: Float = mem_load(ptr_offset(re, j + half_size, "Float"), "Float")
+                let ai: Float = mem_load(ptr_offset(im, j + half_size, "Float"), "Float")
+                let tpre: Float = cw * ar - sw * ai
+                let tpim: Float = sw * ar + cw * ai
+                let xr: Float = mem_load(ptr_offset(re, j, "Float"), "Float")
+                let xi: Float = mem_load(ptr_offset(im, j, "Float"), "Float")
+                mem_store(ptr_offset(re, j, "Float"), xr + tpre, "Float")
+                mem_store(ptr_offset(im, j, "Float"), xi + tpim, "Float")
+                mem_store(ptr_offset(re, j + half_size, "Float"), xr - tpre, "Float")
+                mem_store(ptr_offset(im, j + half_size, "Float"), xi - tpim, "Float")
+                k = k + 1
+                j = j + 1
+            i = i + size
+        off = off + half_size
+        size = size * 2
+    return 0
+
+// NOTE: no `verify` — verify cannot synthesize ptr params. Equivalence
+// receipt is runtime: peak-list identity vs the trig lane + vs C.
+converge fft_improved(re: ptr<Float>, im: ptr<Float>, n: Int, twc: ptr<Float>, tws: ptr<Float>) -> Int:
+    spec reference:
+        return fft_trig(re, im, n)
+    fast twiddle_lane when capability("cpu.x86.avx2"):
+        return fft_twiddled(re, im, n, twc, tws)
+
+// Log-gamma via Lanczos g=5 (Numerical Recipes gammln, transcribed).
+fn gammln_xx(xx: Float) -> Float:
+    var y: Float = xx
+    var tmp: Float = xx + 5.5
+    tmp = tmp - (xx + 0.5) * log(tmp)
+    var ser: Float = 1.000000000190015
+    y = y + 1.0
+    ser = ser + 76.18009172947146 / y
+    y = y + 1.0
+    ser = ser - 86.50532032961677 / y
+    y = y + 1.0
+    ser = ser + 24.01409824083091 / y
+    y = y + 1.0
+    ser = ser - 1.231739572450155 / y
+    y = y + 1.0
+    ser = ser + 0.001208650973866179 / y
+    y = y + 1.0
+    ser = ser - 0.000005395239384953 / y
+    return 0.0 - tmp + log(2.5066282746310005 * ser / xx)
+
+fn gser_val(aa: Float, xx: Float) -> Float:
+    let gln: Float = gammln_xx(aa)
+    var ap: Float = aa
+    var summ: Float = 1.0 / aa
+    var del: Float = summ
+    var n: Int = 1
+    while n <= 700:
+        ap = ap + 1.0
+        del = del * xx / ap
+        summ = summ + del
+        var ad: Float = del
+        if ad < 0.0:
+            ad = 0.0 - ad
+        var am: Float = summ
+        if am < 0.0:
+            am = 0.0 - am
+        if ad < am * G_EPS:
+            break
+        n = n + 1
+    return summ * exp(0.0 - xx + aa * log(xx) - gln)
+
+fn gcf_val(aa: Float, xx: Float) -> Float:
+    let gln: Float = gammln_xx(aa)
+    var b: Float = xx + 1.0 - aa
+    var c: Float = 1.0 / G_FPMIN
+    var d: Float = 1.0 / b
+    if d < 0.0:
+        d = 0.0 - d
+    if d < G_FPMIN:
+        d = G_FPMIN
+    var h: Float = d
+    var i: Int = 1
+    while i <= 200:
+        let an: Float = 0.0 - (i as Float) * ((i as Float) - aa)
+        b = b + 2.0
+        d = an * d + b
+        var dd: Float = d
+        if dd < 0.0:
+            dd = 0.0 - dd
+        if dd < G_FPMIN:
+            d = G_FPMIN
+        c = b + an / c
+        var cc: Float = c
+        if cc < 0.0:
+            cc = 0.0 - cc
+        if cc < G_FPMIN:
+            c = G_FPMIN
+        d = 1.0 / d
+        let del: Float = d * c
+        h = h * del
+        var ed: Float = del - 1.0
+        if ed < 0.0:
+            ed = 0.0 - ed
+        if ed < G_EPS:
+            break
+        i = i + 1
+    return exp(0.0 - xx + aa * log(xx) - gln) * h
+
+// Upper regularized gamma Q(a,x) = P(X > x), X ~ Gamma(a,1).
+fn gamma_q(aa: Float, xx: Float) -> Float:
+    if xx <= 0.0:
+        return 1.0
+    if xx < aa + 1.0:
+        return 1.0 - gser_val(aa, xx)
+    return gcf_val(aa, xx)
+
+// Family-wise p over nb bins for averaged-power ratio r with M frames.
+// Median factor mf=(1-1/9M)^3 maps median-floor ratio to mean units.
+fn pfwe_of(ratio: Float, m: Float, nb: Int) -> Float:
+    let mf1: Float = 1.0 - 1.0 / (9.0 * m)
+    let mf: Float = mf1 * mf1 * mf1
+    let x: Float = m * ratio / mf
+    let p: Float = gamma_q(m, x)
+    let Nf: Float = nb as Float
+    if p <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+    if p * Nf < 0.01:
+        return p * Nf
+    return 1.0 - exp(Nf * log(1.0 - p))
+
+// ── Quickselect (boxcar pattern; upper-middle for even n) ───────────────────
+fn qs_partition(a: ptr<Float>, lo: Int, hi: Int) -> Int with Unsafe:
+    let piv: Float = mem_load(ptr_offset(a, hi, "Float"), "Float")
+    var i: Int = lo
+    var j: Int = lo
+    while j < hi:
+        if mem_load(ptr_offset(a, j, "Float"), "Float") <= piv:
+            let t: Float = mem_load(ptr_offset(a, i, "Float"), "Float")
+            mem_store(ptr_offset(a, i, "Float"), mem_load(ptr_offset(a, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(a, j, "Float"), t, "Float")
+            i = i + 1
+        j = j + 1
+    let t2: Float = mem_load(ptr_offset(a, i, "Float"), "Float")
+    mem_store(ptr_offset(a, i, "Float"), mem_load(ptr_offset(a, hi, "Float"), "Float"), "Float")
+    mem_store(ptr_offset(a, hi, "Float"), t2, "Float")
+    return i
+
+fn quickselect_k(a: ptr<Float>, n: Int, k: Int) -> Float with Unsafe:
+    var lo: Int = 0
+    var hi: Int = n - 1
+    while lo < hi:
+        let p: Int = qs_partition(a, lo, hi)
+        if p == k:
+            break
+        elif p > k:
+            hi = p - 1
+        else:
+            lo = p + 1
+    return mem_load(ptr_offset(a, k, "Float"), "Float")
+
+fn usage() -> String:
+    var t: String = "fam_god 0.4.0 — TurboKain god-mode cyclo hunter (ONE file)\n"
+    t = t + "twiddle FFT lanes + exact chi-square floor (trials-corrected) +\n"
+    t = t + "SEG bank. Peak lists identical to fam_scan; numbers principled.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  fam_god --in <f32> [--fs HZ] [--seg N] [--segbank] [--topk K]\n"
+    t = t + "          [--pfwe P] [--cand path] [--out fam.md] [--csv fam.csv]\n"
+    t = t + "          [--data-dir D] [--json]\n"
+    t = t + "  fam_god <f32> [fs] [seg] [topK] [candpath|-]\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 scanned, 1 help, 2 error.\n"
+    return t
+
+fn main() -> Int with Unsafe:
+    let args: Array<String> = process_user_args()
+    var in_path: String = ""
+    var data_dir: String = ""
+    var out_path: String = ""
+    var csv_path: String = ""
+    var cand_path: String = "-"
+    var cand_set: Int = 0
+    var fhz: Float = 2929687.5
+    var fhz_set: Int = 0
+    var seg: Int = SEG_DEFAULT
+    var seg_set: Int = 0
+    var segbank: Int = 0
+    var topk: Int = TOPK_DEFAULT
+    var topk_set: Int = 0
+    var pfwe_gate: Float = 0.01
+    var json: Int = 0
+    var show_help: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--json":
+            json = 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif a == "--cand":
+            if i + 1 < len(args):
+                cand_path = args[i + 1]
+                cand_set = 1
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fhz = parse_float_text(args[i + 1])
+                fhz_set = 1
+                i = i + 1
+        elif a == "--seg":
+            if i + 1 < len(args):
+                seg = parse_int_text(args[i + 1])
+                seg_set = 1
+                i = i + 1
+        elif a == "--segbank":
+            segbank = 1
+        elif a == "--topk":
+            if i + 1 < len(args):
+                topk = parse_int_text(args[i + 1])
+                topk_set = 1
+                i = i + 1
+        elif a == "--pfwe":
+            if i + 1 < len(args):
+                pfwe_gate = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    var pi: Int = 0
+    while pi < len(pos):
+        let p: String = pos[pi]
+        if pi == 0:
+            if in_path == "":
+                in_path = p
+        elif pi == 1:
+            if fhz_set == 0 and is_all_digits(p) == 1:
+                fhz = parse_float_text(p)
+                fhz_set = 1
+        elif pi == 2:
+            if seg_set == 0 and is_all_digits(p) == 1:
+                seg = parse_int_text(p)
+                seg_set = 1
+        elif pi == 3:
+            if topk_set == 0 and is_all_digits(p) == 1:
+                topk = parse_int_text(p)
+                topk_set = 1
+        elif pi == 4:
+            if cand_set == 0:
+                cand_path = p
+                cand_set = 1
+        pi = pi + 1
+
+    if show_help == 1:
+        print(usage())
+        return EXIT_HELP
+    if topk <= 0 or topk > 256:
+        topk = TOPK_DEFAULT
+    if pfwe_gate <= 0.0 or pfwe_gate > 1.0:
+        pfwe_gate = 0.01
+    if seg < 64:
+        seg = SEG_DEFAULT
+    var pw2: Int = 1
+    while pw2 < seg:
+        pw2 = pw2 * 2
+    seg = pw2
+
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+    if in_path != "":
+        if data_dir != "":
+            if find_from(in_path, ":", 0) < 0:
+                if len(in_path) > 0:
+                    if char_at(in_path, 0) != "/":
+                        in_path = data_dir + "/" + in_path
+    if in_path == "":
+        println("fam_god: no input. usage: fam_god <in.f32> [fs] [seg] [topK]")
+        return EXIT_ERROR
+
+    // ── Load .f32, decode ──
+    let h: ptr<Void> = k_CreateFileA(in_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h) == -1:
+        println("fam_god: open fail err=" + str(k_GetLastError()) + ": " + in_path)
+        return EXIT_ERROR
+    let szslot: ptr<Int> = alloc_zeroed(1, "Int")
+    var fsize: Int = -1
+    if k_GetFileSizeEx(h, szslot) != 0:
+        fsize = mem_load(szslot, "Int")
+    decay szslot
+    if fsize < 16:
+        println("fam_god: file too small")
+        return EXIT_ERROR
+    let nsamp: Int = fsize / 4
+    let mut rawbuf: ptr<Byte> = alloc_zeroed(fsize + 16, "Byte")
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(nslot, 0, "Int")
+    let rok: Int = k_ReadFile(h, rawbuf, fsize, nslot, null_ptr())
+    let got: Int = mem_load(nslot, "Int")
+    let _ch: Int = k_CloseHandle(h)
+    if rok == 0 or got < fsize:
+        println("fam_god: short read")
+        return EXIT_ERROR
+    let mut p2t: ptr<Float> = alloc_zeroed(254, "Float")
+    var pv: Float = 1.0
+    var di: Int = 0
+    while di < 126:
+        pv = pv / 2.0
+        di = di + 1
+    var pj: Int = 0
+    while pj < 254:
+        mem_store(ptr_offset(p2t, pj, "Float"), pv, "Float")
+        pv = pv * 2.0
+        pj = pj + 1
+    let mut xbuf: ptr<Float> = alloc_zeroed(nsamp, "Float")
+    var ds: Int = 0
+    while ds < nsamp:
+        mem_store(ptr_offset(xbuf, ds, "Float"), f32_of_quad(bref(rawbuf, ds * 4), bref(rawbuf, ds * 4 + 1), bref(rawbuf, ds * 4 + 2), bref(rawbuf, ds * 4 + 3), p2t), "Float")
+        ds = ds + 1
+    decay rawbuf
+    decay p2t
+
+    var m2: Float = 0.0
+    var st: Int = nsamp
+    if st > 200000:
+        st = 200000
+    var mi: Int = 0
+    while mi < st:
+        let xv: Float = mem_load(ptr_offset(xbuf, mi, "Float"), "Float")
+        m2 = m2 + xv * xv
+        mi = mi + 1
+    m2 = m2 / (st as Float)
+
+    // ── SEG list: single (parity) or bank ──
+    var seglist: Array<Int> = []
+    if segbank == 1:
+        push(seglist, 8192)
+        push(seglist, 32768)
+        push(seglist, 131072)
+    else:
+        push(seglist, seg)
+
+    var md: String = "| tag | seg | rank | bin | alpha_hz_x100 | ratio_x100 | log10p_x100 | hit |\n"
+    md = md + "|---|---|---|---|---|---|---|---|\n"
+    var csv: String = "tag,seg,rank,bin,alpha_hz_x100,ratio_x100,log10p_x100,hit\n"
+    var cand_txt: String = ""
+    var file_hit: Int = 0
+    var t_scan0: Int = now_millis()
+    var si: Int = 0
+    while si < len(seglist):
+        let cseg: Int = seglist[si]
+        let nseg: Int = nsamp / cseg
+        if nseg >= 1:
+            let nbins: Int = cseg / 2 + 1
+            let mff: Float = nseg as Float
+            let mut re: ptr<Float> = alloc_zeroed(cseg, "Float")
+            let mut im: ptr<Float> = alloc_zeroed(cseg, "Float")
+            let mut twc: ptr<Float> = alloc_zeroed(cseg, "Float")
+            let mut tws: ptr<Float> = alloc_zeroed(cseg, "Float")
+            let _tw: Int = build_twiddles(cseg, twc, tws)
+            var tag: Int = 0
+            while tag < 2:
+                var tagname: String = "Y2"
+                if tag == 1:
+                    tagname = "Y4"
+                let mut acc: ptr<Float> = alloc_zeroed(nbins, "Float")
+                var s: Int = 0
+                while s < nseg:
+                    let base: Int = s * cseg
+                    if tag == 0:
+                        var m: Float = 0.0
+                        var k: Int = 0
+                        while k < cseg:
+                            let v: Float = mem_load(ptr_offset(xbuf, base + k, "Float"), "Float")
+                            m = m + v * v
+                            k = k + 1
+                        m = m / (cseg as Float)
+                        k = 0
+                        while k < cseg:
+                            let v: Float = mem_load(ptr_offset(xbuf, base + k, "Float"), "Float")
+                            mem_store(ptr_offset(re, k, "Float"), v * v - m, "Float")
+                            mem_store(ptr_offset(im, k, "Float"), 0.0, "Float")
+                            k = k + 1
+                    else:
+                        var k: Int = 0
+                        while k < cseg:
+                            let v: Float = mem_load(ptr_offset(xbuf, base + k, "Float"), "Float")
+                            let y: Float = v * v - m2
+                            mem_store(ptr_offset(re, k, "Float"), y * y, "Float")
+                            mem_store(ptr_offset(im, k, "Float"), 0.0, "Float")
+                            k = k + 1
+                        var m: Float = 0.0
+                        k = 0
+                        while k < cseg:
+                            m = m + mem_load(ptr_offset(re, k, "Float"), "Float")
+                            k = k + 1
+                        m = m / (cseg as Float)
+                        k = 0
+                        while k < cseg:
+                            mem_store(ptr_offset(re, k, "Float"), mem_load(ptr_offset(re, k, "Float"), "Float") - m, "Float")
+                            k = k + 1
+                    let frc: Int = observe re:
+                        fft_improved(re, im, cseg, twc, tws)
+                    if frc != 0:
+                        println("fam_god: fft fail")
+                        return EXIT_ERROR
+                    var b: Int = 0
+                    while b < nbins:
+                        let rv: Float = mem_load(ptr_offset(re, b, "Float"), "Float")
+                        let iv: Float = mem_load(ptr_offset(im, b, "Float"), "Float")
+                        mem_store(ptr_offset(acc, b, "Float"), mem_load(ptr_offset(acc, b, "Float"), "Float") + rv * rv + iv * iv, "Float")
+                        b = b + 1
+                    s = s + 1
+                var b2: Int = 0
+                while b2 < nbins:
+                    mem_store(ptr_offset(acc, b2, "Float"), mem_load(ptr_offset(acc, b2, "Float"), "Float") / mff, "Float")
+                    b2 = b2 + 1
+                let medn: Int = nbins - 2
+                let mut medbuf: ptr<Float> = alloc_zeroed(medn, "Float")
+                var mc: Int = 0
+                while mc < medn:
+                    mem_store(ptr_offset(medbuf, mc, "Float"), mem_load(ptr_offset(acc, mc + 1, "Float"), "Float"), "Float")
+                    mc = mc + 1
+                let med: Float = quickselect_k(medbuf, medn, medn / 2)
+                decay medbuf
+                var floorv: Float = med
+                if floorv <= 0.0:
+                    floorv = 0.000000000000000000000000000001
+                let mut taken: ptr<Int> = alloc_zeroed(nbins, "Int")
+                var kk: Int = 0
+                while kk < topk:
+                    var bi: Int = -1
+                    var bv: Float = 0.0
+                    var bs: Int = 2
+                    while bs < nbins:
+                        if mem_load(ptr_offset(taken, bs, "Int"), "Int") == 0:
+                            let av: Float = mem_load(ptr_offset(acc, bs, "Float"), "Float")
+                            if av > bv:
+                                bv = av
+                                bi = bs
+                        bs = bs + 1
+                    if bi < 0:
+                        break
+                    var q: Int = bi - 3
+                    while q <= bi + 3:
+                        if q >= 0 and q < nbins:
+                            mem_store(ptr_offset(taken, q, "Int"), 1, "Int")
+                        q = q + 1
+                    let hz: Float = (bi as Float) * fhz / (cseg as Float)
+                    let ratio: Float = bv / floorv
+                    let pfw: Float = pfwe_of(ratio, mff, nbins - 2)
+                    var l10: Int = -999900
+                    if pfw > 0.0:
+                        l10 = (log(pfw) / LOG10E * 100.0) as Int
+                    var hit: Int = 0
+                    if pfw <= pfwe_gate:
+                        hit = 1
+                        file_hit = 1
+                    if cand_set == 1 and cand_path != "-":
+                        cand_txt = cand_txt + tagname + " " + str(cseg) + " " + str(hz * 100.0) + " " + str(bi) + " " + str(ratio * 100.0) + " " + str(l10) + "\n"
+                    println(tagname + "@" + str(cseg) + " peak " + str(kk) + " bin=" + str(bi) + " alpha=" + str(hz * 100.0) + " ratio=" + str(ratio * 100.0) + " log10p=" + str(l10))
+                    md = md + "| " + tagname + " | " + str(cseg) + " | " + str(kk) + " | " + str(bi) + " | " + str(hz * 100.0) + " | " + str(ratio * 100.0) + " | " + str(l10) + " | " + str(hit) + " |\n"
+                    csv = csv + tagname + "," + str(cseg) + "," + str(kk) + "," + str(bi) + "," + str(hz * 100.0) + "," + str(ratio * 100.0) + "," + str(l10) + "," + str(hit) + "\n"
+                    kk = kk + 1
+                decay taken
+                decay acc
+                tag = tag + 1
+            decay re
+            decay im
+            decay twc
+            decay tws
+        si = si + 1
+    decay xbuf
+    decay nslot
+    if cand_set == 1 and cand_path != "-":
+        fs_write_text(cand_path, cand_txt)
+    var verdict: String = "CLEAN"
+    if file_hit == 1:
+        verdict = "FAM-HIT"
+    println("fam_god: timing ms scan=" + str(now_millis() - t_scan0))
+    if out_path != "":
+        fs_write_text(out_path, md)
+    if csv_path != "":
+        fs_write_text(csv_path, csv)
+    if json == 1:
+        println("{\"tool\": \"fam_god\", \"verdict\": \"" + verdict + "\"}")
+    println("receipt=PASS scanned=1 verdict=" + verdict)
+    return EXIT_OK

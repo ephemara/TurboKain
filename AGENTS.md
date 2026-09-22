@@ -488,6 +488,9 @@ outside this repo (warm) — `kain` is on PATH.
   as `x1e4` (or x1e5) instead of lying with decimals.
 - **Reserved words that bite:** `out`, `share`, `match` cannot be identifiers
   (params, locals, or bindings). Rename to `outn`/`sharemode`/`hit`.
+- **Never run tools bare in source dirs.** Default outputs (`pulse.md`, `.f32`)
+  land in cwd and pollute the repo — always pass `--out` into `reports/<run>/`
+  or `_tmp/`. Source dirs hold `.kn` + gitignored `.exe`, nothing else.
 - **Keep loop kernels inline or in large callees (unexplained, workaround
   holds).** A small helper with loops over a `ptr` param crashed when
   called; the identical body inline runs. Cause undetermined — could be
