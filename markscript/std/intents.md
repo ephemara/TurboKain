@@ -85,3 +85,4 @@
 | except     | handler_qualifier_echo   | 80        | Exception / exclusion     |
 | until      | handler_qualifier_echo   | 80        | Loop until condition      |
 | since      | handler_qualifier_echo   | 80        | Time since / from point   |
+| write_region | handler_fs_write_region | 81        | Surgical region replace between sentinels |

@@ -100,6 +100,7 @@ use parser      // hash_name
 pub const FN_FS_READ_TEXT:     Int = 1
 pub const FN_FS_WRITE_TEXT:    Int = 2
 pub const FN_FS_EXISTS:        Int = 3
+pub const FN_FS_WRITE_REGION:  Int = 81
 pub const FN_PROCESS_OUTPUT:   Int = 4
 pub const FN_PROCESS_SPAWN:    Int = 5
 pub const FN_IMPORT_KAIN:      Int = 6
@@ -406,6 +407,7 @@ pub fn register_stdlib_handlers(vm: MarkScriptVM) -> MarkScriptVM:
     // --- Fix 1: Single-word aliases for all multi-word intents ---
     // These enable blockquote argument passing: > write "path" "content"
     v = register_handler(v, hash_name("write"), FN_FS_WRITE_TEXT)
+    v = register_handler(v, hash_name("write_region"), FN_FS_WRITE_REGION)
     v = register_handler(v, hash_name("read"), FN_FS_READ_TEXT)
     v = register_handler(v, hash_name("exists"), FN_FS_EXISTS)
     v = register_handler(v, hash_name("import"), FN_IMPORT_KAIN)
@@ -584,6 +586,91 @@ fn handler_fs_write_text(vm: MarkScriptVM, args: Array<MarkValue>) -> HandlerRes
 
 // --- handler_fs_exists — "file exists" intent -----------------------------
 // args[0] = file path (string)
+// --- handler_fs_write_region — "write_region" intent -----------------------
+// args: filepath, begin-sentinel, end-sentinel, content...
+// Replaces the lines strictly between the first line containing
+// begin-sentinel and the first following line containing end-sentinel.
+// Missing file/sentinels are ERRORS (never silent). Content parts beyond
+// the third arg are joined with single spaces (quote multi-word content).
+// Returns 1 on success. Makes living documents safe by construction.
+fn handler_fs_write_region(vm: MarkScriptVM, args: Array<MarkValue>) -> HandlerResult:
+    if len(args) < 4:
+        return HandlerResult {
+            vm: vm,
+            value: mark_int(0),
+            err: "write_region: need filepath, begin, end, content"
+        }
+    let path = mark_value_to_string(args[0])
+    let begin_mark = mark_value_to_string(args[1])
+    let end_mark = mark_value_to_string(args[2])
+    var content: String = mark_value_to_string(args[3])
+    var ci: Int = 4
+    while ci < len(args):
+        content = content + " " + mark_value_to_string(args[ci])
+        ci = ci + 1
+    if path == "":
+        return HandlerResult {
+            vm: vm,
+            value: mark_int(0),
+            err: "write_region: no path provided"
+        }
+    if begin_mark == "" or end_mark == "":
+        return HandlerResult {
+            vm: vm,
+            value: mark_int(0),
+            err: "write_region: begin/end sentinels must be non-empty"
+        }
+    if fs_exists(path) == false:
+        return HandlerResult {
+            vm: vm,
+            value: mark_int(0),
+            err: "write_region: file not found: " + path
+        }
+    let source = fs_read_text(path)
+    let lines = split_lines(source)
+    var bi: Int = 0
+    var begin_at: Int = -1
+    while bi < len(lines):
+        if text_contains_string(lines[bi], begin_mark):
+            begin_at = bi
+            bi = len(lines)
+        bi = bi + 1
+    if begin_at < 0:
+        return HandlerResult {
+            vm: vm,
+            value: mark_int(0),
+            err: "write_region: begin sentinel not found: " + begin_mark
+        }
+    var ei: Int = begin_at + 1
+    var end_at: Int = -1
+    while ei < len(lines):
+        if text_contains_string(lines[ei], end_mark):
+            end_at = ei
+            ei = len(lines)
+        ei = ei + 1
+    if end_at < 0:
+        return HandlerResult {
+            vm: vm,
+            value: mark_int(0),
+            err: "write_region: end sentinel not found: " + end_mark
+        }
+    var result: String = ""
+    var li: Int = 0
+    while li <= begin_at:
+        result = result + lines[li] + "\n"
+        li = li + 1
+    result = result + content + "\n"
+    li = end_at
+    while li < len(lines):
+        result = result + lines[li] + "\n"
+        li = li + 1
+    fs_write_text(path, result)
+    return HandlerResult {
+        vm: vm,
+        value: mark_int(1),
+        err: ""
+    }
+
 fn handler_fs_exists(vm: MarkScriptVM, args: Array<MarkValue>) -> HandlerResult:
     var path: String = ""
     if len(args) > 0:
@@ -772,9 +859,19 @@ fn handler_assert(vm: MarkScriptVM, args: Array<MarkValue>) -> HandlerResult:
 // --- handler_println — "print" intent ------------------------------------
 // args[0] = value to print
 fn handler_println(vm: MarkScriptVM, args: Array<MarkValue>) -> HandlerResult:
-    if len(args) > 0:
-        let val_str = mark_value_to_string(args[0])
-        println("[PRINT] " + val_str)
+    // Print ALL args space-joined (intent tokenizers split quoted strings).
+    // Decoded first: strips cross-dispatch stack residue (the "0 " prefix)
+    // when count+bytes windows are present; raw in-fence values pass through.
+    let clean = decode_count_bytes_args(args)
+    var msg: String = ""
+    var pi: Int = 0
+    while pi < len(clean):
+        if pi > 0:
+            msg = msg + " "
+        msg = msg + mark_value_to_string(clean[pi])
+        pi = pi + 1
+    if len(clean) > 0:
+        println("[PRINT] " + msg)
     return HandlerResult {
         vm: vm,
         value: mark_int(0),
@@ -2108,18 +2205,53 @@ fn looks_like_float(s: String) -> Bool:
         i = i + 1
     return has_dot and has_digit
 
+fn is_arg_window(args: Array<MarkValue>, i: Int) -> Bool:
+    // A valid count+bytes window opens at i: MARK_INT count>0 followed by
+    // exactly `count` printable-byte INTs inside the array bounds.
+    if i < 0 or i >= len(args):
+        return false
+    if args[i].kind != MARK_INT:
+        return false
+    let count = args[i].int_val
+    if count <= 0:
+        return false
+    var bi: Int = 0
+    while bi < count:
+        if (i + 1 + bi) >= len(args):
+            return false
+        if args[i + 1 + bi].kind != MARK_INT:
+            return false
+        if is_printable_byte(args[i + 1 + bi].int_val) == false:
+            return false
+        bi = bi + 1
+    return true
+
 fn decode_count_bytes_args(args: Array<MarkValue>) -> Array<MarkValue>:
     var decoded: Array<MarkValue> = []
     var i: Int = 0
+    // Two arg shapes reach this decoder. Blockquote intents arrive as
+    // trailing count+bytes windows, possibly preceded by stack residue —
+    // skip everything before the first window. In-fence calls arrive as
+    // RAW values with no windows at all — pass those through untouched.
+    var si: Int = 0
+    var has_window: Bool = false
+    while si < len(args):
+        if is_arg_window(args, si):
+            has_window = true
+            si = len(args)
+        si = si + 1
+    if has_window == false:
+        return args
+    var started: Bool = false
     while i < len(args):
         // Check for count+bytes pattern at position i
         var is_count_bytes: Bool = false
         if args[i].kind == MARK_INT:
             let count = args[i].int_val
-            if count > 0 and (i + count) < len(args):
+            if is_arg_window(args, i):
                 var all_bytes: Bool = true
                 var bi: Int = 0
-                while bi < count:
+                while bi < count and (i + 1 + bi) < len(args):
                     if args[i + 1 + bi].kind != MARK_INT:
                         all_bytes = false
                         bi = count
@@ -2127,7 +2259,8 @@ fn decode_count_bytes_args(args: Array<MarkValue>) -> Array<MarkValue>:
                         all_bytes = false
                         bi = count
                     bi = bi + 1
-                if all_bytes:
+                if bi == count:
+                    started = true
                     is_count_bytes = true
                     // Reconstruct string from byte values
                     var byte_arr: Array<Int> = []
@@ -2143,8 +2276,10 @@ fn decode_count_bytes_args(args: Array<MarkValue>) -> Array<MarkValue>:
                     // Advance past count + N byte values
                     i = i + 1 + count
         if is_count_bytes == false:
-            // Not a count+bytes sequence — pass through raw value
-            push(decoded, args[i])
+            // Not a count+bytes sequence — pass through raw value,
+            // unless we haven't seen the first window yet (residue).
+            if started:
+                push(decoded, args[i])
             i = i + 1
     return decoded
 
@@ -2196,16 +2331,22 @@ fn decode_and_split_args(args: Array<MarkValue>) -> Array<MarkValue>:
     // First decode count+bytes, then split single strings if they appear to
     // contain multiple quoted/space-separated arguments
     let decoded = decode_count_bytes_args(args)
-    if len(decoded) == 1 and decoded[0].kind == MARK_STRING:
-        let parts = split_blockquote_string(decoded[0].str_val)
-        if len(parts) > 1:
-            var split_args: Array<MarkValue> = []
-            var pi: Int = 0
-            while pi < len(parts):
-                // Keep as strings — float_val doesn't survive Array passthrough
-                push(split_args, mark_string(parts[pi]))
-                pi = pi + 1
-            return split_args
+    // NOTE: nested ifs, NOT `and` — Kain `and` does not short-circuit, so
+    // `len==1 and decoded[0]` indexes an empty array when decoded is [].
+    if len(decoded) == 1:
+        if decoded[0].kind == MARK_STRING:
+            # Always normalize through the splitter (not just multi-part):
+            # a single quoted arg must come back unquoted, and unquoted
+            # spacing must collapse the same way multi-arg does.
+            let parts = split_blockquote_string(decoded[0].str_val)
+            if len(parts) >= 1:
+                var split_args: Array<MarkValue> = []
+                var pi: Int = 0
+                while pi < len(parts):
+                    // Keep as strings — float_val doesn't survive Array passthrough
+                    push(split_args, mark_string(parts[pi]))
+                    pi = pi + 1
+                return split_args
     return decoded
 
 // ===========================================================================
@@ -2223,6 +2364,8 @@ pub fn dispatch_fn(vm: MarkScriptVM, fn_id: Int, args: Array<MarkValue>) -> Hand
         hr = handler_fs_read_text(vm, norm_args)
     elif fn_id == FN_FS_WRITE_TEXT:
         hr = handler_fs_write_text(vm, norm_args)
+    elif fn_id == FN_FS_WRITE_REGION:
+        hr = handler_fs_write_region(vm, norm_args)
     elif fn_id == FN_FS_EXISTS:
         hr = handler_fs_exists(vm, norm_args)
     elif fn_id == FN_PROCESS_OUTPUT:
@@ -3722,6 +3865,21 @@ fn emit_div_rbp(arr: Array<Int>, rsp_off: Int) -> Array<Int>:
     emit_mov_rbp_disp(arr, 0, -8 - (rsp_off - 16), true)
     return arr
 
+fn emit_mod_rbp(arr: Array<Int>, rsp_off: Int) -> Array<Int>:
+    // x86 IDIV remainder: identical setup to emit_div_rbp, but the result
+    // stored back is RDX (remainder) instead of RAX (quotient).
+    // Same contract: caller guarantees a 16-byte shadow region and a
+    // nonzero divisor (VM traps div-by-zero before JIT regions matter).
+    emit_rr(arr, X64_REX_W, 0x31, 2, 2)                     // xor rdx, rdx
+    emit_mov_rbp_disp(arr, 3, -8 - (rsp_off - 8), false)    // mov rbx, [top-1]
+    emit_mov_rbp_disp(arr, 0, -8 - (rsp_off - 16), false)   // mov rax, [top-2]
+    // div rbx (rax = quotient, rdx = remainder)
+    push(arr, X64_REX_W)
+    push(arr, 0xF7)
+    push(arr, 0xF3)
+    emit_mov_rbp_disp(arr, 2, -8 - (rsp_off - 16), true)    // mov [top-2], rdx
+    return arr
+
 // ===========================================================================
 //  JUMP OPS — two-pass with fixup table
 //
@@ -3981,6 +4139,13 @@ pub fn jit_compile_block(bytecode: Array<Int>, start_ip: Int, end_ip: Int) -> Ji
                 rsp_offset = rsp_offset - 8
             ip = ip + 1
 
+        // ── OP_MOD (26) — a % b ─────────────────────────────────────
+        elif op == 26:
+            if rsp_offset >= 16:
+                code_arr = emit_mod_rbp(code_arr, rsp_offset)
+                rsp_offset = rsp_offset - 8
+            ip = ip + 1
+
         // ── OP_LOAD_VAR (18) — load variable by index ───────────────
         elif op == 18:
             ip = ip + 1
@@ -4216,6 +4381,10 @@ pub fn jit_selftest() -> Int with Unsafe:
 
     // Test 5: 100/5=20
     if run_jit_test("100/5", [7, 100, 7, 5, 17, 0], 20) != 0:
+        return 1
+
+    // Test 5b: 100%7=2 (OP_MOD mirrors DIV, stores RDX)
+    if run_jit_test("100%7", [7, 100, 7, 7, 26, 0], 2) != 0:
         return 1
 
     // Test 6: dup + pop
@@ -4677,7 +4846,23 @@ use registry        // load_registry, is_loaded, keyword_count, get_error
 // ===========================================================================
 
 fn read_source(path: String) -> String:
-    return fs_read_text(path)
+    let raw = fs_read_text(path)
+    // Normalize line endings once, centrally: CRLF/CR -> LF.
+    // Stray \r bytes otherwise poison tokenizers, splitters, conditions
+    // and sentinels downstream (Windows checkouts use CRLF).
+    var text: String = ""
+    var i: Int = 0
+    while i < len(raw):
+        let ch = text_substring_string(raw, i, 1)
+        if ch == "\r":
+            text = text + "\n"
+            if i + 1 < len(raw):
+                if text_substring_string(raw, i + 1, 1) == "\n":
+                    i = i + 1
+        else:
+            text = text + ch
+        i = i + 1
+    return text
 
 // ===========================================================================
 //  REGISTRY LOADING — loads the intent keyword registry data file
@@ -4705,6 +4890,15 @@ fn load_intent_registry(source_filepath: String) -> Bool:
             push(candidates, base + "/intents.md")
             push(candidates, base + "/../std/intents.md")
 
+    // Portable installs: the binary's own home (exe-dir), so campaigns
+    // run from any CWD without a registry checkout beside the input.
+    let exe_path = process_current_executable_path()
+    if exe_path != "":
+        let exe_base = fs_path_parent(exe_path)
+        if exe_base != "":
+            push(candidates, exe_base + "/std/intents.md")
+            push(candidates, exe_base + "/../std/intents.md")
+
     // Try each candidate
     var ci = 0
     while ci < len(candidates):
@@ -4720,8 +4914,15 @@ fn load_intent_registry(source_filepath: String) -> Bool:
                     println("[REGISTRY] Warning: " + err)
         ci = ci + 1
 
-    // No registry file found — proceed without intents
-    // All blockquotes will be treated as prose.
+    // No registry file found — warn LOUDLY. Silent prose-degradation
+    // looks exactly like success (exit 0, "No pending handlers") and has
+    // burned campaigns before. Never proceed quietly here.
+    println("[REGISTRY] WARNING: no intent registry found — tried:")
+    var wi2: Int = 0
+    while wi2 < len(candidates):
+        println("[REGISTRY]   - " + candidates[wi2])
+        wi2 = wi2 + 1
+    println("[REGISTRY] All blockquotes will be treated as prose. Only embedded handlers active.")
     return false
 
 // ===========================================================================
@@ -4747,6 +4948,7 @@ fn opcode_name(op: Int) -> String:
     elif op == OP_SUB:          return "OP_SUB"
     elif op == OP_MUL:          return "OP_MUL"
     elif op == OP_DIV:          return "OP_DIV"
+    elif op == OP_MOD:          return "OP_MOD"
     elif op == OP_LOAD_VAR:     return "OP_LOAD_VAR"
     elif op == OP_STORE_VAR:    return "OP_STORE_VAR"
     elif op == OP_JN:           return "OP_JN"
@@ -4772,6 +4974,7 @@ fn is_no_operand_op(op: Int) -> Bool:
     if op == OP_SUB: return true
     if op == OP_MUL: return true
     if op == OP_DIV: return true
+    if op == OP_MOD: return true
     if op == OP_ERROR_BOUNDARY: return true
     return false
 
@@ -4895,7 +5098,7 @@ fn run_handler_loop(vm: MarkScriptVM, bc: Array<Int>, er: ExecResult) -> Int:
     var iteration: Int = 0
     var succeeded: Int = 0
     var failed: Int = 0
-    let max_iterations: Int = 100  // safety limit
+    let max_iterations: Int = 100000  // safety limit (raised for god-files: fizzbuzz-100 + suites)
 
     while current_er.handler_id > 0 and iteration < max_iterations:
         let fn_id = current_er.handler_id
@@ -5553,6 +5756,13 @@ fn cmd_handlers() -> Int:
 
     let vm = init_vm_with_builtins()
 
+    // Best-effort registry load so hashes resolve to keyword names.
+    // NOTE: read IntentRegistry (file-loaded), NOT ParserState.intent_*
+    // (those only fill during markdown compilation).
+    let reg_ok = load_intent_registry("")
+    let reg_phrases = IntentRegistry.keywords
+    let reg_hashes = IntentRegistry.keyword_hashes
+
     println("Registered handlers (" + str(vm.ivt_count) + "):")
     println("")
 
@@ -5560,12 +5770,27 @@ fn cmd_handlers() -> Int:
     while i < vm.ivt_count:
         let phrase = vm.ivt_phrases[i]
         let hid = vm.ivt_handler_ids[i]
-        println("  " + str(hid) + ": hash=" + str(phrase))
+        var kw: String = ""
+        if reg_ok:
+            var ri: Int = 0
+            while ri < len(reg_hashes):
+                if reg_hashes[ri] == phrase:
+                    if ri < len(reg_phrases):
+                        kw = reg_phrases[ri]
+                    ri = len(reg_hashes)
+                ri = ri + 1
+        if kw != "":
+            println("  " + str(hid) + ": " + kw)
+        else:
+            println("  " + str(hid) + ": hash=" + str(phrase))
         i = i + 1
 
     println("")
-    println("Note: IVT entries store hashed phrases for fast dispatch.")
-    println("The bridge translates handler_id to Kain stdlib calls.")
+    if reg_ok:
+        println("Names resolved from the intent registry.")
+    else:
+        println("Note: registry unavailable — showing raw phrase hashes.")
+        println("The bridge translates handler_id to Kain stdlib calls.")
     println("")
     println("=== HANDLER REGISTRY COMPLETE ===")
     return 0
@@ -5738,7 +5963,7 @@ fn cmd_pipe(cfg: MksConfig) -> Int:
         var current_vm = er.vm
         var current_er = er
         var iteration: Int = 0
-        let max_iter: Int = 100
+        let max_iter: Int = 100000  // raised for god-files (see run_handler_loop)
         while current_er.handler_id > 0 and iteration < max_iter:
             let fn_id = current_er.handler_id
             var args: Array<MarkValue> = []
@@ -5951,7 +6176,7 @@ fn cmd_build(cfg: MksConfig) -> Int:
             var current_vm = er.vm
             var current_er = er
             var iteration: Int = 0
-            let max_iter: Int = 100
+            let max_iter: Int = 100000  // raised for god-files (see run_handler_loop)
             while current_er.handler_id > 0 and iteration < max_iter:
                 let fn_id = current_er.handler_id
                 var args: Array<MarkValue> = []
@@ -6462,6 +6687,11 @@ const MS_TOK_RPAREN: Int = 15
 const MS_TOK_COMMA:  Int = 16
 const MS_TOK_COLON:  Int = 17
 const MS_TOK_EOF_MS: Int = 18
+const MS_TOK_ELIF:   Int = 19
+const MS_TOK_NEQ:    Int = 20
+const MS_TOK_LTE:    Int = 21
+const MS_TOK_GTE:    Int = 22
+const MS_TOK_MOD:    Int = 23
 
 struct MSToken:
     kind: Int
@@ -6597,6 +6827,17 @@ fn tokenize_ms_line(ln: String) -> Array<MSToken>:
             push(tokens, ms_token_make(MS_TOK_SLASH, "/"))
             pos = pos + 1
             continue
+        if ch == "!":
+            if pos + 1 < slen and text_substring_string(ln, pos + 1, 1) == "=":
+                push(tokens, ms_token_make(MS_TOK_NEQ, "!="))
+                pos = pos + 2
+                continue
+            pos = pos + 1
+            continue
+        if ch == "%":
+            push(tokens, ms_token_make(MS_TOK_MOD, "%"))
+            pos = pos + 1
+            continue
         if ch == "=":
             push(tokens, ms_token_make(MS_TOK_EQ, "="))
             pos = pos + 1
@@ -6658,6 +6899,8 @@ fn tokenize_ms_line(ln: String) -> Array<MSToken>:
                 push(tokens, ms_token_make(MS_TOK_IF, ident_text))
             elif ident_text == "else":
                 push(tokens, ms_token_make(MS_TOK_ELSE, ident_text))
+            elif ident_text == "elif":
+                push(tokens, ms_token_make(MS_TOK_ELIF, ident_text))
             else:
                 push(tokens, ms_token_make(MS_TOK_IDENT, ident_text))
             continue
@@ -6672,6 +6915,13 @@ fn ms_parse_factor(tokens: Array<MSToken>, pos: Int, bc: Array<Int>) -> Int:
     if pos >= len(tokens):
         return pos
     let tok = tokens[pos]
+    if tok.kind == MS_TOK_MINUS:
+        // Unary minus: 0 - x (was silently dropped, breaking `== -2`).
+        push(bc, OP_PUSH_STACK)
+        push(bc, 0)
+        let p = ms_parse_factor(tokens, pos + 1, bc)
+        push(bc, OP_SUB)
+        return p
     if tok.kind == MS_TOK_INT:
         let ival = ms_parse_int(tok.text)
         push(bc, OP_PUSH_STACK)
@@ -6707,14 +6957,16 @@ fn ms_parse_term(tokens: Array<MSToken>, pos: Int, bc: Array<Int>) -> Int:
         if p >= len(tokens):
             break
         let tok = tokens[p]
-        if tok.kind == MS_TOK_STAR or tok.kind == MS_TOK_SLASH:
+        if tok.kind == MS_TOK_STAR or tok.kind == MS_TOK_SLASH or tok.kind == MS_TOK_MOD:
             let op_kind = tok.kind
             p = p + 1
             p = ms_parse_factor(tokens, p, bc)
             if op_kind == MS_TOK_STAR:
                 push(bc, OP_MUL)
-            else:
+            elif op_kind == MS_TOK_SLASH:
                 push(bc, OP_DIV)
+            else:
+                push(bc, OP_MOD)
         else:
             break
     return p
@@ -6786,15 +7038,27 @@ struct CompInfo:
     has_comp: Bool
     op_kind:  Int
     op_pos:   Int
+    op_len:   Int
 
 fn find_comparison(tokens: Array<MSToken>, start: Int, end: Int) -> CompInfo:
     var i: Int = start
     while i < end:
         let tk = tokens[i]
-        if tk.kind == MS_TOK_GT or tk.kind == MS_TOK_LT:
-            return CompInfo { has_comp: true, op_kind: tk.kind, op_pos: i }
+        if tk.kind == MS_TOK_NEQ:
+            return CompInfo { has_comp: true, op_kind: MS_TOK_NEQ, op_pos: i, op_len: 1 }
+        if tk.kind == MS_TOK_GT:
+            if i + 1 < end and tokens[i + 1].kind == MS_TOK_EQ:
+                return CompInfo { has_comp: true, op_kind: MS_TOK_GTE, op_pos: i, op_len: 2 }
+            return CompInfo { has_comp: true, op_kind: MS_TOK_GT, op_pos: i, op_len: 1 }
+        if tk.kind == MS_TOK_LT:
+            if i + 1 < end and tokens[i + 1].kind == MS_TOK_EQ:
+                return CompInfo { has_comp: true, op_kind: MS_TOK_LTE, op_pos: i, op_len: 2 }
+            return CompInfo { has_comp: true, op_kind: MS_TOK_LT, op_pos: i, op_len: 1 }
+        if tk.kind == MS_TOK_EQ:
+            if i + 1 < end and tokens[i + 1].kind == MS_TOK_EQ:
+                return CompInfo { has_comp: true, op_kind: MS_TOK_EQ, op_pos: i, op_len: 2 }
         i = i + 1
-    return CompInfo { has_comp: false, op_kind: 0, op_pos: 0 }
+    return CompInfo { has_comp: false, op_kind: 0, op_pos: 0, op_len: 0 }
 
 fn slice_tokens(tokens: Array<MSToken>, start: Int, end: Int) -> Array<MSToken>:
     var result: Array<MSToken> = []
@@ -6805,118 +7069,166 @@ fn slice_tokens(tokens: Array<MSToken>, start: Int, end: Int) -> Array<MSToken>:
     push(result, ms_token_eof())
     return result
 
+// --- Shared condition emitter ------------------------------------------------
+// Emits a condition check + conditional jump(s) taken when FALSE.
+// Returns patch positions to fill with the false-target. Supports ==, !=,
+// <, <=, >, >=; anything else falls back to truthiness (JZ).
+// Jumps use only JN/JZ/JMP: == needs two JN gates (no JNZ opcode exists).
+fn ms_emit_cond_jumps(tokens: Array<MSToken>, cond_end: Int, bc: Array<Int>) -> Array<Int>:
+    var patches: Array<Int> = []
+    let comp = find_comparison(tokens, 1, cond_end)
+    if comp.has_comp:
+        let lhs_end: Int = comp.op_pos
+        let rhs_start: Int = comp.op_pos + comp.op_len
+        if comp.op_kind == MS_TOK_LT:
+            // legacy lowering, preserved exactly: (r-l-1)<0 ⟺ NOT(l<r)
+            let right_tokens = slice_tokens(tokens, rhs_start, cond_end)
+            ms_parse_expr(right_tokens, 0, bc)
+            let left_tokens = slice_tokens(tokens, 1, lhs_end)
+            ms_parse_expr(left_tokens, 0, bc)
+            push(bc, OP_SUB)
+            push(bc, OP_PUSH_STACK)
+            push(bc, 1)
+            push(bc, OP_SUB)
+            push(bc, OP_JN)
+            push(patches, len(bc))
+            push(bc, 0)
+            return patches
+        if comp.op_kind == MS_TOK_GT:
+            // legacy lowering, preserved exactly: (l-r-1)<0 ⟺ NOT(l>r)
+            let left_tokens = slice_tokens(tokens, 1, lhs_end)
+            ms_parse_expr(left_tokens, 0, bc)
+            let right_tokens = slice_tokens(tokens, rhs_start, cond_end)
+            ms_parse_expr(right_tokens, 0, bc)
+            push(bc, OP_SUB)
+            push(bc, OP_PUSH_STACK)
+            push(bc, 1)
+            push(bc, OP_SUB)
+            push(bc, OP_JN)
+            push(patches, len(bc))
+            push(bc, 0)
+            return patches
+        if comp.op_kind == MS_TOK_LTE:
+            // (r-l)<0 ⟺ l>r ⟺ NOT(<=)
+            let right_tokens = slice_tokens(tokens, rhs_start, cond_end)
+            ms_parse_expr(right_tokens, 0, bc)
+            let left_tokens = slice_tokens(tokens, 1, lhs_end)
+            ms_parse_expr(left_tokens, 0, bc)
+            push(bc, OP_SUB)
+            push(bc, OP_JN)
+            push(patches, len(bc))
+            push(bc, 0)
+            return patches
+        if comp.op_kind == MS_TOK_GTE:
+            // (l-r)<0 ⟺ l<r ⟺ NOT(>=)
+            let left_tokens = slice_tokens(tokens, 1, lhs_end)
+            ms_parse_expr(left_tokens, 0, bc)
+            let right_tokens = slice_tokens(tokens, rhs_start, cond_end)
+            ms_parse_expr(right_tokens, 0, bc)
+            push(bc, OP_SUB)
+            push(bc, OP_JN)
+            push(patches, len(bc))
+            push(bc, 0)
+            return patches
+        if comp.op_kind == MS_TOK_NEQ:
+            // SUB is 0 iff equal → jump(else) on equal ⟺ NOT(!=)
+            let left_tokens = slice_tokens(tokens, 1, lhs_end)
+            ms_parse_expr(left_tokens, 0, bc)
+            let right_tokens = slice_tokens(tokens, rhs_start, cond_end)
+            ms_parse_expr(right_tokens, 0, bc)
+            push(bc, OP_SUB)
+            push(bc, OP_JZ)
+            push(patches, len(bc))
+            push(bc, 0)
+            return patches
+        if comp.op_kind == MS_TOK_EQ:
+            // no JNZ opcode: two JN gates (l<r→else, r<l→else), fallthrough ⟺ equal
+            let left_tokens = slice_tokens(tokens, 1, lhs_end)
+            ms_parse_expr(left_tokens, 0, bc)
+            let right_tokens = slice_tokens(tokens, rhs_start, cond_end)
+            ms_parse_expr(right_tokens, 0, bc)
+            push(bc, OP_SUB)
+            push(bc, OP_JN)
+            push(patches, len(bc))
+            push(bc, 0)
+            ms_parse_expr(right_tokens, 0, bc)
+            ms_parse_expr(left_tokens, 0, bc)
+            push(bc, OP_SUB)
+            push(bc, OP_JN)
+            push(patches, len(bc))
+            push(bc, 0)
+            return patches
+    let cond_tokens = slice_tokens(tokens, 1, cond_end)
+    ms_parse_expr(cond_tokens, 0, bc)
+    push(bc, OP_JZ)
+    push(patches, len(bc))
+    push(bc, 0)
+    return patches
+
+fn ms_patch_all(bc: Array<Int>, patches: Array<Int>, target: Int) -> Int:
+    var pi: Int = 0
+    while pi < len(patches):
+        bc[patches[pi]] = target
+        pi = pi + 1
+    return target
+
 // --- While loop compilation ----------------------------------------------
 
 fn ms_parse_while(lines: Array<String>, line_idx: Int, indent: Int, tokens: Array<MSToken>, bc: Array<Int>) -> Int:
     let loop_start = len(bc)
     let cond_end = len(tokens) - 2
 
-    let comp = find_comparison(tokens, 1, cond_end)
-    if comp.has_comp:
-        if comp.op_kind == MS_TOK_LT:
-            let right_tokens = slice_tokens(tokens, comp.op_pos + 1, cond_end)
-            ms_parse_expr(right_tokens, 0, bc)
-            let left_tokens = slice_tokens(tokens, 1, comp.op_pos)
-            ms_parse_expr(left_tokens, 0, bc)
-            push(bc, OP_SUB)
-        else:
-            let left_tokens = slice_tokens(tokens, 1, comp.op_pos)
-            ms_parse_expr(left_tokens, 0, bc)
-            let right_tokens = slice_tokens(tokens, comp.op_pos + 1, cond_end)
-            ms_parse_expr(right_tokens, 0, bc)
-            push(bc, OP_SUB)
-        push(bc, OP_PUSH_STACK)
-        push(bc, 1)
-        push(bc, OP_SUB)
-        push(bc, OP_JN)
-        let jn_patch = len(bc)
-        push(bc, 0)
-        let next_idx = parse_ms_block(lines, line_idx + 1, indent, bc)
-        push(bc, OP_JMP)
-        push(bc, loop_start)
-        bc[jn_patch] = len(bc)
-        return next_idx
-    else:
-        let cond_tokens = slice_tokens(tokens, 1, cond_end)
-        ms_parse_expr(cond_tokens, 0, bc)
-        push(bc, OP_JZ)
-        let jz_patch = len(bc)
-        push(bc, 0)
-        let next_idx = parse_ms_block(lines, line_idx + 1, indent, bc)
-        push(bc, OP_JMP)
-        push(bc, loop_start)
-        bc[jz_patch] = len(bc)
-        return next_idx
+    let patches = ms_emit_cond_jumps(tokens, cond_end, bc)
+    let next_idx = parse_ms_block(lines, line_idx + 1, indent, bc)
+    push(bc, OP_JMP)
+    push(bc, loop_start)
+    let _pw: Int = ms_patch_all(bc, patches, len(bc))
+    return next_idx
 
 // --- If/else compilation -------------------------------------------------
 
 fn ms_parse_if(lines: Array<String>, line_idx: Int, indent: Int, tokens: Array<MSToken>, bc: Array<Int>) -> Int:
     let cond_end = len(tokens) - 2
 
-    let comp = find_comparison(tokens, 1, cond_end)
-    if comp.has_comp:
-        if comp.op_kind == MS_TOK_LT:
-            let right_tokens = slice_tokens(tokens, comp.op_pos + 1, cond_end)
-            ms_parse_expr(right_tokens, 0, bc)
-            let left_tokens = slice_tokens(tokens, 1, comp.op_pos)
-            ms_parse_expr(left_tokens, 0, bc)
-            push(bc, OP_SUB)
-        else:
-            let left_tokens = slice_tokens(tokens, 1, comp.op_pos)
-            ms_parse_expr(left_tokens, 0, bc)
-            let right_tokens = slice_tokens(tokens, comp.op_pos + 1, cond_end)
-            ms_parse_expr(right_tokens, 0, bc)
-            push(bc, OP_SUB)
-        push(bc, OP_PUSH_STACK)
-        push(bc, 1)
-        push(bc, OP_SUB)
-        push(bc, OP_JN)
-        let jn_patch = len(bc)
-        push(bc, 0)
-        var next_idx = parse_ms_block(lines, line_idx + 1, indent, bc)
-        var has_else = false
+    var patches = ms_emit_cond_jumps(tokens, cond_end, bc)
+    var next_idx = parse_ms_block(lines, line_idx + 1, indent, bc)
+    var end_patches: Array<Int> = []
+    // elif chain: each elif closes the previous case and opens a new condition
+    var more: Bool = true
+    while more:
+        more = false
         if next_idx < len(lines):
             let nl = trim_ms(lines[next_idx])
             let ni = count_indent(lines[next_idx])
             if ni == indent:
                 let nt = tokenize_ms_line(nl)
-                if len(nt) > 2 and nt[0].kind == MS_TOK_ELSE and nt[1].kind == MS_TOK_COLON:
-                    has_else = true
-        if has_else:
-            push(bc, OP_JMP)
-            let jmp_patch = len(bc)
-            push(bc, 0)
-            bc[jn_patch] = len(bc)
-            next_idx = parse_ms_block(lines, next_idx + 1, indent, bc)
-            bc[jmp_patch] = len(bc)
-        else:
-            bc[jn_patch] = len(bc)
-        return next_idx
+                if len(nt) > 3 and nt[0].kind == MS_TOK_ELIF and nt[len(nt) - 2].kind == MS_TOK_COLON:
+                    push(bc, OP_JMP)
+                    push(end_patches, len(bc))
+                    push(bc, 0)
+                    let _pp: Int = ms_patch_all(bc, patches, len(bc))
+                    patches = ms_emit_cond_jumps(nt, len(nt) - 2, bc)
+                    next_idx = parse_ms_block(lines, next_idx + 1, indent, bc)
+                    more = true
+    // optional else
+    var has_else: Bool = false
+    if next_idx < len(lines):
+        let nl = trim_ms(lines[next_idx])
+        let ni = count_indent(lines[next_idx])
+        if ni == indent:
+            let nt = tokenize_ms_line(nl)
+            if len(nt) > 2 and nt[0].kind == MS_TOK_ELSE and nt[1].kind == MS_TOK_COLON:
+                has_else = true
+    if has_else:
+        push(bc, OP_JMP)
+        push(end_patches, len(bc))
+        push(bc, 0)
+        let _pe: Int = ms_patch_all(bc, patches, len(bc))
+        next_idx = parse_ms_block(lines, next_idx + 1, indent, bc)
     else:
-        let cond_tokens = slice_tokens(tokens, 1, cond_end)
-        ms_parse_expr(cond_tokens, 0, bc)
-        push(bc, OP_JZ)
-        let jz_patch = len(bc)
-        push(bc, 0)
-        var next_idx = parse_ms_block(lines, line_idx + 1, indent, bc)
-        var has_else = false
-        if next_idx < len(lines):
-            let nl = trim_ms(lines[next_idx])
-            let ni = count_indent(lines[next_idx])
-            if ni == indent:
-                let nt = tokenize_ms_line(nl)
-                if len(nt) > 2 and nt[0].kind == MS_TOK_ELSE and nt[1].kind == MS_TOK_COLON:
-                    has_else = true
-        if has_else:
-            push(bc, OP_JMP)
-            let jmp_patch = len(bc)
-            push(bc, 0)
-            bc[jz_patch] = len(bc)
-            next_idx = parse_ms_block(lines, next_idx + 1, indent, bc)
-            bc[jmp_patch] = len(bc)
-        else:
-            bc[jz_patch] = len(bc)
-        return next_idx
+        let _pf: Int = ms_patch_all(bc, patches, len(bc))
+    let _pend: Int = ms_patch_all(bc, end_patches, len(bc))
+    return next_idx
 
 // --- Block parser (indentation-based) ------------------------------------
 
@@ -7315,13 +7627,11 @@ pub fn parse_source(state: LexerState) -> Array<Int>:
             parser_intents_record(intent_word, intent_hash)
 
             // Push argument bytes to VM stack (count-prefixed for handler reconstruction)
+            // NOTE: do NOT strip outer quotes here. split_blockquote_string
+            // tracks quote parity from the first character; pre-stripped
+            // input inverts parity for the whole line. The splitter handles
+            // fully-quoted input correctly on its own.
             if rest_text != "":
-                // Strip surrounding quotes if present
-                if len(rest_text) >= 2:
-                    let fc = text_substring_string(rest_text, 0, 1)
-                    let lc = text_substring_string(rest_text, len(rest_text) - 1, 1)
-                    if (fc == "\"" and lc == "\"") or (fc == "'" and lc == "'"):
-                        rest_text = text_substring_string(rest_text, 1, len(rest_text) - 2)
                 let byte_count = len(rest_text)
                 push(bc, OP_PUSH_STACK)
                 push(bc, byte_count)
@@ -7334,6 +7644,10 @@ pub fn parse_source(state: LexerState) -> Array<Int>:
             push(bc, OP_PUSH_PARAM)
             push(bc, intent_hash)
             push(bc, OP_EXECUTE_CALL)
+            // Pop the handler result like in-fence calls do — without this,
+            // results linger on the stack and ride into the NEXT dispatch
+            // as phantom leading args (the "0 " prefix class of bug).
+            push(bc, OP_POP_STACK)
 
         elif kind == TOK_TABLEPIPE:
             let tresult = parse_matrix_table(s, next_handle)
@@ -8300,6 +8614,7 @@ use parser      // OP_HALT, OP_ENTER_DOMAIN, ... OP_JN (all 21 constants 0-20)
 
 // OP_PUSH_STRING_REF: Int = 24 is now defined in parser.kn (canonical source)
 pub const OP_ERROR_BOUNDARY:  Int = 25   // domain error boundary marker (reserved)
+pub const OP_MOD:             Int = 26   // integer remainder a%b (C truncation; traps on zero like DIV)
 pub const MAX_ERRORS:         Int = 10   // error threshold before graceful halt
 
 // ===========================================================================
@@ -8544,6 +8859,12 @@ pub fn get_widget_prop(vm: MarkScriptVM, handle: Int, prop_name: String) -> Mark
 // ===========================================================================
 
 fn add_values(a: MarkValue, b: MarkValue) -> MarkValue:
+    // String concatenation: if either side is a string, stringify both.
+    // (Without this, "a" + "b" silently yields 0 — the verify-section zeros.)
+    if a.kind == MARK_STRING:
+        return mark_string(a.str_val + mark_value_to_string(b))
+    if b.kind == MARK_STRING:
+        return mark_string(mark_value_to_string(a) + b.str_val)
     if a.kind == MARK_INT and b.kind == MARK_INT:
         return mark_int(a.int_val + b.int_val)
     elif a.kind == MARK_FLOAT and b.kind == MARK_FLOAT:
@@ -8596,6 +8917,18 @@ fn div_values(a: MarkValue, b: MarkValue) -> MarkValue:
         return mark_float(a.float_val / b.int_val)
     else:
         return mark_int(0)
+
+fn mod_values(a: MarkValue, b: MarkValue) -> MarkValue:
+    // Integer remainder with C truncation semantics: a - (a/b)*b.
+    // Zero divisor traps exactly like div_values (caller checks).
+    if b.kind == MARK_INT and b.int_val == 0:
+        return mark_int(0)  // trap
+    if b.kind == MARK_FLOAT and b.float_val == 0.0:
+        return mark_int(0)  // trap
+    if a.kind == MARK_INT and b.kind == MARK_INT:
+        let q: Int = a.int_val / b.int_val
+        return mark_int(a.int_val - q * b.int_val)
+    return mark_int(0)
 
 fn is_zero_value(v: MarkValue) -> Bool:
     if v.kind == MARK_INT:
@@ -8991,6 +9324,21 @@ pub fn execute_bytecode(vm: MarkScriptVM, bc: Array<Int>) -> ExecResult:
                     push(stk, div_values(a, b))
             ip = ip + 1
 
+        // --- OP_MOD (26) — a % b, trap on zero ----------------------------
+        elif opcode == OP_MOD:
+            let stk_len = len(stk)
+            if stk_len >= 2:
+                let b = pop_stack(stk)
+                let a = pop_stack(stk)
+                if is_zero_divisor(b):
+                    verr = make_error(ERROR_TYPE,
+                        "modulo by zero",
+                        0, "", "")
+                    push(stk, mark_int(0))
+                else:
+                    push(stk, mod_values(a, b))
+            ip = ip + 1
+
         // --- OP_LOAD_VAR (18) — lookup variable by hash and push ------------
         elif opcode == OP_LOAD_VAR:
             ip = ip + 1
@@ -9146,6 +9494,11 @@ pub fn execute_bytecode(vm: MarkScriptVM, bc: Array<Int>) -> ExecResult:
 
 pub fn resume_execution(vm: MarkScriptVM, bc: Array<Int>, handler_result: HandlerResult) -> ExecResult:
     var v = handler_result.vm
+    // RESEED: struct threading across dispatch drops string_constants
+    // (exec entry sees len 0 after the first dispatch). The parser world
+    // table is the authority and is stable at exec time — reload it on
+    // every re-entry so string refs stay valid for the whole session.
+    v.string_constants = parser_strings_table()
 
     // Store handler result in the well-known _last variable
     v.last_handler_result = handler_result.value
