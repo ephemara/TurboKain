@@ -1,0 +1,185 @@
+{
+  "report": "TRAPPIST-1 0017 Impulsive Structure",
+  "date": "2026-09-22",
+  "instrument": "GBT/GUPPI",
+  "target": "TRAPPIST-1",
+  "status": "INSTRUMENTAL-ARTIFACT",
+  "confidence_existence": "very-high",
+  "confidence_attribution": "high",
+  "trigger": {
+    "tool": "xeno_scan 0.1.0",
+    "detector": "SK+IMP corroboration lattice",
+    "verdict": "XENO-STRONG",
+    "lane": "TRAPPIST1|ch60|p0|s0017",
+    "markers": {
+      "skflag": 1,
+      "skfrac_pct": 25.69,
+      "impuls": 1,
+      "maxz": 31.1,
+      "kurt": 35.74
+    }
+  },
+  "key_measurements": {
+    "on0017_blc04_ch60": {
+      "freq_mhz": 1407.7,
+      "distinct": 256,
+      "sd": 4.243,
+      "kurt": 59.8,
+      "spikes_gt10": 17719,
+      "rate_hz": 773.5,
+      "blocks_hit": "128/128"
+    },
+    "on0017_blc04_0001_ch60": {
+      "freq_mhz": 1407.7,
+      "kurt": 52.98,
+      "spikes_gt10": 14815,
+      "blocks_hit": "128/128"
+    },
+    "on0017_blc00_ch60": {
+      "freq_mhz": 2157.7,
+      "kurt": 1360.79,
+      "spikes_gt10": 12720,
+      "blocks_hit": "64/128"
+    },
+    "on0017_blc01_ch60": {
+      "freq_mhz": 1970.2,
+      "kurt": 3.05,
+      "spikes_gt10": 0,
+      "blocks_hit": "0/128"
+    },
+    "on0015_blc04_ch60": {
+      "freq_mhz": 1407.7,
+      "kurt": 0.0,
+      "spikes_gt10": 0,
+      "blocks_hit": "0/128"
+    },
+    "off0016_blc04_ch60": {
+      "freq_mhz": 1407.7,
+      "kurt": -0.0,
+      "spikes_gt10": 0,
+      "blocks_hit": "0/128"
+    },
+    "off0018_blc04_ch60": {
+      "freq_mhz": 1407.7,
+      "kurt": 0.35,
+      "spikes_gt10": 157,
+      "blocks_hit": "14/128"
+    },
+    "off0018_blc04_ch63": {
+      "freq_mhz": 1407.7,
+      "kurt": 27.68,
+      "spikes_gt10": 924,
+      "blocks_hit": "66/128"
+    },
+    "tail_excess_vs_gaussian": 1e+19,
+    "bursts": 1653,
+    "spikes_per_burst_median": 5,
+    "burst_rate_hz": 72.2
+  },
+  "mechanism_tests": {
+    "periodic": "NO (burst-train FFT flat)",
+    "adc_interleave": "NO (mod-8 chi2=1.43, uniform)",
+    "block_boundary_clustered": "NO (deciles flat, 4.8% vs 4% uniform)",
+    "stationary": "YES (128/128 blocks)",
+    "frequency_selective": "YES (blc04+blc00 yes, blc01 no)",
+    "recurrent": "NO (0015 ON quiet)"
+  },
+  "excluded": [
+    "pulsar",
+    "adc-interleaving",
+    "sample-clock artifact",
+    "block-boundary glitch"
+  ],
+  "favoured_hypothesis": "impulsive RFI event or backend transient during the 0017 observation, coupling into multiple receiver bands",
+  "needs": [
+    "ON-OFF-ON same epoch",
+    "pols 1-3",
+    "full channel map of 0017",
+    "recurrence query",
+    "matched injection prove"
+  ],
+  "cross_confirmation": "E:/SetiYeti/runs/vm_hunt/REPORT.md (0017 flagged 'on fire': 2x dark lanes, 31+ FAM-HITs)",
+  "artifacts": {
+    "report": "REPORT.md",
+    "measurements": "evidence/measurements.tsv",
+    "persistence": "evidence/persistence_per_block.tsv",
+    "histograms": "evidence/value_histograms.tsv",
+    "trigger_tables": "evidence/tables/",
+    "slices": "evidence/slices/",
+    "analysis_script": "evidence/scripts/analyze.py",
+    "channel_map": "evidence/channel_map_0017.tsv",
+    "diagnostic_battery": "evidence/diagnostic_battery.tsv"
+  },
+  "tools": {
+    "slice": "0.3.0",
+    "sk_gate": "0.1.0",
+    "xeno_scan": "0.1.0",
+    "fam_god": "0.5.0",
+    "boxcar_bank": "0.1.1",
+    "fold_sum": "0.1.0",
+    "cadence_pair": "0.2.0"
+  },
+  "astrophysical_assessment": {
+    "plausible": true,
+    "target_is_active_M8_dwarf": "TRAPPIST-1 is a known flare star and radio star-planet-interaction target",
+    "mechanism_fit": "impulsive + non-periodic + stationary + time-variable + ON-target matches coherent M-dwarf flare radio emission (ECMI/gyrosynchrotron)",
+    "plausibility_judgement": {
+      "local_instrumental": 1.0,
+      "known_astrophysical": 0.0,
+      "novel_astrophysical": 0.0
+    },
+    "note": "superseded by direct measurement (diagnostic battery)",
+    "decisive_tests": [
+      "polarisation (ECMI ~100% circular)",
+      "ON-OFF-ON same epoch",
+      "cross-band coherence",
+      "repeat detection"
+    ],
+    "caveat": "even if astrophysical, an impulsive stellar burst is not a technosignature (wrong signal class)",
+    "evidence_for_local": [
+      "kurtosis rises toward band edge (ch57 0.3 -> ch63 71)",
+      "0017-only",
+      "0018 OFF ch63 partially shares",
+      "clumpy multi-band (1407+2157 yes, 1970 no)"
+    ],
+    "evidence_for_astro": [
+      "ON-target ch60 drops in OFF",
+      "stationary 23s",
+      "strong (~1e19x Gaussian tail)",
+      "mechanism fits M-dwarf activity"
+    ]
+  },
+  "diagnostic_battery": {
+    "C1_fs2048_comb": {
+      "result": "CONFIRMED",
+      "detail": "Y2 peaks spaced 4 bins @SEG=8192 = 1430.51 Hz = fs/2048"
+    },
+    "C2_index_duplication": {
+      "result": "CONFIRMED",
+      "detail": "same chan idx spiky in blc04+blc00, flat blc01"
+    },
+    "C3_pfb_rolloff": {
+      "result": "CONFIRMED",
+      "detail": "kurtosis rises 0.26->70.97 toward band edge"
+    },
+    "S1_polarimetry": {
+      "result": "all 4 pols spiky, Stokes V~0",
+      "verdict": "terrestrial/backend ingress; NOT ECME, NOT rail failure"
+    },
+    "S2_band_center": {
+      "result": "ch32 kurt=0.02 quiet",
+      "verdict": "PFB rolloff artifact"
+    },
+    "S3_packets": {
+      "result": "PKTIDX sequential, DROPTOT~0, no DROPMARK",
+      "verdict": "no underrun"
+    },
+    "final": "INSTRUMENTAL ARTIFACT"
+  },
+  "new_guards": [
+    "fs/2048 comb detector",
+    "band-edge rolloff guard",
+    "cross-bank index guard",
+    "polarisation front-end triage"
+  ]
+}

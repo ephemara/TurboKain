@@ -1,0 +1,16 @@
+[package]
+name = "pipeline"
+version = "0.1.0"
+description = "TurboKain pipeline — one entry point wrapping slice + detectors + artifact guards."
+
+[blade]
+name = "pipeline"
+kind = "kain_app"
+entry = "src/main.kn"
+source_roots = ["src"]
+module_roots = ["src"]
+build_targets = ["llvm"]
+
+[run]
+entry = "src/main.kn"
+target = "llvm"

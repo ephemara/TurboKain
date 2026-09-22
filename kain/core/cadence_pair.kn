@@ -211,29 +211,53 @@ fn col_index(header: Array<String>, name: String) -> Int:
 // Returns flagged (0/1) + detail string via parallel out-cells trick is
 // unsupported, so detail rides a second pass fn. Kind: 1=sk 2=fold 3=pulse.
 fn detect_kind(header: Array<String>) -> Int:
+    if col_index(header, "lattice") >= 0:
+        return 5
     if col_index(header, "skflag") >= 0:
         return 1
     if col_index(header, "detected") >= 0:
         return 2
     if col_index(header, "sigma_x100") >= 0:
         return 3
+    if col_index(header, "hit") >= 0:
+        return 4
+    if col_index(header, "lattice") >= 0:
+        return 5
     return 0
 
 fn table_flagged(lines: Array<String>, header: Array<String>, kind: Int, sigma_thresh: Int) -> Int:
     var r: Int = 0
+    var skipped_head: Int = 0
     while r < len(lines):
         let row: String = lines[r]
         if len(text_trim_string(row)) > 0 and is_sep_row(row) == 0:
             let cells: Array<String> = row_cells(row)
+            if len(cells) != len(header):
+                r = r + 1
+                continue
+            if skipped_head == 0:
+                skipped_head = 1
+                r = r + 1
+                continue
             if kind == 1:
                 let ci: Int = col_index(header, "skflag")
                 if ci >= 0 and ci < len(cells):
                     if parse_int_text(cells[ci]) == 1:
                         return 1
             elif kind == 2:
-                let ci: Int = col_index(header, "detected")
-                if ci >= 0 and ci < len(cells):
-                    if parse_int_text(cells[ci]) == 1:
+                let ci2: Int = col_index(header, "detected")
+                if ci2 >= 0 and ci2 < len(cells):
+                    if parse_int_text(cells[ci2]) == 1:
+                        return 1
+            elif kind == 4:
+                let ci4: Int = col_index(header, "hit")
+                if ci4 >= 0 and ci4 < len(cells):
+                    if parse_int_text(cells[ci4]) == 1:
+                        return 1
+            elif kind == 5:
+                let ci5: Int = col_index(header, "lattice")
+                if ci5 >= 0 and ci5 < len(cells):
+                    if cells[ci5] != "XENO-CLEAN":
                         return 1
             else:
                 let ci: Int = col_index(header, "sigma_x100")
@@ -247,13 +271,25 @@ fn table_best(lines: Array<String>, header: Array<String>, kind: Int) -> Int:
     // best scalar per kind: skdev_x1e3 | sigma_x100 max | sigma_x100 max.
     var best: Int = 0
     var r: Int = 0
+    var skipped_head: Int = 0
     while r < len(lines):
         let row: String = lines[r]
         if len(text_trim_string(row)) > 0 and is_sep_row(row) == 0:
             let cells: Array<String> = row_cells(row)
+            if len(cells) != len(header):
+                r = r + 1
+                continue
+            if skipped_head == 0:
+                skipped_head = 1
+                r = r + 1
+                continue
             var ci: Int = -1
             if kind == 1:
                 ci = col_index(header, "skdev_x1e3")
+            elif kind == 4:
+                ci = col_index(header, "ratio_x100")
+            elif kind == 5:
+                ci = col_index(header, "maxz_x10")
             else:
                 ci = col_index(header, "sigma_x100")
             if ci >= 0 and ci < len(cells):
@@ -270,7 +306,7 @@ fn usage() -> String:
     t = t + "\n"
     t = t + "USAGE:\n"
     t = t + "  cadence_pair --on <on.md> --off <off.md> [--out cad.md]\n"
-    t = t + "               [--csv cad.csv] [--sigma N] [--kind sk|fold|pulse]\n"
+    t = t + "               [--csv cad.csv] [--sigma N] [--kind sk|fold|pulse|fam|xeno]\n"
     t = t + "               [--data-dir D] [--json]\n"
     t = t + "  cadence_pair <on.md> <off.md> [out.md]\n"
     t = t + "\n"
@@ -327,6 +363,10 @@ fn main() -> Int:
                     kind_force = 2
                 elif k == "pulse":
                     kind_force = 3
+                elif k == "fam":
+                    kind_force = 4
+                elif k == "xeno":
+                    kind_force = 5
                 i = i + 1
         elif a == "--data-dir":
             if i + 1 < len(args):
@@ -424,6 +464,10 @@ fn main() -> Int:
         kind_name = "fold"
     elif kind == 3:
         kind_name = "pulse"
+    elif kind == 4:
+        kind_name = "fam"
+    elif kind == 5:
+        kind_name = "xeno"
 
     let on_f: Int = table_flagged(on_lines, on_header, kind, sigma_thresh)
     let off_f: Int = table_flagged(off_lines, off_header, kind, sigma_thresh)

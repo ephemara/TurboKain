@@ -12,3 +12,5 @@ out/
 *.dat
 *.fil
 *.h5
+*.log
+/reports/2026-09-22_fullsweep

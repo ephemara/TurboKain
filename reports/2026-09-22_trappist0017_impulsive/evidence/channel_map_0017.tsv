@@ -1,0 +1,10 @@
+# TRAPPIST-1 0017 blc04 ch57-63, pol0, full 128 blocks — impulsiveness gradient
+# (evidence for §6.5.2: rises toward the band edge = possible band-edge artifact)
+chan	freq_note	distinct	sd	kurtosis	spikes_gt10
+57	blc04	254	7.049	0.26	375
+58	blc04	256	5.783	1.02	894
+59	blc04	256	4.804	4.36	1952
+60	blc04	256	4.243	59.80	17719
+61	blc04 (degraded lane)	141	3.435	0.20	155
+62	blc04	256	2.968	36.55	3499
+63	blc04	256	2.433	70.97	3438

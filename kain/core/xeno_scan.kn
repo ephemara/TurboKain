@@ -1,0 +1,1043 @@
+// ============================================================================
+// xeno_scan.kn — TurboKain 07: microscopic battery (xeno_scan.c at parity +
+// corroboration lattice)
+//
+// Mirrors c/xeno_scan.c marker-for-marker (all six + time-domain):
+//   SK      per-bin spectral kurtosis, |SK-1|>=0.50, flag >=2% deviant bins
+//           (grouped sums are Gamma-distributed — never group; measured 0.98
+//           deviation on pure noise if you do)
+//   coh     zero-crossing interval mean/std, flag >= 6.0 (clock-grade)
+//   ladder  log mean-spectrum -> FFT -> quefrency peak, whitened in QUEFRENCY
+//           (+-60 median, floored at global median — unfloored division made
+//           ratios of 1332 from nulls), NEVER whiten in frequency (blinds
+//           wide combs — measured, reverted); flag >= 20.0
+//   dm_sign sub-band arrival order, 8 bands, r2>=0.8 + span>=4 frames;
+//           -slope (high-freq first) = +1 NORMAL plasma, +slope = -1 EXOTIC
+//   impuls  max-z > 8.0 OR tail-excess > 3.0
+//   kurt/tailx time-domain excess kurtosis + 4-sigma tail vs 6.33e-5 null
+// STFT: SEG 4096 / HOP 2048 / NB 2049, cap 512 segs, min 8 (below that the
+// STFT markers stay zeroed and time-domain carries the verdict — like C).
+//
+// Kain adaptations (documented):
+//   * FFT = vendored radix-2 (stdlib dsp.kn still binds undefined `half`).
+//   * sy_median even-n averages two middles (ladder m2 over 1014) — mirror
+//     exactly; odd-n single middle everywhere else.
+//   * log(0) guard: bins with zero power take ln(1e-30) = -69.0776 (C adds
+//     1e-30 inside log; identical for all live inputs).
+//   * LCG + Box-Muller selftest stream (own seeds; same SHAPES as C, not
+//     bit-identical streams — structure is what's proven).
+//
+// GOD EXTENSION (labeled — C has no lattice): corroboration verdicts.
+//   DM-EXOTIC : dm_sign == -1 (already r2/span gated)
+//   SK+IMP    : skflag && impuls (packetised traffic signature)
+//   COH+LADDER: cohflag && ladderq (clock-grade oscillator + harmonics)
+//   LADDER    : ladderq alone (comb needs veto/thicket — flag, don't claim)
+//   SINGLE-X  : any lone marker (names which)
+//   XENO-CLEAN: none
+// File verdict: EXOTIC/PACKETISED/CLOCK -> XENO-STRONG; SINGLE/COMB ->
+// XENO-WATCH; none -> XENO-CLEAN. Grades mapping rides grade_pass later.
+//
+//   xeno_scan --in <f32> [--fs HZ] [--out xeno.md] [--csv xeno.csv]
+//             [--selftest] [--data-dir D] [--json]
+//   xeno_scan <f32> [fs] | --selftest
+//
+// Exit codes: 0 scanned (verdict in table), 1 help OR --selftest FAIL, 2 error.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+// ── kernel32 file API (no fs bridge for bulk) ───────────────────────────────
+@extern @link_name("CreateFileA")
+fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
+
+@extern @link_name("ReadFile")
+fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("GetFileSizeEx")
+fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
+
+@extern @link_name("CloseHandle")
+fn k_CloseHandle(h: ptr<Void>) -> Int
+
+@extern @link_name("GetLastError")
+fn k_GetLastError() -> Int
+
+fn null_ptr() -> ptr<Void> with Pure:
+    return int_to_ptr(0, "ptr<Void>")
+
+const GEN_READ: Int = 2147483648
+const OPEN_EXISTING: Int = 3
+const FILE_NORMAL: Int = 128
+const FILE_SHARE_RW: Int = 3
+
+const EXIT_OK: Int = 0
+const EXIT_HELP: Int = 1
+const EXIT_ERROR: Int = 2
+
+// ── Battery geometry (xeno_scan.c, calibrated — not tuned) ──────────────────
+const SEG: Int = 4096
+const HOP: Int = 2048
+const NB: Int = 2049
+const SEGS_CAP: Int = 512
+const SEGS_MIN: Int = 8
+const SK_DEV: Float = 0.5
+const SK_FRAC: Float = 0.02
+const COH_FLAG: Float = 6.0
+const LADDER_FLAG: Float = 20.0
+const DM_NSB: Int = 8
+const DM_R2_MIN: Float = 0.8
+const DM_SPAN_MIN: Float = 4.0
+const SK_PI2: Float = 6.283185307179586
+const LN_NEG69: Float = -69.0776
+const TAIL_NULL: Float = 0.0000633
+
+fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
+    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
+
+fn parse_int_text(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var sign: Int = 1
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = -1
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var value: Int = 0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        var digit: Int = 0
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return value * sign
+        value = value * 10 + digit
+        index = index + 1
+    return value * sign
+
+fn parse_float_text(text: String) -> Float:
+    var t: String = text_trim_string(text)
+    if len(t) == 0:
+        return 0.0
+    var sign: Float = 1.0
+    var i: Int = 0
+    if char_at(t, 0) == "-":
+        sign = -1.0
+        i = 1
+    elif char_at(t, 0) == "+":
+        i = 1
+    var intpart: Float = 0.0
+    while i < len(t):
+        let c: String = char_at(t, i)
+        if c == ".":
+            break
+        if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
+            intpart = intpart * 10.0 + (parse_int_text(c) as Float)
+        elif c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
+            intpart = intpart * 10.0 + (parse_int_text(c) as Float)
+        else:
+            break
+        i = i + 1
+    var frac: Float = 0.0
+    var div: Float = 1.0
+    if i < len(t) and char_at(t, i) == ".":
+        i = i + 1
+        while i < len(t):
+            let c: String = char_at(t, i)
+            var dd: Int = -1
+            if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
+                dd = parse_int_text(c)
+            elif c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
+                dd = parse_int_text(c)
+            else:
+                break
+            div = div * 10.0
+            frac = frac + (dd as Float) / div
+            i = i + 1
+    return sign * (intpart + frac)
+
+fn find_from(hay: String, needle: String, start: Int) -> Int:
+    let hn: Int = len(hay)
+    let nn: Int = len(needle)
+    if nn == 0:
+        return start
+    var i: Int = start
+    if i < 0:
+        i = 0
+    while i + nn <= hn:
+        var j: Int = 0
+        var hit: Int = 1
+        while j < nn:
+            if char_at(hay, i + j) != char_at(needle, j):
+                hit = 0
+            j = j + 1
+        if hit == 1:
+            return i
+        i = i + 1
+    return -1
+
+// Exact f32-LE quad → Float via 2^e table.
+fn f32_of_quad(b0: Int, b1: Int, b2: Int, b3: Int, p2t: ptr<Float>) -> Float with Unsafe:
+    let bits: Int = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+    if bits == 0:
+        return 0.0
+    let sign: Int = bits >> 31
+    let exp: Int = (bits >> 23) & 255
+    let mant: Int = bits & 8388607
+    if exp == 0 or exp == 255:
+        return 0.0
+    let frac: Float = 1.0 + (mant as Float) / 8388608.0
+    var v: Float = frac * mem_load(ptr_offset(p2t, exp - 1, "Float"), "Float")
+    if sign == 1:
+        v = 0.0 - v
+    return v
+
+// ── Radix-2 DIT FFT, in-place (vendored) ────────────────────────────────────
+fn sk_bitrev(re: ptr<Float>, im: ptr<Float>, n: Int) with Unsafe:
+    var j: Int = 0
+    var i: Int = 1
+    while i < n:
+        var bit: Int = n / 2
+        while bit > 0:
+            if j >= bit:
+                j = j - bit
+                bit = bit / 2
+            else:
+                break
+        j = j + bit
+        if i < j:
+            let tr: Float = mem_load(ptr_offset(re, i, "Float"), "Float")
+            let ti: Float = mem_load(ptr_offset(im, i, "Float"), "Float")
+            mem_store(ptr_offset(re, i, "Float"), mem_load(ptr_offset(re, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(im, i, "Float"), mem_load(ptr_offset(im, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(re, j, "Float"), tr, "Float")
+            mem_store(ptr_offset(im, j, "Float"), ti, "Float")
+        i = i + 1
+    return
+
+fn sk_fft(re: ptr<Float>, im: ptr<Float>, n: Int) -> Int with Unsafe:
+    sk_bitrev(re, im, n)
+    var size: Int = 2
+    while size <= n:
+        let half_size: Int = size / 2
+        let step: Float = 0.0 - SK_PI2 / (size as Float)
+        var i: Int = 0
+        while i < n:
+            var k: Int = 0
+            var j: Int = i
+            while j < i + half_size:
+                let ang: Float = (k as Float) * step
+                let cw: Float = cos(ang)
+                let sw: Float = sin(ang)
+                let ar: Float = mem_load(ptr_offset(re, j + half_size, "Float"), "Float")
+                let ai: Float = mem_load(ptr_offset(im, j + half_size, "Float"), "Float")
+                let tpre: Float = cw * ar - sw * ai
+                let tpim: Float = sw * ar + cw * ai
+                let xr: Float = mem_load(ptr_offset(re, j, "Float"), "Float")
+                let xi: Float = mem_load(ptr_offset(im, j, "Float"), "Float")
+                mem_store(ptr_offset(re, j, "Float"), xr + tpre, "Float")
+                mem_store(ptr_offset(im, j, "Float"), xi + tpim, "Float")
+                mem_store(ptr_offset(re, j + half_size, "Float"), xr - tpre, "Float")
+                mem_store(ptr_offset(im, j + half_size, "Float"), xi - tpim, "Float")
+                k = k + 1
+                j = j + 1
+            i = i + size
+        size = size * 2
+    return 0
+
+// ── Quickselect (upper-middle) + even-averaging median ──────────────────────
+fn qs_partition(a: ptr<Float>, lo: Int, hi: Int) -> Int with Unsafe:
+    let piv: Float = mem_load(ptr_offset(a, hi, "Float"), "Float")
+    var i: Int = lo
+    var j: Int = lo
+    while j < hi:
+        if mem_load(ptr_offset(a, j, "Float"), "Float") <= piv:
+            let t: Float = mem_load(ptr_offset(a, i, "Float"), "Float")
+            mem_store(ptr_offset(a, i, "Float"), mem_load(ptr_offset(a, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(a, j, "Float"), t, "Float")
+            i = i + 1
+        j = j + 1
+    let t2: Float = mem_load(ptr_offset(a, i, "Float"), "Float")
+    mem_store(ptr_offset(a, i, "Float"), mem_load(ptr_offset(a, hi, "Float"), "Float"), "Float")
+    mem_store(ptr_offset(a, hi, "Float"), t2, "Float")
+    return i
+
+fn quickselect_k(a: ptr<Float>, n: Int, k: Int) -> Float with Unsafe:
+    var lo: Int = 0
+    var hi: Int = n - 1
+    while lo < hi:
+        let p: Int = qs_partition(a, lo, hi)
+        if p == k:
+            break
+        elif p > k:
+            hi = p - 1
+        else:
+            lo = p + 1
+    return mem_load(ptr_offset(a, k, "Float"), "Float")
+
+// sy_median mirror: odd → middle, even → average of two middles (needs a
+// scratch arena of n slots; second select on reordered array is valid).
+fn median_avg(a: ptr<Float>, scratch: ptr<Float>, n: Int) -> Float with Unsafe:
+    if n <= 0:
+        return 0.0
+    var i: Int = 0
+    while i < n:
+        mem_store(ptr_offset(scratch, i, "Float"), mem_load(ptr_offset(a, i, "Float"), "Float"), "Float")
+        i = i + 1
+    if n == 1:
+        return mem_load(ptr_offset(scratch, 0, "Float"), "Float")
+    var odd: Int = n - (n / 2) * 2
+    if odd == 1:
+        return quickselect_k(scratch, n, n / 2)
+    let va: Float = quickselect_k(scratch, n, n / 2 - 1)
+    let vb: Float = quickselect_k(scratch, n, n / 2)
+    return 0.5 * (va + vb)
+
+// ── LCG stream (own seeds; same SHAPES as C selftest, not bit-identical) ────
+fn lcg_next(state: Int) -> Int:
+    return ((state * 1103515245) + 12345) & 2147483647
+
+fn usage() -> String:
+    var t: String = "xeno_scan 0.1.0 — TurboKain microscopic battery (xeno parity + lattice)\n"
+    t = t + "SK + coherence + cepstral ladder + DM-order + impulsivity + nongauss,\n"
+    t = t + "plus corroboration lattice (SK+IMP, COH+LADDER, DM-EXOTIC...).\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  xeno_scan --in <f32> [--fs HZ] [--out xeno.md] [--csv xeno.csv]\n"
+    t = t + "            [--selftest] [--data-dir D] [--json]\n"
+    t = t + "  xeno_scan <f32> [fs] | --selftest\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 scanned, 1 help OR --selftest FAIL, 2 error.\n"
+    return t
+
+fn main() -> Int with Unsafe:
+    let args: Array<String> = process_user_args()
+    var in_path: String = ""
+    var data_dir: String = ""
+    var out_path: String = ""
+    var csv_path: String = ""
+    var do_selftest: Int = 0
+    var fhz: Float = 2929687.5
+    var json: Int = 0
+    var show_help: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--json":
+            json = 1
+        elif a == "--selftest":
+            do_selftest = 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fhz = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    if a == "--selftest":
+                        do_selftest = 1
+                    else:
+                        push(pos, a)
+        i = i + 1
+    // C-style positionals: <f32> [fs] | --selftest.
+    var pi: Int = 0
+    while pi < len(pos):
+        let p: String = pos[pi]
+        if pi == 0:
+            if p == "--selftest":
+                do_selftest = 1
+            elif in_path == "":
+                in_path = p
+        elif pi == 1:
+            fhz = parse_float_text(p)
+        pi = pi + 1
+
+    if show_help == 1:
+        print(usage())
+        return EXIT_HELP
+    // (fs accepted for CLI parity; markers are fs-free like C.)
+
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+    if in_path != "":
+        if data_dir != "":
+            if find_from(in_path, ":", 0) < 0:
+                if len(in_path) > 0:
+                    if char_at(in_path, 0) != "/":
+                        in_path = data_dir + "/" + in_path
+    if do_selftest == 1:
+        return run_selftest()
+    if in_path == "":
+        println("xeno_scan: no input. usage: xeno_scan <in.f32> | --selftest")
+        return EXIT_ERROR
+    if fs_exists(in_path) == false:
+        println("xeno_scan: file not found: " + in_path)
+        return EXIT_ERROR
+
+    // ── Load .f32, decode ──
+    let h: ptr<Void> = k_CreateFileA(in_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h) == -1:
+        println("xeno_scan: open fail err=" + str(k_GetLastError()))
+        return EXIT_ERROR
+    let szslot: ptr<Int> = alloc_zeroed(1, "Int")
+    var fsize: Int = -1
+    if k_GetFileSizeEx(h, szslot) != 0:
+        fsize = mem_load(szslot, "Int")
+    decay szslot
+    if fsize < 16:
+        println("xeno_scan: file too small")
+        return EXIT_ERROR
+    let nsamp: Int = fsize / 4
+    let mut rawbuf: ptr<Byte> = alloc_zeroed(fsize + 16, "Byte")
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(nslot, 0, "Int")
+    let rok: Int = k_ReadFile(h, rawbuf, fsize, nslot, null_ptr())
+    let got: Int = mem_load(nslot, "Int")
+    let _ch: Int = k_CloseHandle(h)
+    if rok == 0 or got < fsize:
+        println("xeno_scan: short read")
+        return EXIT_ERROR
+    let mut p2t: ptr<Float> = alloc_zeroed(254, "Float")
+    var pv: Float = 1.0
+    var di: Int = 0
+    while di < 126:
+        pv = pv / 2.0
+        di = di + 1
+    var pj: Int = 0
+    while pj < 254:
+        mem_store(ptr_offset(p2t, pj, "Float"), pv, "Float")
+        pv = pv * 2.0
+        pj = pj + 1
+    let mut xbuf: ptr<Float> = alloc_zeroed(nsamp, "Float")
+    var ds: Int = 0
+    while ds < nsamp:
+        mem_store(ptr_offset(xbuf, ds, "Float"), f32_of_quad(bref(rawbuf, ds * 4), bref(rawbuf, ds * 4 + 1), bref(rawbuf, ds * 4 + 2), bref(rawbuf, ds * 4 + 3), p2t), "Float")
+        ds = ds + 1
+    decay rawbuf
+    decay p2t
+    decay nslot
+
+    let r: XenoResult = analyze_file(xbuf, nsamp)
+    decay xbuf
+    return emit_result(in_path, nsamp, r, out_path, csv_path, json)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// XenoResult + analyze_file + emit_result + selftest (struct-carried: Kain
+// fns take/set no out-params, so the battery travels as one value).
+// ═══════════════════════════════════════════════════════════════════════════
+
+struct XenoResult:
+    skdev: Float
+    skfrac: Float
+    skflag: Int
+    coh: Float
+    cohflag: Int
+    ladder: Float
+    ladderq: Int
+    dm_sign: Int
+    dm_r2: Float
+    impuls: Int
+    maxz: Float
+    kurt: Float
+    tailx: Float
+
+fn analyze_file(x: ptr<Float>, nx: Int) -> XenoResult with Unsafe:
+    var skdev: Float = 0.0
+    var skfrac: Float = 0.0
+    var skflag: Int = 0
+    var coh: Float = 0.0
+    var cohflag: Int = 0
+    var ladder: Float = 0.0
+    var ladderq: Int = 0
+    var dm_sign: Int = 0
+    var dm_r2: Float = 0.0
+    var impuls: Int = 0
+    var maxz: Float = 0.0
+    var kurt: Float = 0.0
+    var tailx: Float = 0.0
+    // ---- time domain (first 524288) ----
+    var st: Int = nx
+    if st > 524288:
+        st = 524288
+    var m: Float = 0.0
+    var i0: Int = 0
+    while i0 < st:
+        m = m + mem_load(ptr_offset(x, i0, "Float"), "Float")
+        i0 = i0 + 1
+    m = m / (st as Float)
+    var vv: Float = 0.0
+    i0 = 0
+    while i0 < st:
+        let dd: Float = mem_load(ptr_offset(x, i0, "Float"), "Float") - m
+        vv = vv + dd * dd
+        i0 = i0 + 1
+    vv = vv / (st as Float)
+    let sd: Float = sqrt(vv)
+    if sd > 0.0:
+        var kk: Float = 0.0
+        var tail: Int = 0
+        var i1: Int = 0
+        while i1 < st:
+            let zz: Float = (mem_load(ptr_offset(x, i1, "Float"), "Float") - m) / sd
+            kk = kk + zz * zz * zz * zz
+            if zz > 4.0 or zz < -4.0:
+                tail = tail + 1
+            i1 = i1 + 1
+        kurt = kk / (st as Float) - 3.0
+        tailx = ((tail as Float) / (st as Float)) / TAIL_NULL
+        var mz: Float = 0.0
+        i1 = 0
+        while i1 < st:
+            var az: Float = (mem_load(ptr_offset(x, i1, "Float"), "Float") - m) / sd
+            if az < 0.0:
+                az = 0.0 - az
+            if az > mz:
+                mz = az
+            i1 = i1 + 1
+        maxz = mz
+        if mz > 8.0 or tailx > 3.0:
+            impuls = 1
+    // ---- zero-crossing coherence ----
+    var v0: Float = mem_load(x, "Float")
+    var prev: Int = -1
+    if v0 > 0.0:
+        prev = 1
+    var last: Int = -1
+    var nn: Int = 0
+    var sm: Float = 0.0
+    var s2: Float = 0.0
+    var i2: Int = 1
+    while i2 < st:
+        let vc: Float = mem_load(ptr_offset(x, i2, "Float"), "Float")
+        var cur: Int = prev
+        if vc > 0.0:
+            cur = 1
+        elif vc < 0.0:
+            cur = -1
+        if cur != prev:
+            if last >= 0:
+                let iv: Float = (i2 - last) as Float
+                nn = nn + 1
+                sm = sm + iv
+                s2 = s2 + iv * iv
+            last = i2
+            prev = cur
+        i2 = i2 + 1
+    if nn > 100:
+        let mu: Float = sm / (nn as Float)
+        let va: Float = s2 / (nn as Float) - mu * mu
+        if va > 0.0:
+            coh = mu / sqrt(va)
+        else:
+            coh = 999.0
+    else:
+        coh = 0.0
+    if coh >= COH_FLAG:
+        cohflag = 1
+    // ---- STFT power (SEG 4096 / HOP 2048, cap 512, min 8) ----
+    var nseg_full: Int = 0
+    if nx >= SEG:
+        nseg_full = (nx - SEG) / HOP + 1
+    var nseg: Int = nseg_full
+    if nseg > SEGS_CAP:
+        nseg = SEGS_CAP
+    if nseg >= SEGS_MIN:
+        let mut s1a: ptr<Float> = alloc_zeroed(NB, "Float")
+        let mut s2a: ptr<Float> = alloc_zeroed(NB, "Float")
+        let mut bf: ptr<Float> = alloc_zeroed(DM_NSB * SEGS_CAP, "Float")
+        let mut re: ptr<Float> = alloc_zeroed(SEG, "Float")
+        let mut im: ptr<Float> = alloc_zeroed(SEG, "Float")
+        let span: Int = (NB - 2) / DM_NSB
+        var t: Int = 0
+        while t < nseg:
+            let base: Int = t * HOP
+            var k: Int = 0
+            while k < SEG:
+                mem_store(ptr_offset(re, k, "Float"), mem_load(ptr_offset(x, base + k, "Float"), "Float"), "Float")
+                mem_store(ptr_offset(im, k, "Float"), 0.0, "Float")
+                k = k + 1
+            let frc: Int = sk_fft(re, im, SEG)
+            if frc == 0:
+                var b: Int = 0
+                while b < NB:
+                    let rv: Float = mem_load(ptr_offset(re, b, "Float"), "Float")
+                    let iv: Float = mem_load(ptr_offset(im, b, "Float"), "Float")
+                    let pw: Float = rv * rv + iv * iv
+                    mem_store(ptr_offset(s1a, b, "Float"), mem_load(ptr_offset(s1a, b, "Float"), "Float") + pw, "Float")
+                    mem_store(ptr_offset(s2a, b, "Float"), mem_load(ptr_offset(s2a, b, "Float"), "Float") + pw * pw, "Float")
+                    var bk: Int = (b - 2) / span
+                    if bk < 0:
+                        bk = 0
+                    if bk > DM_NSB - 1:
+                        bk = DM_NSB - 1
+                    if b >= 2:
+                        mem_store(ptr_offset(bf, bk * SEGS_CAP + t, "Float"), mem_load(ptr_offset(bf, bk * SEGS_CAP + t, "Float"), "Float") + pw, "Float")
+                    b = b + 1
+            t = t + 1
+        decay re
+        decay im
+        // ---- SK per bin ----
+        let M: Float = nseg as Float
+        let coef: Float = (M + 1.0) / (M - 1.0)
+        var worst: Float = 0.0
+        var bad: Int = 0
+        var nb: Int = 0
+        var bb: Int = 2
+        while bb < NB:
+            let s1: Float = mem_load(ptr_offset(s1a, bb, "Float"), "Float")
+            let s2: Float = mem_load(ptr_offset(s2a, bb, "Float"), "Float")
+            nb = nb + 1
+            if s1 > 0.0:
+                let sk: Float = coef * (M * s2 / (s1 * s1) - 1.0)
+                var dev: Float = sk - 1.0
+                if dev < 0.0:
+                    dev = 0.0 - dev
+                if dev > worst:
+                    worst = dev
+                if dev >= SK_DEV:
+                    bad = bad + 1
+            bb = bb + 1
+        skdev = worst
+        skfrac = (bad as Float) / (nb as Float)
+        if skfrac >= SK_FRAC:
+            skflag = 1
+        // ---- cepstral ladder ----
+        let mut lavg: ptr<Float> = alloc_zeroed(NB, "Float")
+        var lb: Int = 0
+        while lb < NB:
+            mem_store(ptr_offset(lavg, lb, "Float"), mem_load(ptr_offset(s1a, lb, "Float"), "Float") / M, "Float")
+            lb = lb + 1
+        let mut lmed: ptr<Float> = alloc_zeroed(NB, "Float")
+        lb = 0
+        while lb < NB:
+            mem_store(ptr_offset(lmed, lb, "Float"), mem_load(ptr_offset(lavg, lb, "Float"), "Float"), "Float")
+            lb = lb + 1
+        // C: median over avg[2..NB-1) (NB-3 values) — DC + bin 1 EXCLUDED
+        // (DC dominates and inflates the floor ~20x if included).
+        let mut lmed2: ptr<Float> = alloc_zeroed(NB, "Float")
+        lb = 0
+        while lb < NB - 3:
+            mem_store(ptr_offset(lmed2, lb, "Float"), mem_load(ptr_offset(lavg, lb + 2, "Float"), "Float"), "Float")
+            lb = lb + 1
+        let smed: Float = median_avg(lmed2, lmed, NB - 3)
+        decay lmed2
+        var smedv: Float = smed
+        if smedv <= 0.0:
+            smedv = 1.0
+        let mut lr: ptr<Float> = alloc_zeroed(SEG, "Float")
+        let mut li: ptr<Float> = alloc_zeroed(SEG, "Float")
+        let NC: Int = 2048
+        var lq: Int = 0
+        while lq < SEG:
+            if lq < NC:
+                let vv2: Float = mem_load(ptr_offset(lavg, lq, "Float"), "Float") / smedv
+                if vv2 > 0.0:
+                    mem_store(ptr_offset(lr, lq, "Float"), log(vv2), "Float")
+                else:
+                    mem_store(ptr_offset(lr, lq, "Float"), LN_NEG69, "Float")
+            else:
+                mem_store(ptr_offset(lr, lq, "Float"), 0.0, "Float")
+            mem_store(ptr_offset(li, lq, "Float"), 0.0, "Float")
+            lq = lq + 1
+        let fr2: Int = sk_fft(lr, li, SEG)
+        if fr2 == 0:
+            let mut cc: ptr<Float> = alloc_zeroed(1025, "Float")
+            var ci: Int = 0
+            while ci <= 1024:
+                let cr: Float = mem_load(ptr_offset(lr, ci, "Float"), "Float")
+                let cv: Float = mem_load(ptr_offset(li, ci, "Float"), "Float")
+                mem_store(ptr_offset(cc, ci, "Float"), cr * cr + cv * cv, "Float")
+                ci = ci + 1
+            let mut mbuf: ptr<Float> = alloc_zeroed(1014, "Float")
+            let mut msc: ptr<Float> = alloc_zeroed(1014, "Float")
+            var mx: Int = 0
+            while mx < 1014:
+                mem_store(ptr_offset(mbuf, mx, "Float"), mem_load(ptr_offset(cc, 10 + mx, "Float"), "Float"), "Float")
+                mx = mx + 1
+            let m2v: Float = median_avg(mbuf, msc, 1014)
+            var floorv: Float = m2v
+            if floorv <= 0.0:
+                floorv = 0.000000000000000000000000000001
+            let mut win: ptr<Float> = alloc_zeroed(121, "Float")
+            let mut wsc: ptr<Float> = alloc_zeroed(121, "Float")
+            var best: Float = 0.0
+            var bq: Int = 0
+            var qq: Int = 10
+            while qq <= 700:
+                var wkk: Int = 0
+                while wkk < 121:
+                    var jj: Int = qq - 60 + wkk
+                    if jj < 10:
+                        jj = 10
+                    if jj > 700:
+                        jj = 700
+                    mem_store(ptr_offset(win, wkk, "Float"), mem_load(ptr_offset(cc, jj, "Float"), "Float"), "Float")
+                    wkk = wkk + 1
+                let local: Float = median_avg(win, wsc, 121)
+                var denom: Float = local
+                if denom < floorv:
+                    denom = floorv
+                let vv3: Float = mem_load(ptr_offset(cc, qq, "Float"), "Float") / denom
+                if vv3 > best:
+                    best = vv3
+                    bq = qq
+                qq = qq + 1
+            decay win
+            decay wsc
+            ladder = best
+            if best >= LADDER_FLAG:
+                ladderq = bq
+            decay cc
+            decay mbuf
+            decay msc
+        decay lavg
+        decay lmed
+        decay lr
+        decay li
+        // ---- dispersion order ----
+        let mut tta: ptr<Float> = alloc_zeroed(DM_NSB, "Float")
+        let mut ffa: ptr<Float> = alloc_zeroed(DM_NSB, "Float")
+        var dkk: Int = 0
+        while dkk < DM_NSB:
+            var b0: Int = 2 + dkk * span
+            var b1: Int = b0 + span
+            if dkk == DM_NSB - 1:
+                b1 = NB
+            var bt: Float = 0.0
+            var bi: Int = 0
+            var dt: Int = 0
+            while dt < nseg:
+                var pp: Float = 0.0
+                var db: Int = b0
+                while db < b1:
+                    pp = pp + mem_load(ptr_offset(bf, dkk * SEGS_CAP + dt, "Float"), "Float")
+                    db = db + 1
+                if pp > bt:
+                    bt = pp
+                    bi = dt
+                dt = dt + 1
+            mem_store(ptr_offset(tta, dkk, "Float"), bi as Float, "Float")
+            mem_store(ptr_offset(ffa, dkk, "Float"), ((b0 + b1) as Float) / 2.0, "Float")
+            dkk = dkk + 1
+        var mf: Float = 0.0
+        var mt: Float = 0.0
+        dkk = 0
+        while dkk < DM_NSB:
+            mf = mf + mem_load(ptr_offset(ffa, dkk, "Float"), "Float")
+            mt = mt + mem_load(ptr_offset(tta, dkk, "Float"), "Float")
+            dkk = dkk + 1
+        mf = mf / (DM_NSB as Float)
+        mt = mt / (DM_NSB as Float)
+        var sxy: Float = 0.0
+        var sxx: Float = 0.0
+        var syy: Float = 0.0
+        var tlo: Float = mem_load(ptr_offset(tta, 0, "Float"), "Float")
+        var thi: Float = tlo
+        dkk = 0
+        while dkk < DM_NSB:
+            let dfx: Float = mem_load(ptr_offset(ffa, dkk, "Float"), "Float") - mf
+            let dtx: Float = mem_load(ptr_offset(tta, dkk, "Float"), "Float") - mt
+            sxy = sxy + dfx * dtx
+            sxx = sxx + dfx * dfx
+            syy = syy + dtx * dtx
+            let tk: Float = mem_load(ptr_offset(tta, dkk, "Float"), "Float")
+            if tk < tlo:
+                tlo = tk
+            if tk > thi:
+                thi = tk
+            dkk = dkk + 1
+        if sxx > 0.0 and syy > 0.0:
+            dm_r2 = (sxy * sxy) / (sxx * syy)
+        else:
+            dm_r2 = 0.0
+        if dm_r2 >= DM_R2_MIN and (thi - tlo) >= DM_SPAN_MIN:
+            if sxy < 0.0:
+                dm_sign = 1
+            else:
+                dm_sign = -1
+        else:
+            dm_sign = 0
+        decay tta
+        decay ffa
+        decay bf
+        decay s1a
+        decay s2a
+    return XenoResult { skdev: skdev, skfrac: skfrac, skflag: skflag, coh: coh, cohflag: cohflag, ladder: ladder, ladderq: ladderq, dm_sign: dm_sign, dm_r2: dm_r2, impuls: impuls, maxz: maxz, kurt: kurt, tailx: tailx }
+
+fn lattice_of(r: XenoResult) -> String:
+    if r.dm_sign == 0 - 1:
+        return "DM-EXOTIC"
+    if r.skflag == 1 and r.impuls == 1:
+        return "SK+IMP"
+    if r.cohflag == 1 and r.ladderq > 0:
+        return "COH+LADDER"
+    if r.ladderq > 0:
+        return "LADDER"
+    if r.skflag == 1:
+        return "SINGLE-SK"
+    if r.cohflag == 1:
+        return "SINGLE-COH"
+    if r.impuls == 1:
+        return "SINGLE-IMP"
+    return "XENO-CLEAN"
+
+fn lattice_verdict(lat: String) -> String:
+    if lat == "DM-EXOTIC":
+        return "XENO-STRONG"
+    if lat == "SK+IMP":
+        return "XENO-STRONG"
+    if lat == "COH+LADDER":
+        return "XENO-STRONG"
+    if lat == "LADDER":
+        return "XENO-WATCH"
+    if lat == "SINGLE-SK":
+        return "XENO-WATCH"
+    if lat == "SINGLE-COH":
+        return "XENO-WATCH"
+    if lat == "SINGLE-IMP":
+        return "XENO-WATCH"
+    return "XENO-CLEAN"
+
+fn emit_result(path: String, nsamp: Int, r: XenoResult, out_path: String, csv_path: String, json: Int) -> Int:
+    var md: String = "| file | samples | skdev_x1000 | skfrac_x10000 | skflag | coh_x100 | cohflag | ladder_x100 | ladderq | dm_sign | dm_r2_x1000 | impuls | maxz_x10 | kurt_x100 | tailx_x100 | lattice | verdict |\n"
+    md = md + "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    var dms: String = "+"
+    if r.dm_sign < 0:
+        dms = "-"
+    let lat: String = lattice_of(r)
+    let verdict: String = lattice_verdict(lat)
+    md = md + "| " + path + " | " + str(nsamp) + " | " + str(r.skdev * 1000.0) + " | " + str(r.skfrac * 10000.0) + " | " + str(r.skflag) + " | " + str(r.coh * 100.0) + " | " + str(r.cohflag) + " | " + str(r.ladder * 100.0) + " | " + str(r.ladderq) + " | " + dms + str(r.dm_sign) + " | " + str(r.dm_r2 * 1000.0) + " | " + str(r.impuls) + " | " + str(r.maxz * 10.0) + " | " + str(r.kurt * 100.0) + " | " + str(r.tailx * 100.0) + " | " + lat + " | " + verdict + " |\n"
+    println(md)
+    println("samples=" + str(nsamp))
+    println("RESULT skdev=" + str(r.skdev * 1000.0) + " skfrac=" + str(r.skfrac * 10000.0) + " skflag=" + str(r.skflag) + " coh=" + str(r.coh * 100.0) + " cohflag=" + str(r.cohflag) + " ladder=" + str(r.ladder * 100.0) + " ladderq=" + str(r.ladderq) + " dm_sign=" + dms + str(r.dm_sign) + " dm_r2=" + str(r.dm_r2 * 1000.0) + " impuls=" + str(r.impuls) + " maxz=" + str(r.maxz * 10.0) + " kurt=" + str(r.kurt * 100.0) + " tailx=" + str(r.tailx * 100.0))
+    if out_path != "":
+        fs_write_text(out_path, md)
+    if csv_path != "":
+        var csv: String = "file,samples,skdev_x1000,skfrac_x10000,skflag,coh_x100,cohflag,ladder_x100,ladderq,dm_sign,dm_r2_x1000,impuls,maxz_x10,kurt_x100,tailx_x100,lattice,verdict\n"
+        csv = csv + path + "," + str(nsamp) + "," + str(r.skdev * 1000.0) + "," + str(r.skfrac * 10000.0) + "," + str(r.skflag) + "," + str(r.coh * 100.0) + "," + str(r.cohflag) + "," + str(r.ladder * 100.0) + "," + str(r.ladderq) + "," + dms + str(r.dm_sign) + "," + str(r.dm_r2 * 1000.0) + "," + str(r.impuls) + "," + str(r.maxz * 10.0) + "," + str(r.kurt * 100.0) + "," + str(r.tailx * 100.0) + "," + lat + "," + verdict + "\n"
+        fs_write_text(csv_path, csv)
+    if json == 1:
+        println("{\"tool\": \"xeno_scan\", \"lattice\": \"" + lat + "\", \"verdict\": \"" + verdict + "\"}")
+    println("receipt=PASS scanned=1 verdict=" + verdict)
+    return EXIT_OK
+
+// ── Selftest battery (same SHAPES as C, own LCG stream) ─────────────────────
+fn run_selftest() -> Int with Unsafe:
+    let N: Int = 524288
+    let mut x: ptr<Float> = alloc_zeroed(N, "Float")
+    var allok: Int = 1
+    var rs: Int = 111
+    var i: Int = 0
+    // 1. matched noise: everything quiet.
+    while i < N:
+        rs = lcg_next(rs)
+        var u1: Float = (rs as Float) / 2147483648.0
+        if u1 <= 0.0:
+            u1 = 0.0000000001
+        rs = lcg_next(rs)
+        let u2: Float = (rs as Float) / 2147483648.0
+        mem_store(ptr_offset(x, i, "Float"), 14.0 * sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2), "Float")
+        i = i + 1
+    var r: XenoResult = analyze_file(x, N)
+    if r.skflag == 0 and r.cohflag == 0 and r.ladderq == 0 and r.dm_sign == 0 and r.impuls == 0:
+        println("[selftest] noise quiet             PASS")
+    else:
+        println("[selftest] noise quiet             FAIL")
+        allok = 0
+    // 2. pulsed cadence (period 6000, never STFT-length).
+    rs = 222
+    i = 0
+    while i < N:
+        rs = lcg_next(rs)
+        var u1: Float = (rs as Float) / 2147483648.0
+        if u1 <= 0.0:
+            u1 = 0.0000000001
+        rs = lcg_next(rs)
+        let u2: Float = (rs as Float) / 2147483648.0
+        let gate: Float = if (i % 6000) < 512: 4.0 else: 1.0
+        mem_store(ptr_offset(x, i, "Float"), 14.0 * sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2) * gate, "Float")
+        i = i + 1
+    r = analyze_file(x, N)
+    if r.skflag == 1:
+        println("[selftest] pulsed SK fires          PASS")
+    else:
+        println("[selftest] pulsed SK fires          FAIL")
+        allok = 0
+    if r.impuls == 1:
+        println("[selftest] pulsed impuls fires      PASS")
+    else:
+        println("[selftest] pulsed impuls fires      FAIL")
+        allok = 0
+    // 3. tone ladder (5 tones, 100 kHz).
+    rs = 333
+    i = 0
+    while i < N:
+        rs = lcg_next(rs)
+        var u1: Float = (rs as Float) / 2147483648.0
+        if u1 <= 0.0:
+            u1 = 0.0000000001
+        rs = lcg_next(rs)
+        let u2: Float = (rs as Float) / 2147483648.0
+        let t: Float = (i as Float) / 2929687.5
+        var s: Float = 0.0
+        var kk: Int = 1
+        while kk <= 5:
+            s = s + 6.0 * sin(SK_PI2 * 100000.0 * (kk as Float) * t)
+            kk = kk + 1
+        mem_store(ptr_offset(x, i, "Float"), 14.0 * sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2) + s, "Float")
+        i = i + 1
+    r = analyze_file(x, N)
+    if r.ladderq > 0:
+        println("[selftest] ladder cepstrum fires    PASS")
+    else:
+        println("[selftest] ladder cepstrum fires    FAIL")
+        allok = 0
+    // 4. square clock (period 64).
+    rs = 444
+    i = 0
+    while i < N:
+        rs = lcg_next(rs)
+        var u1: Float = (rs as Float) / 2147483648.0
+        if u1 <= 0.0:
+            u1 = 0.0000000001
+        rs = lcg_next(rs)
+        let u2: Float = (rs as Float) / 2147483648.0
+        let sq: Float = if (i % 64) < 32: 20.0 else: -20.0
+        mem_store(ptr_offset(x, i, "Float"), sq + sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2), "Float")
+        i = i + 1
+    r = analyze_file(x, N)
+    if r.cohflag == 1:
+        println("[selftest] square coh fires         PASS")
+    else:
+        println("[selftest] square coh fires         FAIL")
+        allok = 0
+    // 5a. down-chirp: NORMAL plasma order (+1).
+    rs = 555
+    i = 0
+    while i < N:
+        rs = lcg_next(rs)
+        var u1: Float = (rs as Float) / 2147483648.0
+        if u1 <= 0.0:
+            u1 = 0.0000000001
+        rs = lcg_next(rs)
+        let u2: Float = (rs as Float) / 2147483648.0
+        let fi: Float = i as Float
+        let ph: Float = SK_PI2 * (1400000.0 * fi / 2929687.5 - 1300000.0 * fi * fi / (2.0 * (N as Float) * 2929687.5))
+        mem_store(ptr_offset(x, i, "Float"), 14.0 * sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2) + 25.0 * sin(ph), "Float")
+        i = i + 1
+    r = analyze_file(x, N)
+    if r.dm_sign == 1:
+        println("[selftest] down-chirp NORMAL +1      PASS")
+    else:
+        println("[selftest] down-chirp NORMAL +1      FAIL")
+        allok = 0
+    // 5b. up-chirp: EXOTIC order (-1).
+    rs = 666
+    i = 0
+    while i < N:
+        rs = lcg_next(rs)
+        var u1: Float = (rs as Float) / 2147483648.0
+        if u1 <= 0.0:
+            u1 = 0.0000000001
+        rs = lcg_next(rs)
+        let u2: Float = (rs as Float) / 2147483648.0
+        let fi: Float = i as Float
+        let ph: Float = SK_PI2 * (100000.0 * fi / 2929687.5 + 1300000.0 * fi * fi / (2.0 * (N as Float) * 2929687.5))
+        mem_store(ptr_offset(x, i, "Float"), 14.0 * sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2) + 25.0 * sin(ph), "Float")
+        i = i + 1
+    r = analyze_file(x, N)
+    if r.dm_sign == 0 - 1:
+        println("[selftest] up-chirp EXOTIC -1        PASS")
+    else:
+        println("[selftest] up-chirp EXOTIC -1        FAIL")
+        allok = 0
+    // 6. sparse giants: impulsivity only, nothing faked.
+    rs = 777
+    i = 0
+    while i < N:
+        rs = lcg_next(rs)
+        var u1: Float = (rs as Float) / 2147483648.0
+        if u1 <= 0.0:
+            u1 = 0.0000000001
+        rs = lcg_next(rs)
+        let u2: Float = (rs as Float) / 2147483648.0
+        mem_store(ptr_offset(x, i, "Float"), 14.0 * sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2), "Float")
+        i = i + 1
+    var s6: Int = 0
+    while s6 < 40:
+        rs = lcg_next(rs)
+        let pos: Int = rs % N
+        mem_store(ptr_offset(x, pos, "Float"), 280.0, "Float")
+        s6 = s6 + 1
+    r = analyze_file(x, N)
+    if r.impuls == 1:
+        println("[selftest] impulses fire             PASS")
+    else:
+        println("[selftest] impulses fire             FAIL")
+        allok = 0
+    if r.ladderq == 0:
+        println("[selftest] no fake ladder           PASS")
+    else:
+        println("[selftest] no fake ladder           FAIL")
+        allok = 0
+    if r.dm_sign == 0:
+        println("[selftest] no fake DM               PASS")
+    else:
+        println("[selftest] no fake DM               FAIL")
+        allok = 0
+    if r.skflag == 0:
+        println("[selftest] SK stays quiet           PASS")
+    else:
+        println("[selftest] SK stays quiet           FAIL")
+        allok = 0
+    decay x
+    if allok == 1:
+        println("[selftest] ALL PASS")
+        return 0
+    println("[selftest] FAILURES PRESENT")
+    return 1

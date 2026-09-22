@@ -474,6 +474,13 @@ outside this repo (warm) — `kain` is on PATH.
   `fs_append_bytes` cost 1–21 us/B (measured, superlinear) — ~1000x off
   memcpy. Small reads (24 KB headers) are fine; payload-scale IO must use
   kernel32 handles + Byte arenas (below), never the `fs_*` bridge.
+- **Over-allocate bulk Byte arenas by +32.** Bulk byte loops auto-vectorize
+  (AVX2 32B stores) and overrun exact-size arenas by up to 31 bytes:
+  arenas with `nbytes % 32 != 0` aborted 127, multiples of 32 pass (11/11
+  sizes, `xvm_sandbox` mut_probe repro: 24600B crashes, 24576B fine).
+  Debug heaps tolerate the overrun (passes under gdb) which hides it.
+  Rule: `alloc_zeroed(n + 32, "Byte")` for any arena a bulk loop touches.
+  Repro filed for the compiler owner (vectorizer tail or missing guard).
 - **Fast bulk IO = `@extern` kernel32 + `ptr<Byte>` arenas** (KAINOS-proven,
   no C files, no headers, no `use std::fs`): `CreateFileA` / `GetFileSizeEx` /
   `SetFilePointer` (hi/lo slot for >4 GB) / `ReadFile` / `WriteFile` /
@@ -496,6 +503,8 @@ outside this repo (warm) — `kain` is on PATH.
   called; the identical body inline runs. Cause undetermined — could be
   my misuse (arena lifetimes, effects) — repro shape is documented
   in `kain/core/boxcar_bank.kn` (f32 section) for whoever wants it.
+  CONFIRMED 2nd instance: `lfsr_fill` in `xvm_sandbox.kn` segfaulted on
+  call, inlined at both sites runs. Do NOT re-extract it.
 - **`use std::audio::dsp` doesn't build on this snapshot** (its source binds
   `half`, now reserved — likely version skew, not a bug) — hand-roll the
   small FFT/DFT you need, rewire on refresh.

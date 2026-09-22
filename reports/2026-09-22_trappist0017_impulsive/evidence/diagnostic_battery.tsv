@@ -1,0 +1,25 @@
+# Diagnostic battery — TRAPPIST-1 0017 impulsive structure — 2026-09-22
+# Contradiction C1: fs/2048 frame-clock comb
+C1	fs/2048 comb	Y2 peaks spaced 4 bins @SEG=8192 = 4*357.628 Hz = 1430.51 Hz = fs/2048 (2929687.5/2048)	CONFIRMED - clock comb
+# Contradiction C2: cross-bank channel-index duplication
+C2	index duplication	ch60/62/63 spiky in blc04(1407.7MHz) AND blc00(2157.7MHz); blc01(1970.2MHz) flat	CONFIRMED - per-node defect
+# Contradiction C3: PFB rolloff profile
+C3	pfb rolloff	kurtosis ch57..63 = 0.26 1.02 4.36 59.80 [61 degraded 0.20] 36.55 70.97	CONFIRMED - edge rolloff
+# Step 1: polarimetric Stokes
+S1	pol0	distinct=256 sd=4.243 kurt=59.80 spikes=17719	SPIKY
+S1	pol1	distinct=256 sd=4.240 kurt=58.91 spikes=17609	SPIKY (not quiet -> no single-rail failure)
+S1	pol2	distinct=256 sd=5.785 kurt=18.81 spikes=14871	SPIKY
+S1	pol3	distinct=256 sd=5.787 kurt=18.79 spikes=14969	SPIKY
+S1	Stokes	|mean|/sd: I=0.1676 Q=0.0004 U=0.0867 V=0.0869	V~0 -> no circular polarisation
+S1	VERDICT	common-mode across all pols, V~0	TERRESTRIAL/BACKEND INGRESS (not ECME, not rail failure)
+# Step 2: band-centre control
+S2	ch32	distinct=255 sd=15.871 kurt=0.02 spikes=0	QUIET (band centre)
+S2	VERDICT	centre quiet, edge impulsive	PFB ROLLOFF ARTIFACT
+# Step 3: GUPPI packet continuity
+S3	PKTIDX	sequential 0,16384,32768,49152,...	NO GAPS
+S3	DROPBLK	0 all blocks	NO DROPPED BLOCKS
+S3	DROPTOT	0 after block 0 (blk0=0.451)	NO UNDERRUN
+S3	DROPMARK	0 matches	NO UNDERMIN MARK
+S3	VERDICT	clean packet stream	NO SOCKET UNDERRUN
+# FINAL
+FINAL	verdict	PFB band-edge rolloff + fs/2048 frame clock + common-mode across pols, in abnormal 0017 backend state	INSTRUMENTAL ARTIFACT

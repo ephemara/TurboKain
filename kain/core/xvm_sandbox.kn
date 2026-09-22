@@ -1,0 +1,1746 @@
+// ============================================================================
+// xvm_sandbox.kn — TurboKain 08: alien-code sandbox (xvm_sandbox parity +α)
+//
+// Oracle: E:/SetiYeti c/xvm_sandbox.c --selftest. Six machines ported 1:1
+// (parity score untouched), plus the alien tier:
+//
+//   SUBLEQ  one-instruction subtract-and-branch (baseline)
+//   STACK   Forth-like push/add/mul/jump, swept over word widths 3..8
+//   CA110   Rule-110 breathing (density-trajectory variance, 4 windows)
+//   ACF     frame autocorrelation + divisor descent to fundamental stride
+//   BM      Berlekamp-Massey linear complexity, 3 windows, no polynomial named
+//   RASTER  2D prime-raster spatial coherence (natural-width recovery)
+//   TAG     *NEW* Post tag-system machine (order-based structure probe)
+//   JIT     *NEW* vendored x86-64 emitter (jit.kn pattern): alien-derived
+//           arithmetic compiled to native + executed, equivalence receipted.
+//           Full STACK-to-native dispatch is stage 2; v1 proves the RWX
+//           path live (map/protect/flush/call) with cache accounting.
+//   MUT     *NEW* mutation probe: flip ~1% bits, re-run STACK+BM ladders.
+//
+// Rules carried over: entropy gate first (no verdict without information),
+// thresholds are data (consts below, C values), verdicts are flags.
+//
+// Contract: bits.bin (raw bytes, MSB-first) in -> xvm.md + xvm.csv out.
+//   xvm_sandbox --in <bits.bin> [--out xvm.md] [--csv xvm.csv]
+//                 [--budget N] [--data-dir D] [--json]
+//   xvm_sandbox <bits.bin> [out.md]
+//   xvm_sandbox --selftest
+//
+// Exit codes: 0 ok (verdict lives in the table), 1 help OR selftest FAIL,
+// 2 error. .bin in rides kernel32 handles + Byte arenas (slice.kn pattern).
+// Tables carry scaled ints only (str(Float) truncates in this lane).
+// ============================================================================
+
+use std::process
+use std::runtime
+use std::text
+use std::bytes
+use std::intent
+use std::machine
+
+// ── kernel32 file API (pure Kain FFI, no C, no headers — slice.kn pattern) ──
+@extern @link_name("CreateFileA")
+fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
+
+@extern @link_name("GetFileSizeEx")
+fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
+
+@extern @link_name("SetFilePointer")
+fn k_SetFilePointer(h: ptr<Void>, lo: Int, hi: ptr<Int>, method: Int) -> Int
+
+@extern @link_name("ReadFile")
+fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("WriteFile")
+fn k_WriteFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("CloseHandle")
+fn k_CloseHandle(h: ptr<Void>) -> Int
+
+@extern @link_name("GetLastError")
+fn k_GetLastError() -> Int
+
+fn null_ptr() -> ptr<Void> with Pure:
+    return int_to_ptr(0, "ptr<Void>")
+
+const GEN_READ: Int = 2147483648
+const GEN_WRITE: Int = 1073741824
+const OPEN_EXISTING: Int = 3
+const CREATE_ALWAYS: Int = 2
+const FILE_NORMAL: Int = 128
+const FILE_SHARE_RW: Int = 3
+const EXIT_OK: Int = 0
+const EXIT_HELP: Int = 1
+const EXIT_ERROR: Int = 2
+
+// ── Machine geometry (xvm_sandbox.c, do not tune — alien tier consts marked α)
+const MAXB: Int = 200000
+const SUB_BUDGET: Int = 200000
+const CA_W: Int = 256
+const CA_G: Int = 256
+const CA_WINDOWS: Int = 4
+const CA_VAR_MIN_X1E6: Int = 1500
+const ACF_N: Int = 32768
+const ACF_LMIN: Int = 8
+const ACF_LMAX: Int = 4096
+const ACF_Z_X10: Int = 60
+const BM_N: Int = 4096
+const BM_MIN_N: Int = 512
+const BM_Z_X10: Int = 60
+const RASTER_N: Int = 32768
+const RASTER_Z_X10: Int = 60
+const STK_MIN_OPS: Int = 5000
+const STK_MIN_LOOPS: Int = 20
+const STK_MAXSYM: Int = 4096
+// α tier thresholds: TAG_FIRE_STEPS=2200 calibrated over 5 LCG noise seeds
+// (survival 2022..2072, tight cluster) vs engineered 2383 (+15σ). Depth is
+// ballast in v1 (both sit ~4096); steps is the separator. Widen to 9+ seeds
+// before trusting (C doctrine).
+const TAG_BUDGET: Int = 20000
+const TAG_CAP: Int = 8192
+const TAG_SEEDB: Int = 4096
+const TAG_FIRE_STEPS: Int = 2200
+const TAG_FIRE_DEPTH: Int = 4000
+const PRIMES: Array<Int> = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127]
+
+law gate_entropy_ok(frac_x1000: Int, distinct: Int) -> Bool:
+    return frac_x1000 >= 300 and frac_x1000 <= 700 and distinct >= 16
+
+law fires_sub(sub_x100: Int) -> Bool:
+    return sub_x100 >= 60
+
+law fires_stk(ops: Int, loops: Int) -> Bool:
+    return ops >= 5000 and loops >= 20
+
+component XvmPanel():
+    render <panel title="xvm-sandbox" />
+
+world XvmAuthority:
+    state trip_kind: Int = 0
+    state trip_score_x100: Int = 0
+    state trip_count: Int = 0
+    state served: Int = 0
+    surface web => XvmPanel
+
+patch xvm_trip(auth: XvmAuthority, kind: Int, score_x100: Int) -> Int:
+    auth.trip_kind = kind
+    auth.trip_score_x100 = score_x100
+    auth.trip_count = auth.trip_count + 1
+    return auth.trip_count
+
+resonate XvmAuthority.trip_count dampen 0 ms:
+    XvmAuthority.served = XvmAuthority.served + 1
+
+// ── Handle helpers (one open per file — slice.kn verbatim) ──────────────────
+fn k_open_read(path: String) -> ptr<Void> with Unsafe:
+    return k_CreateFileA(path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+
+fn k_open_write(path: String) -> ptr<Void> with Unsafe:
+    return k_CreateFileA(path, GEN_WRITE, FILE_SHARE_RW, null_ptr(), CREATE_ALWAYS, FILE_NORMAL, null_ptr())
+
+fn k_handle_bad(h: ptr<Void>) -> Int with Pure:
+    if ptr_to_int(h) == -1:
+        return 1
+    return 0
+
+fn k_size(h: ptr<Void>) -> Int with Unsafe:
+    let slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let ok: Int = k_GetFileSizeEx(h, slot)
+    var sz: Int = -1
+    if ok != 0:
+        sz = mem_load(slot, "Int")
+    decay slot
+    return sz
+
+fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
+    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
+
+fn bstore(buf: ptr<Byte>, i: Int, v: Int) with Unsafe:
+    mem_store(ptr_offset(buf, i, "Byte"), v as Byte, "Byte")
+
+fn getbit(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
+    return (bref(buf, i / 8) >> (7 - (i % 8))) & 1
+
+fn setbit(buf: ptr<Byte>, i: Int, v: Int) with Unsafe:
+    let idx: Int = i / 8
+    let mask: Int = 1 << (7 - (i % 8))
+    let cur: Int = bref(buf, idx)
+    if v == 0:
+        bstore(buf, idx, cur - (cur & mask))
+    else:
+        bstore(buf, idx, cur | mask)
+
+fn popcount8(v: Int) -> Int:
+    var c: Int = 0
+    var x: Int = v & 255
+    var k: Int = 0
+    while k < 8:
+        c = c + (x & 1)
+        x = x >> 1
+        k = k + 1
+    return c
+
+fn iabs(v: Int) -> Int:
+    if v < 0:
+        return 0 - v
+    return v
+
+fn lcg_next(s: Int) -> Int:
+    return (s * 1103515245 + 12345) % 2147483648
+
+fn write_text_file(path: String, s: String) -> Int with Unsafe:
+    let h: ptr<Void> = k_open_write(path)
+    if k_handle_bad(h) == 1:
+        return -1
+    let view: ByteSlice = bytes_from(s)
+    let arr: Array<Int> = bytes_array(view)
+    let nb: Int = len(arr)
+    let mut buf: ptr<Byte> = alloc_zeroed(nb + 8, "Byte")
+    var i: Int = 0
+    while i < nb:
+        bstore(buf, i, arr[i])
+        i = i + 1
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(nslot, 0, "Int")
+    let ok: Int = k_WriteFile(h, buf, nb, nslot, null_ptr())
+    let wrote: Int = mem_load(nslot, "Int")
+    let _c: Int = k_CloseHandle(h)
+    decay buf
+    decay nslot
+    if ok == 0:
+        return -1
+    if wrote != nb:
+        return -1
+    return 0
+
+fn parse_int_text(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var sign: Int = 1
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = -1
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var value: Int = 0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        var digit: Int = 0
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return value * sign
+        value = value * 10 + digit
+        index = index + 1
+    return value * sign
+
+fn find_from(hay: String, needle: String, start: Int) -> Int:
+    let hn: Int = len(hay)
+    let nn: Int = len(needle)
+    if nn == 0:
+        return start
+    var i: Int = start
+    if i < 0:
+        i = 0
+    while i + nn <= hn:
+        var j: Int = 0
+        var hit: Int = 1
+        while j < nn:
+            if char_at(hay, i + j) != char_at(needle, j):
+                hit = 0
+            j = j + 1
+        if hit == 1:
+            return i
+        i = i + 1
+    return -1
+
+// ── Entropy gate (identical rule to vm_sandbox/xvm C) ───────────────────────
+fn entropy_gate(buf: ptr<Byte>, nb: Int, out2: ptr<Int>) with Unsafe:
+    var ones: Int = 0
+    let mut seen: ptr<Int> = alloc_zeroed(256, "Int")
+    var nd: Int = 0
+    var i: Int = 0
+    while i < nb:
+        let b: Int = bref(buf, i)
+        ones = ones + popcount8(b)
+        if mem_load(ptr_offset(seen, b, "Int"), "Int") == 0:
+            mem_store(ptr_offset(seen, b, "Int"), 1, "Int")
+            nd = nd + 1
+        i = i + 1
+    decay seen
+    mem_store(ptr_offset(out2, 0, "Int"), (ones * 1000) / (nb * 8), "Int")
+    mem_store(ptr_offset(out2, 1, "Int"), nd, "Int")
+
+// ── SUBLEQ (baseline machine, C 1:1; u32-masked like the STACK lane) ─────────
+fn subleq_score(buf: ptr<Byte>, nbits: Int) -> Int with Unsafe:
+    var nwords: Int = (nbits + 31) / 32
+    if nwords < 16:
+        nwords = 16
+    if nwords > 8192:
+        nwords = 8192
+    let mut mem: ptr<Int> = alloc_zeroed(nwords, "Int")
+    var i: Int = 0
+    while i < nwords * 32:
+        if i < nbits:
+            if getbit(buf, i) == 1:
+                let w: Int = i / 32
+                let bp: Int = 31 - (i % 32)
+                mem_store(ptr_offset(mem, w, "Int"), mem_load(ptr_offset(mem, w, "Int"), "Int") | (1 << bp), "Int")
+        i = i + 1
+    var k: Int = 0
+    while k < nwords:
+        var v: Int = mem_load(ptr_offset(mem, k, "Int"), "Int")
+        if v >= 2147483648:
+            v = v - 4294967296
+        v = iabs(v) % nwords
+        mem_store(ptr_offset(mem, k, "Int"), v, "Int")
+        k = k + 1
+    var pc: Int = 0
+    var steps: Int = 0
+    var writes: Int = 0
+    var local: Int = 0
+    var last_b: Int = -1000000
+    while steps < SUB_BUDGET:
+        if pc < 0:
+            break
+        if pc + 2 >= nwords:
+            break
+        let a: Int = mem_load(ptr_offset(mem, pc, "Int"), "Int")
+        let b: Int = mem_load(ptr_offset(mem, pc + 1, "Int"), "Int")
+        let c: Int = mem_load(ptr_offset(mem, pc + 2, "Int"), "Int")
+        if a < 0:
+            break
+        if a >= nwords:
+            break
+        if b < 0:
+            break
+        if b >= nwords:
+            break
+        if c < 0:
+            break
+        if c >= nwords:
+            break
+        let raw: Int = mem_load(ptr_offset(mem, b, "Int"), "Int") - mem_load(ptr_offset(mem, a, "Int"), "Int")
+        var w32: Int = raw % 4294967296
+        if w32 < 0:
+            w32 = w32 + 4294967296
+        if w32 >= 2147483648:
+            w32 = w32 - 4294967296
+        mem_store(ptr_offset(mem, b, "Int"), w32, "Int")
+        writes = writes + 1
+        if last_b >= 0:
+            if iabs(b - last_b) < 16:
+                local = local + 1
+        last_b = b
+        if mem_load(ptr_offset(mem, b, "Int"), "Int") <= 0:
+            pc = c
+        else:
+            pc = pc + 3
+        steps = steps + 1
+        if steps > 10:
+            if writes == 0:
+                break
+    decay mem
+    var sc: Int = 0
+    if writes > 100:
+        sc = sc + 40
+    if writes > 0:
+        if (local * 100) / writes > 30:
+            sc = sc + 30
+    if steps > 5000:
+        if steps < SUB_BUDGET:
+            sc = sc + 30
+    return sc
+
+// ── STACK machine: out[0]=ops out[1]=loops out[2]=depth ─────────────────────
+// u32-masked after every op: ADD/SUB/MUL inputs are <2^32 so no 64-bit
+// overflow is possible; masking reproduces C uint32_t wrap exactly.
+fn stack_run(sym: ptr<Byte>, plen: Int, w: Int, out3: ptr<Int>, budget: Int) with Unsafe:
+    let mut st: ptr<Int> = alloc_zeroed(256, "Int")
+    var sp: Int = 0
+    var maxd: Int = 0
+    var pc: Int = 0
+    var n: Int = 0
+    var lp: Int = 0
+    let ashift: Int = w - 3
+    let amask: Int = (1 << ashift) - 1
+    var halted: Int = 0
+    while n < budget:
+        if halted == 1:
+            break
+        if pc < 0:
+            halted = 1
+            break
+        if pc >= plen:
+            halted = 1
+            break
+        let ins: Int = bref(sym, pc)
+        let op: Int = ins >> ashift
+        let arg: Int = ins & amask
+        n = n + 1
+        if op == 0:
+            if sp >= 256:
+                halted = 1
+            else:
+                mem_store(ptr_offset(st, sp, "Int"), arg, "Int")
+                sp = sp + 1
+                pc = pc + 1
+        elif op == 1:
+            if sp < 2:
+                halted = 1
+            else:
+                let b: Int = mem_load(ptr_offset(st, sp - 1, "Int"), "Int")
+                let a: Int = mem_load(ptr_offset(st, sp - 2, "Int"), "Int")
+                mem_store(ptr_offset(st, sp - 2, "Int"), (a + b) & 4294967295, "Int")
+                sp = sp - 1
+                pc = pc + 1
+        elif op == 2:
+            if sp < 2:
+                halted = 1
+            else:
+                let b2: Int = mem_load(ptr_offset(st, sp - 1, "Int"), "Int")
+                let a2: Int = mem_load(ptr_offset(st, sp - 2, "Int"), "Int")
+                mem_store(ptr_offset(st, sp - 2, "Int"), (a2 - b2) & 4294967295, "Int")
+                sp = sp - 1
+                pc = pc + 1
+        elif op == 3:
+            if sp < 2:
+                halted = 1
+            else:
+                let b3: Int = mem_load(ptr_offset(st, sp - 1, "Int"), "Int")
+                let a3: Int = mem_load(ptr_offset(st, sp - 2, "Int"), "Int")
+                mem_store(ptr_offset(st, sp - 2, "Int"), (a3 * b3) & 4294967295, "Int")
+                sp = sp - 1
+                pc = pc + 1
+        elif op == 4:
+            if sp < 1:
+                halted = 1
+            elif sp >= 256:
+                halted = 1
+            else:
+                mem_store(ptr_offset(st, sp, "Int"), mem_load(ptr_offset(st, sp - 1, "Int"), "Int"), "Int")
+                sp = sp + 1
+                pc = pc + 1
+        elif op == 5:
+            if sp < 1:
+                halted = 1
+            else:
+                sp = sp - 1
+                pc = pc + 1
+        elif op == 6:
+            if sp < 1:
+                halted = 1
+            else:
+                sp = sp - 1
+                let t: Int = mem_load(ptr_offset(st, sp, "Int"), "Int")
+                let d: Int = arg - 16
+                if t == 0:
+                    if d < 0:
+                        lp = lp + 1
+                    pc = pc + d
+                else:
+                    pc = pc + 1
+        else:
+            let d2: Int = arg - 16
+            if d2 < 0:
+                lp = lp + 1
+            pc = pc + d2
+        if sp > maxd:
+            maxd = sp
+    decay st
+    mem_store(ptr_offset(out3, 0, "Int"), n, "Int")
+    mem_store(ptr_offset(out3, 1, "Int"), lp, "Int")
+    mem_store(ptr_offset(out3, 2, "Int"), maxd, "Int")
+
+// Sweep widths 3..8, winner = most backward jumps, ties = most ops.
+fn stack_best(buf: ptr<Byte>, nbits: Int, out4: ptr<Int>, budget: Int) with Unsafe:
+    let mut bits: ptr<Byte> = alloc_zeroed(STK_MAXSYM * 8, "Byte")
+    let mut sym: ptr<Byte> = alloc_zeroed(STK_MAXSYM, "Byte")
+    let mut o3: ptr<Int> = alloc_zeroed(3, "Int")
+    var cap: Int = STK_MAXSYM * 8
+    if nbits < cap:
+        cap = nbits
+    var i: Int = 0
+    while i < cap:
+        bstore(bits, i, getbit(buf, i))
+        i = i + 1
+    var bops: Int = 0
+    var bloops: Int = 0
+    var bdepth: Int = 0
+    var bwidth: Int = 8
+    var w: Int = 3
+    while w <= 8:
+        var ns: Int = cap / w
+        if ns > STK_MAXSYM:
+            ns = STK_MAXSYM
+        if ns >= 16:
+            var j: Int = 0
+            while j < ns:
+                var v: Int = 0
+                var k: Int = 0
+                while k < w:
+                    v = v * 2 + bref(bits, j * w + k)
+                    k = k + 1
+                bstore(sym, j, v)
+                j = j + 1
+            stack_run(sym, ns, w, o3, budget)
+            let o: Int = mem_load(ptr_offset(o3, 0, "Int"), "Int")
+            let l: Int = mem_load(ptr_offset(o3, 1, "Int"), "Int")
+            let d: Int = mem_load(ptr_offset(o3, 2, "Int"), "Int")
+            if l > bloops:
+                bops = o
+                bloops = l
+                bdepth = d
+                bwidth = w
+            elif l == bloops:
+                if o > bops:
+                    bops = o
+                    bloops = l
+                    bdepth = d
+                    bwidth = w
+        w = w + 1
+    decay bits
+    decay sym
+    decay o3
+    mem_store(ptr_offset(out4, 0, "Int"), bops, "Int")
+    mem_store(ptr_offset(out4, 1, "Int"), bloops, "Int")
+    mem_store(ptr_offset(out4, 2, "Int"), bdepth, "Int")
+    mem_store(ptr_offset(out4, 3, "Int"), bwidth, "Int")
+
+// ── Rule-110 CA: density-trajectory variance, best of 4 windows ─────────────
+fn ca110_window(buf: ptr<Byte>, nbits: Int, off: Int) -> Int with Unsafe:
+    let mut cur: ptr<Byte> = alloc_zeroed(CA_W, "Byte")
+    let mut nxt: ptr<Byte> = alloc_zeroed(CA_W, "Byte")
+    var i: Int = 0
+    while i < CA_W:
+        bstore(cur, i, getbit(buf, (off + i) % nbits))
+        i = i + 1
+    var sm: Float = 0.0
+    var s2: Float = 0.0
+    var g: Int = 0
+    while g < CA_G:
+        var d: Int = 0
+        var c: Int = 0
+        while c < CA_W:
+            d = d + bref(cur, c)
+            c = c + 1
+        let df: Float = (d as Float) / (CA_W as Float)
+        sm = sm + df
+        s2 = s2 + df * df
+        var q: Int = 0
+        while q < CA_W:
+            let left: Int = bref(cur, (q + CA_W - 1) % CA_W)
+            let mid: Int = bref(cur, q)
+            let right: Int = bref(cur, (q + 1) % CA_W)
+            let pat: Int = left * 4 + mid * 2 + right
+            var nv: Int = 0
+            if pat == 1:
+                nv = 1
+            elif pat == 2:
+                nv = 1
+            elif pat == 3:
+                nv = 1
+            elif pat == 5:
+                nv = 1
+            elif pat == 6:
+                nv = 1
+            bstore(nxt, q, nv)
+            q = q + 1
+        var m: Int = 0
+        while m < CA_W:
+            bstore(cur, m, bref(nxt, m))
+            m = m + 1
+        g = g + 1
+    decay cur
+    decay nxt
+    let mu: Float = sm / (CA_G as Float)
+    let vv: Float = s2 / (CA_G as Float) - mu * mu
+    return (vv * 1000000.0) as Int
+
+fn ca110_variance(buf: ptr<Byte>, nbits: Int) -> Int with Unsafe:
+    var best: Int = 0
+    var w: Int = 0
+    while w < CA_WINDOWS:
+        let v: Int = ca110_window(buf, nbits, w * CA_W)
+        if v > best:
+            best = v
+        w = w + 1
+    return best
+
+// ── Frame ACF + divisor descent to fundamental ───────────────────────────────
+fn acf_best(buf: ptr<Byte>, nbits: Int, lagout: ptr<Int>) -> Int with Unsafe:
+    var n: Int = nbits
+    if n > ACF_N:
+        n = ACF_N
+    if n < ACF_LMAX + 16:
+        mem_store(lagout, 0, "Int")
+        return 0
+    let mut b: ptr<Int> = alloc_zeroed(ACF_N, "Int")
+    let mut zt: ptr<Float> = alloc_zeroed(ACF_LMAX + 1, "Float")
+    var i: Int = 0
+    while i < n:
+        if getbit(buf, i) == 1:
+            mem_store(ptr_offset(b, i, "Int"), 1, "Int")
+        else:
+            mem_store(ptr_offset(b, i, "Int"), 0 - 1, "Int")
+        i = i + 1
+    let sq: Float = sqrt(n as Float)
+    var L: Int = ACF_LMIN
+    while L <= ACF_LMAX:
+        var acc: Int = 0
+        var k: Int = 0
+        while k + L < n:
+            acc = acc + mem_load(ptr_offset(b, k, "Int"), "Int") * mem_load(ptr_offset(b, k + L, "Int"), "Int")
+            k = k + 1
+        mem_store(ptr_offset(zt, L, "Float"), (acc as Float) / sq, "Float")
+        L = L + 1
+    var best: Float = 0.0
+    var blag: Int = 0
+    var L2: Int = ACF_LMIN
+    while L2 <= ACF_LMAX:
+        let z: Float = mem_load(ptr_offset(zt, L2, "Float"), "Float")
+        var az: Float = z
+        if az < 0.0:
+            az = 0.0 - az
+        var ab: Float = best
+        if ab < 0.0:
+            ab = 0.0 - ab
+        if az > ab:
+            best = z
+            blag = L2
+        L2 = L2 + 1
+    var abest: Float = best
+    if abest < 0.0:
+        abest = 0.0 - abest
+    var dd: Int = 8
+    while dd >= 2:
+        if blag > 0:
+            if blag % dd == 0:
+                let cand: Int = blag / dd
+                if cand >= ACF_LMIN:
+                    let zc: Float = mem_load(ptr_offset(zt, cand, "Float"), "Float")
+                    var azc: Float = zc
+                    if azc < 0.0:
+                        azc = 0.0 - azc
+                    if azc >= 0.30 * abest:
+                        blag = cand
+                        best = zc
+                        abest = azc
+        dd = dd - 1
+    decay b
+    decay zt
+    mem_store(lagout, blag, "Int")
+    return (best * 10.0) as Int
+
+// ── Berlekamp-Massey (GF(2), no polynomial named) ────────────────────────────
+fn bm_complexity(b: ptr<Byte>, n: Int) -> Int with Unsafe:
+    var nn: Int = n
+    if nn > BM_N:
+        nn = BM_N
+    let mut C: ptr<Int> = alloc_zeroed(BM_N + 1, "Int")
+    let mut Bc: ptr<Int> = alloc_zeroed(BM_N + 1, "Int")
+    let mut T: ptr<Int> = alloc_zeroed(BM_N + 1, "Int")
+    mem_store(ptr_offset(C, 0, "Int"), 1, "Int")
+    mem_store(ptr_offset(Bc, 0, "Int"), 1, "Int")
+    var L: Int = 0
+    var m: Int = 0 - 1
+    var k: Int = 0
+    while k < nn:
+        var d: Int = bref(b, k)
+        var ii: Int = 1
+        while ii <= L:
+            d = (d + mem_load(ptr_offset(C, ii, "Int"), "Int") * bref(b, k - ii)) % 2
+            ii = ii + 1
+        if d != 0:
+            var t: Int = 0
+            while t <= nn:
+                mem_store(ptr_offset(T, t, "Int"), mem_load(ptr_offset(C, t, "Int"), "Int"), "Int")
+                t = t + 1
+            let s: Int = k - m
+            var u: Int = 0
+            while u + s <= nn:
+                let nv: Int = (mem_load(ptr_offset(C, u + s, "Int"), "Int") + mem_load(ptr_offset(Bc, u, "Int"), "Int")) % 2
+                mem_store(ptr_offset(C, u + s, "Int"), nv, "Int")
+                u = u + 1
+            if 2 * L <= k:
+                L = k + 1 - L
+                var v: Int = 0
+                while v <= nn:
+                    mem_store(ptr_offset(Bc, v, "Int"), mem_load(ptr_offset(T, v, "Int"), "Int"), "Int")
+                    v = v + 1
+                m = k
+        k = k + 1
+    decay C
+    decay Bc
+    decay T
+    return L
+
+fn bm_region(buf: ptr<Byte>, off: Int, len: Int, lout: ptr<Int>) -> Int with Unsafe:
+    var n: Int = len
+    if n > BM_N:
+        n = BM_N
+    if n < BM_MIN_N:
+        mem_store(lout, 0, "Int")
+        return 0
+    let mut b: ptr<Byte> = alloc_zeroed(BM_N, "Byte")
+    var i: Int = 0
+    while i < n:
+        bstore(b, i, getbit(buf, off + i))
+        i = i + 1
+    let L: Int = bm_complexity(b, n)
+    decay b
+    mem_store(lout, L, "Int")
+    let z: Float = ((n as Float) / 2.0 - (L as Float)) / sqrt((n as Float) / 18.0)
+    return (z * 10.0) as Int
+
+fn bm_best(buf: ptr<Byte>, nbits: Int, lout: ptr<Int>) -> Int with Unsafe:
+    let mut li: ptr<Int> = alloc_zeroed(1, "Int")
+    var best: Int = 0 - 999999999
+    var bestL: Int = 0
+    var any: Int = 0
+    var q: Int = 0
+    while q < 3:
+        var o: Int = 0
+        if q == 1:
+            o = 4096
+        elif q == 2:
+            o = 8192
+        if o + BM_MIN_N <= nbits:
+            var len: Int = nbits - o
+            if len > BM_N:
+                len = BM_N
+            let z: Int = bm_region(buf, o, len, li)
+            if any == 0:
+                best = z
+                bestL = mem_load(li, "Int")
+                any = 1
+            elif z > best:
+                best = z
+                bestL = mem_load(li, "Int")
+        q = q + 1
+    decay li
+    if any == 0:
+        mem_store(lout, 0, "Int")
+        return 0
+    mem_store(lout, bestL, "Int")
+    return best
+
+// ── 2D prime-raster spatial coherence ────────────────────────────────────────
+fn raster_grid_z(buf: ptr<Byte>, w: Int, n: Int) -> Int with Unsafe:
+    let rows: Int = n / w
+    if rows < 4:
+        return 0 - 999999999
+    let M: Int = (w - 1) * rows + w * (rows - 1)
+    var agree: Int = 0
+    var r: Int = 0
+    while r < rows:
+        var c: Int = 0
+        while c + 1 < w:
+            if getbit(buf, r * w + c) == getbit(buf, r * w + c + 1):
+                agree = agree + 1
+            c = c + 1
+        r = r + 1
+    r = 0
+    while r + 1 < rows:
+        var c2: Int = 0
+        while c2 < w:
+            if getbit(buf, r * w + c2) == getbit(buf, (r + 1) * w + c2):
+                agree = agree + 1
+            c2 = c2 + 1
+        r = r + 1
+    let a: Float = (agree as Float) / (M as Float)
+    let z: Float = (a - 0.5) / sqrt(0.25 / (M as Float))
+    return (z * 10.0) as Int
+
+fn raster_best(buf: ptr<Byte>, nbits: Int, acf_lag: Int, wh: ptr<Int>) -> Int with Unsafe:
+    var n: Int = nbits
+    if n > RASTER_N:
+        n = RASTER_N
+    let mut widths: ptr<Int> = alloc_zeroed(48, "Int")
+    var nw: Int = 0
+    if acf_lag >= 8:
+        if (acf_lag as Int) <= n / 4:
+            mem_store(ptr_offset(widths, nw, "Int"), acf_lag, "Int")
+            nw = nw + 1
+    var pi: Int = 0
+    while pi < 31:
+        let p: Int = PRIMES[pi]
+        if p >= 8:
+            if (p as Int) <= n / 4:
+                if nw < 48:
+                    mem_store(ptr_offset(widths, nw, "Int"), p, "Int")
+                    nw = nw + 1
+        pi = pi + 1
+    if acf_lag > 1:
+        var d: Int = 2
+        while d * d <= acf_lag:
+            if acf_lag % d == 0:
+                let qq: Int = acf_lag / d
+                if qq >= 8:
+                    if (qq as Int) <= n / 4:
+                        if nw < 48:
+                            var dup: Int = 0
+                            var kk: Int = 0
+                            while kk < nw:
+                                if mem_load(ptr_offset(widths, kk, "Int"), "Int") == qq:
+                                    dup = 1
+                                kk = kk + 1
+                            if dup == 0:
+                                mem_store(ptr_offset(widths, nw, "Int"), qq, "Int")
+                                nw = nw + 1
+                if d >= 8:
+                    if (d as Int) <= n / 4:
+                        if nw < 16:
+                            var dup2: Int = 0
+                            var k2: Int = 0
+                            while k2 < nw:
+                                if mem_load(ptr_offset(widths, k2, "Int"), "Int") == d:
+                                    dup2 = 1
+                                k2 = k2 + 1
+                            if dup2 == 0:
+                                mem_store(ptr_offset(widths, nw, "Int"), d, "Int")
+                                nw = nw + 1
+            d = d + 1
+    var f: Int = 8
+    while f * f <= n:
+        if n % f == 0:
+            var dup3: Int = 0
+            var k3: Int = 0
+            while k3 < nw:
+                if mem_load(ptr_offset(widths, k3, "Int"), "Int") == f:
+                    dup3 = 1
+                k3 = k3 + 1
+            if dup3 == 0:
+                if (f as Int) <= n / 4:
+                    if nw < 48:
+                        mem_store(ptr_offset(widths, nw, "Int"), f, "Int")
+                        nw = nw + 1
+            let qq2: Int = n / f
+            if qq2 >= 8:
+                if (qq2 as Int) <= n / 4:
+                    if qq2 != f:
+                        if nw < 16:
+                            var dup4: Int = 0
+                            var k4: Int = 0
+                            while k4 < nw:
+                                if mem_load(ptr_offset(widths, k4, "Int"), "Int") == qq2:
+                                    dup4 = 1
+                                k4 = k4 + 1
+                            if dup4 == 0:
+                                mem_store(ptr_offset(widths, nw, "Int"), qq2, "Int")
+                                nw = nw + 1
+        f = f + 1
+    var best: Int = 0 - 999999999
+    var bw: Int = 0
+    var gi: Int = 0
+    while gi < nw:
+        let w: Int = mem_load(ptr_offset(widths, gi, "Int"), "Int")
+        let z: Int = raster_grid_z(buf, w, n)
+        if gi == 0:
+            best = z
+            bw = w
+        elif z > best:
+            best = z
+            bw = w
+        gi = gi + 1
+    decay widths
+    if nw == 0:
+        mem_store(ptr_offset(wh, 0, "Int"), 0, "Int")
+        mem_store(ptr_offset(wh, 1, "Int"), 0, "Int")
+        return 0
+    mem_store(ptr_offset(wh, 0, "Int"), bw, "Int")
+    mem_store(ptr_offset(wh, 1, "Int"), n / bw, "Int")
+    return best
+
+// ── TAG machine (α tier): Post tag-system order probe ────────────────────────
+// Queue seeded from the first TAG_SEEDB bits. Rewrite (delete front 2):
+//   front pair 00 -> append [0]      (net -1: shrink-biased)
+//   front pair 01/10 -> append [0,1] (net  0: drift)
+//   front pair 11 -> append [1,1,0]  (net +1: grow)
+// Uniform noise (uniform pairs) has negative drift and halts fast;
+// periodic/structured order with 11-excess survives toward budget.
+// Provisional thresholds — calibrate live against --selftest + C vectors.
+fn tag_run(buf: ptr<Byte>, nbits: Int, budget: Int, out2: ptr<Int>) with Unsafe:
+    var seedn: Int = TAG_SEEDB
+    if nbits < seedn:
+        seedn = nbits
+    let mut q: ptr<Byte> = alloc_zeroed(TAG_CAP, "Byte")
+    var head: Int = 0
+    var tail: Int = 0
+    var i: Int = 0
+    while i < seedn:
+        if tail < TAG_CAP:
+            bstore(q, tail, getbit(buf, i))
+            tail = tail + 1
+        i = i + 1
+    var steps: Int = 0
+    var maxdepth: Int = tail
+    while steps < budget:
+        if tail - head < 2:
+            break
+        let f0: Int = bref(q, head)
+        let f1: Int = bref(q, head + 1)
+        head = head + 2
+        if f0 == 0:
+            if f1 == 0:
+                if tail < TAG_CAP:
+                    bstore(q, tail, 0)
+                    tail = tail + 1
+            else:
+                if tail + 1 < TAG_CAP:
+                    bstore(q, tail, 0)
+                    bstore(q, tail + 1, 1)
+                    tail = tail + 2
+        else:
+            if f1 == 0:
+                if tail + 1 < TAG_CAP:
+                    bstore(q, tail, 0)
+                    bstore(q, tail + 1, 1)
+                    tail = tail + 2
+            else:
+                if tail + 2 < TAG_CAP:
+                    bstore(q, tail, 1)
+                    bstore(q, tail + 1, 1)
+                    bstore(q, tail + 2, 0)
+                    tail = tail + 3
+        if tail - head > maxdepth:
+            maxdepth = tail - head
+        if tail >= TAG_CAP - 4:
+            steps = steps + 1
+            break
+        steps = steps + 1
+    decay q
+    mem_store(ptr_offset(out2, 0, "Int"), steps, "Int")
+    mem_store(ptr_offset(out2, 1, "Int"), maxdepth, "Int")
+
+// ── JIT tier (α): vendored x86-64 emitter, jit.kn pattern ────────────────────
+// Straight-line [push A, push B, add] compiled to native, executed via RWX.
+// Proves map/protect/flush/call + cache accounting live; full STACK-to-
+// native dispatch is stage 2. Equivalence = native result == A+B.
+fn jmodrm(mod_val: Int, reg: Int, rm: Int) -> Int:
+    return ((mod_val & 3) << 6) | ((reg & 7) << 3) | (rm & 7)
+
+fn jemit(arr: Array<Int>, b: Int) -> Array<Int>:
+    push(arr, b & 255)
+    return arr
+
+fn jemit_u32(arr: Array<Int>, v: Int) -> Array<Int>:
+    push(arr, v & 255)
+    push(arr, (v >> 8) & 255)
+    push(arr, (v >> 16) & 255)
+    push(arr, (v >> 24) & 255)
+    return arr
+
+fn jemit_u64(arr: Array<Int>, v: Int) -> Array<Int>:
+    push(arr, v & 255)
+    push(arr, (v >> 8) & 255)
+    push(arr, (v >> 16) & 255)
+    push(arr, (v >> 24) & 255)
+    push(arr, (v >> 32) & 255)
+    push(arr, (v >> 40) & 255)
+    push(arr, (v >> 48) & 255)
+    push(arr, (v >> 56) & 255)
+    return arr
+
+fn jemit_mov_rbp(arr: Array<Int>, reg: Int, disp: Int, is_store: Int) -> Array<Int>:
+    push(arr, 72)
+    if is_store == 1:
+        push(arr, 137)
+    else:
+        push(arr, 139)
+    push(arr, 128 | ((reg & 7) << 3) | 5)
+    jemit_u32(arr, disp)
+    return arr
+
+shatter struct JitCache:
+    hashes: Array<Int>
+    count: Int
+    hits: Int
+    misses: Int
+    bytes: Int
+
+fn jit_cache_init() -> JitCache:
+    return JitCache { hashes: [], count: 0, hits: 0, misses: 0, bytes: 0 }
+
+fn jit_cache_hit(cache: JitCache, h: Int) -> Int:
+    var i: Int = 0
+    while i < cache.count:
+        if cache.hashes[i] == h:
+            return 1
+        i = i + 1
+    return 0
+
+fn jit_cache_reg(cache: JitCache, h: Int, size: Int) -> JitCache:
+    var c = cache
+    push(c.hashes, h)
+    c.count = c.count + 1
+    c.misses = c.misses + 1
+    c.bytes = c.bytes + size
+    return c
+
+fn jit_cache_mark_hit(cache: JitCache) -> JitCache:
+    var c = cache
+    c.hits = c.hits + 1
+    return c
+
+fn jit_null_byte() -> ptr<Byte> with Pure:
+    return int_to_ptr(0, "ptr<Byte>")
+
+fn jit_exec_sum(a: Int, b: Int) -> Int with Unsafe:
+    var code: Array<Int> = []
+    push(code, 85)
+    push(code, 83)
+    push(code, 72)
+    push(code, 137)
+    push(code, 229)
+    var off: Int = 0
+    push(code, 72)
+    push(code, 184)
+    code = jemit_u64(code, a)
+    code = jemit_mov_rbp(code, 0, 0 - 8 - off, 1)
+    off = off + 8
+    push(code, 72)
+    push(code, 184)
+    code = jemit_u64(code, b)
+    code = jemit_mov_rbp(code, 0, 0 - 8 - off, 1)
+    off = off + 8
+    code = jemit_mov_rbp(code, 3, 0 - 8 - (off - 8), 0)
+    code = jemit_mov_rbp(code, 0, 0 - 8 - (off - 16), 0)
+    push(code, 72)
+    push(code, 1)
+    push(code, jmodrm(3, 3, 0))
+    code = jemit_mov_rbp(code, 0, 0 - 8 - (off - 16), 1)
+    off = off - 8
+    code = jemit_mov_rbp(code, 0, 0 - 8, 0)
+    push(code, 72)
+    push(code, 137)
+    push(code, 236)
+    push(code, 91)
+    push(code, 93)
+    push(code, 195)
+    let csize: Int = len(code)
+    if csize < 1:
+        return 0 - 2
+    var allocn: Int = csize
+    let pgsz: Int = vm_page_size()
+    if allocn % pgsz > 0:
+        allocn = (allocn / pgsz + 1) * pgsz
+    let buf: ptr<Int> = vm_map(allocn)
+    if ptr_to_int(buf) == 0:
+        return 0 - 3
+    if vm_protect_execute_read_write(buf, allocn) != 0:
+        let _r: Int = vm_release(buf, allocn)
+        return 0 - 4
+    var ci: Int = 0
+    while ci < csize:
+        let bp = ptr_offset(buf, ci, "Byte")
+        mem_store(bp, (code[ci] & 255) as Byte, "Byte")
+        ci = ci + 1
+    let cls: Int = cpu_cache_line_bytes()
+    var fi: Int = 0
+    while fi < csize:
+        let bp2 = ptr_offset(buf, fi, "Byte")
+        let fp: ptr<Int> = int_to_ptr(ptr_to_int(bp2), "ptr<Int>")
+        cache_flush(fp)
+        fi = fi + cls
+    full_fence()
+    let scratch: ptr<Int> = alloc_zeroed(2, "Int")
+    mem_store(scratch, ptr_to_int(buf), "Int")
+    mem_store(ptr_offset(scratch, 1, "Int"), 0, "Int")
+    let sc: Int = ptr_to_int(scratch)
+    asm("mov rax, [rdi]\ncall rax\nmov [rdi+8], rax", sc, constraints = "{rdi}", clobbers = "rax,rcx,rdx", memory = true, intel = true)
+    let res: Int = mem_load(ptr_offset(scratch, 1, "Int"), "Int")
+    decay scratch
+    let _r2: Int = vm_release(buf, allocn)
+    let _u: Int = jmodrm(0, 0, 0)
+    let _n: ptr<Byte> = jit_null_byte()
+    return res
+
+// ── Mutation probe (α): flip ~1% bits, re-run STACK loops + BM z ─────────────
+fn mut_probe(buf: ptr<Byte>, nbits: Int, budget: Int, out2: ptr<Int>, skip: String) with Unsafe:
+    var nby: Int = (nbits + 7) / 8
+    // +32 slack: bulk byte loops auto-vectorize (AVX2 32B stores) and can
+    // overrun exact-size arenas by up to 31 bytes (measured: nby%32 != 0
+    // aborted 127; multiples of 32 pass; see AGENTS.md). Never shrink this.
+    let mut cp: ptr<Byte> = alloc_zeroed(nby + 32, "Byte")
+    var step: Int = nbits / 341
+    if step < 1:
+        step = 1
+    var docopy: Int = 1
+    if find_from(skip, "mutcopy", 0) >= 0:
+        docopy = 0
+    var doflip: Int = 1
+    if find_from(skip, "mutflip", 0) >= 0:
+        doflip = 0
+    var nk: Int = 0
+    var i: Int = 0
+    while i < nby:
+        var b: Int = 0
+        if docopy == 1:
+            b = bref(buf, i)
+        if doflip == 1:
+            while nk * step < (i + 1) * 8:
+                if nk * step >= i * 8:
+                    if nk * step < nbits:
+                        let m2: Int = nk * step - i * 8
+                        let mask2: Int = 1 << (7 - m2)
+                        if (b & mask2) == 0:
+                            b = b + mask2
+                        else:
+                            b = b - mask2
+                nk = nk + 1
+        bstore(cp, i, b)
+        i = i + 1
+    let mut o4: ptr<Int> = alloc_zeroed(4, "Int")
+    let mut li: ptr<Int> = alloc_zeroed(1, "Int")
+    var mbmz: Int = 0
+    if find_from(skip, "mutbm", 0) < 0:
+        mbmz = bm_best(cp, nbits, li)
+    if find_from(skip, "mutstack", 0) < 0:
+        stack_best(cp, nbits, o4, budget)
+    let mloops: Int = mem_load(ptr_offset(o4, 1, "Int"), "Int")
+    decay cp
+    decay o4
+    decay li
+    mem_store(ptr_offset(out2, 0, "Int"), mloops, "Int")
+    mem_store(ptr_offset(out2, 1, "Int"), mbmz, "Int")
+
+fn usage() -> String:
+    var t: String = "xvm_sandbox 0.1.0 — TurboKain alien-code sandbox (xvm parity + TAG/JIT/MUT)\n"
+    t = t + "Six C machines 1:1 (SUBLEQ/STACK/CA110/ACF/BM/RASTER) + TAG order probe\n"
+    t = t + "+ JIT native-exec smoke + mutation robustness. Entropy gate first.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  xvm_sandbox --in <bits.bin> [--out xvm.md] [--csv xvm.csv]\n"
+    t = t + "              [--budget N] [--data-dir D] [--json]\n"
+    t = t + "  xvm_sandbox <bits.bin> [out.md]\n"
+    t = t + "  xvm_sandbox --selftest\n"
+    t = t + "  --skip a,b,.. : sub stack ca acf bm ras tag mut jit\n"
+    t = t + "          mutcopy mutflip mutstack mutbm (debug triage, default all on)\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 ok (verdict in table), 1 help/selftest FAIL, 2 error.\n"
+    return t
+
+fn selftest_run(budget: Int) -> Int with Unsafe:
+    var npass: Int = 0
+    var total: Int = 0
+    let NB: Int = 4096
+    // 1. noise: 5 seeds, gate passes, zero machines fire, TAG quiet
+    var s: Int = 0
+    while s < 5:
+        var seed: Int = 1597631647 + s * 97613
+        if s == 1:
+            seed = 305419897
+        elif s == 2:
+            seed = 267242409
+        elif s == 3:
+            seed = 2863311530 % 2147483648
+        elif s == 4:
+            seed = 388790397
+        let mut rnd: ptr<Byte> = alloc_zeroed(NB, "Byte")
+        var bi: Int = 0
+        while bi < NB:
+            seed = lcg_next(seed)
+            bstore(rnd, bi, (seed >> 16) & 255)
+            bi = bi + 1
+        let mut e2: ptr<Int> = alloc_zeroed(2, "Int")
+        entropy_gate(rnd, NB, e2)
+        let fr: Int = mem_load(ptr_offset(e2, 0, "Int"), "Int")
+        let nd: Int = mem_load(ptr_offset(e2, 1, "Int"), "Int")
+        let gate: Int = gate_entropy_ok(fr, nd) as Int
+        total = total + 1
+        if gate == 1:
+            npass = npass + 1
+            println("[selftest] noise gate passes seed=" + str(s) + " PASS ones_x1000=" + str(fr) + " distinct=" + str(nd))
+        else:
+            println("[selftest] noise gate passes seed=" + str(s) + " FAIL ones_x1000=" + str(fr) + " distinct=" + str(nd))
+        let sub: Int = subleq_score(rnd, NB * 8)
+        let mut o4: ptr<Int> = alloc_zeroed(4, "Int")
+        stack_best(rnd, NB * 8, o4, budget)
+        let ca: Int = ca110_variance(rnd, NB * 8)
+        let mut lag: ptr<Int> = alloc_zeroed(1, "Int")
+        let acfz: Int = acf_best(rnd, NB * 8, lag)
+        let mut li: ptr<Int> = alloc_zeroed(1, "Int")
+        let bmz: Int = bm_best(rnd, NB * 8, li)
+        let mut wh: ptr<Int> = alloc_zeroed(2, "Int")
+        let rasz: Int = raster_best(rnd, NB * 8, mem_load(lag, "Int"), wh)
+        let mut tg: ptr<Int> = alloc_zeroed(2, "Int")
+        tag_run(rnd, NB * 8, TAG_BUDGET, tg)
+        var sc: Int = 0
+        if fires_sub(sub):
+            sc = sc + 1
+        let so: Int = mem_load(ptr_offset(o4, 0, "Int"), "Int")
+        let sl: Int = mem_load(ptr_offset(o4, 1, "Int"), "Int")
+        if fires_stk(so, sl):
+            sc = sc + 1
+        if ca >= CA_VAR_MIN_X1E6:
+            sc = sc + 1
+        if iabs(acfz) >= ACF_Z_X10:
+            sc = sc + 1
+        if bmz >= BM_Z_X10:
+            sc = sc + 1
+        if rasz >= RASTER_Z_X10:
+            sc = sc + 1
+        total = total + 1
+        if sc == 0:
+            npass = npass + 1
+            println("[selftest] noise machines quiet seed=" + str(s) + " PASS sub=" + str(sub) + " ops=" + str(so) + " loops=" + str(sl) + " ca=" + str(ca) + " acf=" + str(acfz) + " bm=" + str(bmz) + " ras=" + str(rasz))
+        else:
+            println("[selftest] noise machines quiet seed=" + str(s) + " FAIL fires=" + str(sc))
+        let tsteps: Int = mem_load(ptr_offset(tg, 0, "Int"), "Int")
+        let tdep: Int = mem_load(ptr_offset(tg, 1, "Int"), "Int")
+        var tfire: Int = 0
+        if tsteps >= TAG_FIRE_STEPS:
+            if tdep >= TAG_FIRE_DEPTH:
+                tfire = 1
+        total = total + 1
+        if tfire == 0:
+            npass = npass + 1
+            println("[selftest] noise TAG quiet seed=" + str(s) + " PASS steps=" + str(tsteps) + " depth=" + str(tdep))
+        else:
+            println("[selftest] noise TAG quiet seed=" + str(s) + " FAIL steps=" + str(tsteps) + " depth=" + str(tdep))
+        decay rnd
+        decay e2
+        decay o4
+        decay lag
+        decay li
+        decay wh
+        decay tg
+        s = s + 1
+    // 2. dark: gate refuses
+    let mut zbuf: ptr<Byte> = alloc_zeroed(NB, "Byte")
+    let mut ze: ptr<Int> = alloc_zeroed(2, "Int")
+    entropy_gate(zbuf, NB, ze)
+    let zfr: Int = mem_load(ptr_offset(ze, 0, "Int"), "Int")
+    let znd: Int = mem_load(ptr_offset(ze, 1, "Int"), "Int")
+    total = total + 1
+    if gate_entropy_ok(zfr, znd):
+        println("[selftest] dark gate refuses FAIL ones=" + str(zfr) + " distinct=" + str(znd))
+    else:
+        npass = npass + 1
+        println("[selftest] dark gate refuses PASS ones=" + str(zfr) + " distinct=" + str(znd))
+    decay zbuf
+    decay ze
+    // 3. engineered: STACK loop + LFSR-A/B + 23x73 bitmap
+    let mut eng: ptr<Byte> = alloc_zeroed(NB, "Byte")
+    var esd: Int = 3267000509 % 2147483648
+    var ei: Int = 0
+    while ei < NB:
+        esd = lcg_next(esd)
+        bstore(eng, ei, (esd >> 16) & 255)
+        ei = ei + 1
+    let mut prog5: ptr<Byte> = alloc_zeroed(5, "Byte")
+    bstore(prog5, 0, 21)
+    bstore(prog5, 1, 11)
+    bstore(prog5, 2, 32)
+    bstore(prog5, 3, 160)
+    bstore(prog5, 4, 236)
+    var pi2: Int = 0
+    while pi2 < 512:
+        bstore(eng, pi2, bref(prog5, pi2 % 5))
+        pi2 = pi2 + 1
+    decay prog5
+    var la_st: Int = 44257
+    var la_i: Int = 0
+    while la_i < 4096:
+        let la_nb: Int = (popcount8(la_st & 40977) % 2 + popcount8((la_st >> 8) & 160) % 2) % 2
+        setbit(eng, 4096 + la_i, la_st & 1)
+        la_st = (la_st >> 1) | ((la_nb % 2) << 15)
+        la_st = la_st & 65535
+        la_i = la_i + 1
+    var lb_st: Int = 48879
+    var lb_i: Int = 0
+    while lb_i < 4096:
+        let lb_nb: Int = (popcount8(lb_st & 4673) % 2 + popcount8((lb_st >> 8) & 18) % 2) % 2
+        setbit(eng, 8192 + lb_i, lb_st & 1)
+        lb_st = (lb_st >> 1) | ((lb_nb % 2) << 15)
+        lb_st = lb_st & 65535
+        lb_i = lb_i + 1
+    let BW23: Int = 23
+    let BH73: Int = 73
+    let b0: Int = 12288
+    var clr: Int = 0
+    while clr < BW23 * BH73:
+        setbit(eng, b0 + clr, 0)
+        clr = clr + 1
+    var rr: Int = 0
+    while rr < BH73:
+        var cc: Int = 0
+        while cc < BW23:
+            var vv: Int = 0
+            if rr == 0:
+                vv = 1
+            elif rr == BH73 - 1:
+                vv = 1
+            elif cc == 0:
+                vv = 1
+            elif cc == BW23 - 1:
+                vv = 1
+            elif rr == BH73 / 2:
+                vv = 1
+            elif cc == BW23 / 2:
+                vv = 1
+            else:
+                if rr >= 10:
+                    if rr < 15:
+                        if cc >= 30:
+                            if cc < 35:
+                                vv = 1
+            setbit(eng, b0 + rr * BW23 + cc, vv)
+            cc = cc + 1
+        rr = rr + 1
+    let mut ee: ptr<Int> = alloc_zeroed(2, "Int")
+    entropy_gate(eng, NB, ee)
+    let efr: Int = mem_load(ptr_offset(ee, 0, "Int"), "Int")
+    let end2: Int = mem_load(ptr_offset(ee, 1, "Int"), "Int")
+    total = total + 1
+    if gate_entropy_ok(efr, end2):
+        npass = npass + 1
+        println("[selftest] coded gate passes PASS ones=" + str(efr) + " distinct=" + str(end2))
+    else:
+        println("[selftest] coded gate passes FAIL ones=" + str(efr) + " distinct=" + str(end2))
+    let esub: Int = subleq_score(eng, NB * 8)
+    let mut eo4: ptr<Int> = alloc_zeroed(4, "Int")
+    stack_best(eng, NB * 8, eo4, budget)
+    let eca: Int = ca110_variance(eng, NB * 8)
+    let mut elag: ptr<Int> = alloc_zeroed(1, "Int")
+    let eacfz: Int = acf_best(eng, NB * 8, elag)
+    let mut eli: ptr<Int> = alloc_zeroed(1, "Int")
+    let ebmz: Int = bm_best(eng, NB * 8, eli)
+    let mut ewh: ptr<Int> = alloc_zeroed(2, "Int")
+    let erasz: Int = raster_best(eng, NB * 8, mem_load(elag, "Int"), ewh)
+    let eso: Int = mem_load(ptr_offset(eo4, 0, "Int"), "Int")
+    let esl: Int = mem_load(ptr_offset(eo4, 1, "Int"), "Int")
+    let esw: Int = mem_load(ptr_offset(eo4, 3, "Int"), "Int")
+    var ef_sub: Int = 0
+    var ef_stk: Int = 0
+    var ef_ca: Int = 0
+    var ef_acf: Int = 0
+    var ef_bm: Int = 0
+    var ef_ras: Int = 0
+    if fires_sub(esub):
+        ef_sub = 1
+    if fires_stk(eso, esl):
+        ef_stk = 1
+    if eca >= CA_VAR_MIN_X1E6:
+        ef_ca = 1
+    if iabs(eacfz) >= ACF_Z_X10:
+        ef_acf = 1
+    if ebmz >= BM_Z_X10:
+        ef_bm = 1
+    if erasz >= RASTER_Z_X10:
+        ef_ras = 1
+    let escore: Int = ef_sub + ef_stk + ef_ca + ef_acf + ef_bm + ef_ras
+    total = total + 1
+    if escore >= 3:
+        npass = npass + 1
+        println("[selftest] coded CANDIDATE PASS score=" + str(escore) + "/6 sub=" + str(esub) + " ops=" + str(eso) + " loops=" + str(esl) + " w=" + str(esw) + " ca=" + str(eca) + " acf=" + str(eacfz) + " bm=" + str(ebmz) + " ras=" + str(erasz))
+    else:
+        println("[selftest] coded CANDIDATE FAIL score=" + str(escore) + "/6")
+    let mut la: ptr<Int> = alloc_zeroed(1, "Int")
+    let za: Int = bm_region(eng, 4096, 4096, la)
+    let LA: Int = mem_load(la, "Int")
+    let mut lb: ptr<Int> = alloc_zeroed(1, "Int")
+    let zb: Int = bm_region(eng, 8192, 4096, lb)
+    let LB: Int = mem_load(lb, "Int")
+    total = total + 1
+    if LA <= 32:
+        if za >= BM_Z_X10:
+            if LB <= 32:
+                if zb >= BM_Z_X10:
+                    npass = npass + 1
+                    println("[selftest] coded BM both LFSRs PASS LA=" + str(LA) + " za=" + str(za) + " LB=" + str(LB) + " zb=" + str(zb))
+                else:
+                    println("[selftest] coded BM both LFSRs FAIL LA=" + str(LA) + " za=" + str(za) + " LB=" + str(LB) + " zb=" + str(zb))
+            else:
+                println("[selftest] coded BM both LFSRs FAIL LA=" + str(LA) + " za=" + str(za) + " LB=" + str(LB) + " zb=" + str(zb))
+        else:
+            println("[selftest] coded BM both LFSRs FAIL LA=" + str(LA) + " za=" + str(za) + " LB=" + str(LB) + " zb=" + str(zb))
+    else:
+        println("[selftest] coded BM both LFSRs FAIL LA=" + str(LA) + " za=" + str(za) + " LB=" + str(LB) + " zb=" + str(zb))
+    let mut etg: ptr<Int> = alloc_zeroed(2, "Int")
+    tag_run(eng, NB * 8, TAG_BUDGET, etg)
+    let ets: Int = mem_load(ptr_offset(etg, 0, "Int"), "Int")
+    let etd: Int = mem_load(ptr_offset(etg, 1, "Int"), "Int")
+    total = total + 1
+    if ets >= TAG_FIRE_STEPS:
+        if etd >= TAG_FIRE_DEPTH:
+            npass = npass + 1
+            println("[selftest] coded TAG fires PASS steps=" + str(ets) + " depth=" + str(etd))
+        else:
+            println("[selftest] coded TAG fires FAIL steps=" + str(ets) + " depth=" + str(etd))
+    else:
+        println("[selftest] coded TAG fires FAIL steps=" + str(ets) + " depth=" + str(etd))
+    decay ee
+    decay eo4
+    decay elag
+    decay eli
+    decay ewh
+    decay la
+    decay lb
+    decay etg
+    // 4. raster natural width on small image window
+    let IW: Int = 4096
+    let mut im: ptr<Byte> = alloc_zeroed(IW / 8, "Byte")
+    var isd: Int = 305419896
+    var ii2: Int = 0
+    while ii2 < IW:
+        isd = lcg_next(isd)
+        if ((isd >> 16) & 1) == 1:
+            setbit(im, ii2, 1)
+        else:
+            setbit(im, ii2, 0)
+        ii2 = ii2 + 1
+    var r2: Int = 0
+    while r2 < BH73:
+        var c3: Int = 0
+        while c3 < BW23:
+            var v3: Int = 0
+            if r2 == 0:
+                v3 = 1
+            elif r2 == BH73 - 1:
+                v3 = 1
+            elif c3 == 0:
+                v3 = 1
+            elif c3 == BW23 - 1:
+                v3 = 1
+            elif r2 == BH73 / 2:
+                v3 = 1
+            elif c3 == BW23 / 2:
+                v3 = 1
+            else:
+                if r2 >= 10:
+                    if r2 < 15:
+                        if c3 >= 30:
+                            if c3 < 35:
+                                v3 = 1
+            setbit(im, r2 * BW23 + c3, v3)
+            c3 = c3 + 1
+        r2 = r2 + 1
+    let mut iwh: ptr<Int> = alloc_zeroed(2, "Int")
+    let iz: Int = raster_best(im, IW, 0, iwh)
+    let iw: Int = mem_load(ptr_offset(iwh, 0, "Int"), "Int")
+    total = total + 1
+    if iz >= RASTER_Z_X10:
+        if iw == 23:
+            npass = npass + 1
+            println("[selftest] raster natural width PASS z=" + str(iz) + " w=" + str(iw))
+        else:
+            println("[selftest] raster natural width FAIL z=" + str(iz) + " w=" + str(iw))
+    else:
+        println("[selftest] raster natural width FAIL z=" + str(iz) + " w=" + str(iw))
+    decay im
+    decay iwh
+    decay eng
+    // 5. JIT smoke: native A+B == interp, cache accounts
+    var jc: JitCache = jit_cache_init()
+    let jr: Int = jit_exec_sum(12345, 67890)
+    total = total + 1
+    if jr == 80235:
+        npass = npass + 1
+        println("[selftest] JIT native exec PASS 12345+67890=" + str(jr))
+    else:
+        println("[selftest] JIT native exec FAIL got=" + str(jr) + " want=80235")
+    jc = jit_cache_reg(jc, 123456789, 128)
+    jc = jit_cache_mark_hit(jc)
+    total = total + 1
+    if jc.hits == 1:
+        if jit_cache_hit(jc, 123456789) == 1:
+            npass = npass + 1
+            println("[selftest] JIT cache PASS hits=" + str(jc.hits) + " bytes=" + str(jc.bytes))
+        else:
+            println("[selftest] JIT cache FAIL lookup miss")
+    else:
+        println("[selftest] JIT cache FAIL hits=" + str(jc.hits))
+    // 6. trip event layer
+    let pj0: Int = patch_journal_count()
+    let rf0: Int = resonate_fire_count()
+    let _pt: Int = xvm_trip(XvmAuthority, 7, 100)
+    let pjd: Int = patch_journal_count() - pj0
+    let rfd: Int = resonate_fire_count() - rf0
+    total = total + 1
+    if pjd >= 1:
+        if rfd >= 1:
+            npass = npass + 1
+            println("[selftest] TRIP event served PASS patch+" + str(pjd) + " resonate+" + str(rfd))
+        else:
+            println("[selftest] TRIP event served FAIL patch+" + str(pjd) + " resonate+" + str(rfd))
+    else:
+        println("[selftest] TRIP event served FAIL patch+" + str(pjd) + " resonate+" + str(rfd))
+    println("[selftest] " + str(npass) + "/" + str(total))
+    if npass == total:
+        println("receipt=PASS selftest=" + str(npass) + "/" + str(total))
+        return EXIT_OK
+    println("receipt=FAIL selftest=" + str(npass) + "/" + str(total))
+    return EXIT_HELP
+
+// NOTE: lfsr_fill lived here as a small loop-over-ptr helper and segfaulted
+// when CALLED (confirmed 2nd instance of the boxcar crash note) — inlined at
+// both call sites above. Do NOT re-extract it into a helper.
+
+fn main() -> Int with Unsafe:
+    let args: Array<String> = process_user_args()
+    var in_path: String = ""
+    var data_dir: String = ""
+    var out_path: String = ""
+    var csv_path: String = ""
+    var budget: Int = 50000
+    var skip: String = ""
+    var json: Int = 0
+    var show_help: Int = 0
+    var selftest: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--json":
+            json = 1
+        elif a == "--selftest":
+            selftest = 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif a == "--budget":
+            if i + 1 < len(args):
+                budget = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--skip":
+            if i + 1 < len(args):
+                skip = args[i + 1]
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    var pi: Int = 0
+    while pi < len(pos):
+        let p: String = pos[pi]
+        if pi == 0:
+            if in_path == "":
+                in_path = p
+        elif pi == 1:
+            if out_path == "":
+                out_path = p
+        pi = pi + 1
+    if show_help == 1:
+        print(usage())
+        return EXIT_HELP
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+    if selftest == 1:
+        return selftest_run(budget)
+    if in_path != "":
+        if data_dir != "":
+            if find_from(in_path, ":", 0) < 0:
+                if len(in_path) > 0:
+                    if char_at(in_path, 0) != "/":
+                        in_path = data_dir + "/" + in_path
+    if in_path == "":
+        println("xvm_sandbox: no input. usage: xvm_sandbox --in <bits.bin> | --selftest")
+        return EXIT_ERROR
+    let t0: Int = now_millis()
+    let h: ptr<Void> = k_open_read(in_path)
+    if k_handle_bad(h) == 1:
+        println("xvm_sandbox: open fail err=" + str(k_GetLastError()) + ": " + in_path)
+        return EXIT_ERROR
+    let fsize: Int = k_size(h)
+    if fsize < 1:
+        let _c0: Int = k_CloseHandle(h)
+        println("xvm_sandbox: empty file: " + in_path)
+        return EXIT_ERROR
+    if fsize > 33554432:
+        let _c9: Int = k_CloseHandle(h)
+        println("xvm_sandbox: file too large (>32MB): " + in_path)
+        return EXIT_ERROR
+    let mut rawbuf: ptr<Byte> = alloc_zeroed(fsize + 32, "Byte")
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(nslot, 0, "Int")
+    let rok: Int = k_ReadFile(h, rawbuf, fsize, nslot, null_ptr())
+    let got: Int = mem_load(nslot, "Int")
+    let _ch: Int = k_CloseHandle(h)
+    if rok == 0:
+        println("xvm_sandbox: read fail got=" + str(got))
+        return EXIT_ERROR
+    if got < fsize:
+        println("xvm_sandbox: short read got=" + str(got) + " want=" + str(fsize))
+        return EXIT_ERROR
+    let nb: Int = fsize
+    var nbits: Int = nb * 8
+    if nbits > MAXB:
+        nbits = MAXB
+    let mut e2: ptr<Int> = alloc_zeroed(2, "Int")
+    entropy_gate(rawbuf, nb, e2)
+    let ones3: Int = mem_load(ptr_offset(e2, 0, "Int"), "Int")
+    let ndist: Int = mem_load(ptr_offset(e2, 1, "Int"), "Int")
+    decay e2
+    var md: String = "| file | nbits | ones_x1000 | distinct | sub_x100 | stk_ops | stk_loops | stk_depth | stk_w | ca_x1e6 | acf_lag | acf_z_x10 | bm_L | bm_z_x10 | ras_w | ras_h | ras_z_x10 | tag_steps | tag_depth | tag_fire | jit_equiv | mut_stk | mut_bm_x10 | score_x100 | verdict |\n"
+    md = md + "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    var csv: String = "file,nbits,ones_x1000,distinct,sub_x100,stk_ops,stk_loops,stk_depth,stk_w,ca_x1e6,acf_lag,acf_z_x10,bm_L,bm_z_x10,ras_w,ras_h,ras_z_x10,tag_steps,tag_depth,tag_fire,jit_equiv,mut_stk,mut_bm_x10,score_x100,verdict\n"
+    if gate_entropy_ok(ones3, ndist):
+        println("entropy_gate=pass (ones_x1000=" + str(ones3) + " distinct=" + str(ndist) + ")")
+    else:
+        println("entropy_gate=BLOCK (ones_x1000=" + str(ones3) + " distinct=" + str(ndist) + "): no information, no verdict")
+        md = md + "| " + in_path + " | " + str(nbits) + " | " + str(ones3) + " | " + str(ndist) + " | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | ENTROPY-BLOCK |\n"
+        csv = csv + in_path + "," + str(nbits) + "," + str(ones3) + "," + str(ndist) + ",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,ENTROPY-BLOCK\n"
+        println(md)
+        if out_path != "":
+            if write_text_file(out_path, md) != 0:
+                println("xvm_sandbox: md write fail")
+                return EXIT_ERROR
+        if csv_path != "":
+            if write_text_file(csv_path, csv) != 0:
+                println("xvm_sandbox: csv write fail")
+                return EXIT_ERROR
+        decay rawbuf
+        decay nslot
+        return EXIT_OK
+    let t1: Int = now_millis()
+    var sub: Int = 0
+    if find_from(skip, "sub", 0) < 0:
+        sub = subleq_score(rawbuf, nbits)
+    let mut o4: ptr<Int> = alloc_zeroed(4, "Int")
+    if find_from(skip, "stack", 0) < 0:
+        stack_best(rawbuf, nbits, o4, budget)
+    let so: Int = mem_load(ptr_offset(o4, 0, "Int"), "Int")
+    let sl: Int = mem_load(ptr_offset(o4, 1, "Int"), "Int")
+    let sd: Int = mem_load(ptr_offset(o4, 2, "Int"), "Int")
+    let sw: Int = mem_load(ptr_offset(o4, 3, "Int"), "Int")
+    var ca: Int = 0
+    if find_from(skip, "ca", 0) < 0:
+        ca = ca110_variance(rawbuf, nbits)
+    let mut lag: ptr<Int> = alloc_zeroed(1, "Int")
+    var acfz: Int = 0
+    if find_from(skip, "acf", 0) < 0:
+        acfz = acf_best(rawbuf, nbits, lag)
+    let alag: Int = mem_load(lag, "Int")
+    let mut li: ptr<Int> = alloc_zeroed(1, "Int")
+    var bmz: Int = 0
+    if find_from(skip, "bm", 0) < 0:
+        bmz = bm_best(rawbuf, nbits, li)
+    let bml: Int = mem_load(li, "Int")
+    let mut wh: ptr<Int> = alloc_zeroed(2, "Int")
+    var rasz: Int = 0
+    if find_from(skip, "ras", 0) < 0:
+        rasz = raster_best(rawbuf, nbits, alag, wh)
+    let rw: Int = mem_load(ptr_offset(wh, 0, "Int"), "Int")
+    let rh: Int = mem_load(ptr_offset(wh, 1, "Int"), "Int")
+    let mut tg: ptr<Int> = alloc_zeroed(2, "Int")
+    if find_from(skip, "tag", 0) < 0:
+        tag_run(rawbuf, nbits, TAG_BUDGET, tg)
+    let tsteps: Int = mem_load(ptr_offset(tg, 0, "Int"), "Int")
+    let tdep: Int = mem_load(ptr_offset(tg, 1, "Int"), "Int")
+    var tfire: Int = 0
+    if tsteps >= TAG_FIRE_STEPS:
+        if tdep >= TAG_FIRE_DEPTH:
+            tfire = 1
+    let mut mu: ptr<Int> = alloc_zeroed(2, "Int")
+    if find_from(skip, "mut", 0) < 0:
+        mut_probe(rawbuf, nbits, budget, mu, skip)
+    let mloops: Int = mem_load(ptr_offset(mu, 0, "Int"), "Int")
+    let mbmz: Int = mem_load(ptr_offset(mu, 1, "Int"), "Int")
+    decay mu
+    var jc2: JitCache = jit_cache_init()
+    let jh: Int = ones3 * 1315423911 + ndist
+    var jeq: Int = 0
+    if find_from(skip, "jit", 0) < 0:
+        if jit_cache_hit(jc2, jh) == 0:
+            let jr2: Int = jit_exec_sum(ones3, ndist)
+            if jr2 == ones3 + ndist:
+                jeq = 1
+            jc2 = jit_cache_reg(jc2, jh, 96)
+        else:
+            jc2 = jit_cache_mark_hit(jc2)
+            jeq = 1
+    var f_sub: Int = 0
+    var f_stk: Int = 0
+    var f_ca: Int = 0
+    var f_acf: Int = 0
+    var f_bm: Int = 0
+    var f_ras: Int = 0
+    if fires_sub(sub):
+        f_sub = 1
+    if fires_stk(so, sl):
+        f_stk = 1
+    if ca >= CA_VAR_MIN_X1E6:
+        f_ca = 1
+    if iabs(acfz) >= ACF_Z_X10:
+        f_acf = 1
+    if bmz >= BM_Z_X10:
+        f_bm = 1
+    if rasz >= RASTER_Z_X10:
+        f_ras = 1
+    let score6: Int = f_sub + f_stk + f_ca + f_acf + f_bm + f_ras
+    let scorex: Int = (score6 * 100) / 6
+    var verdict: String = "noise-like"
+    if score6 >= 3:
+        verdict = "XENO-CANDIDATE"
+    elif score6 > 0:
+        verdict = "XENO-WATCH"
+    let tkind: Int = f_sub * 1 + f_stk * 2 + f_ca * 4 + f_acf * 8 + f_bm * 16 + f_ras * 32 + tfire * 64
+    let _tr: Int = xvm_trip(XvmAuthority, tkind, scorex)
+    md = md + "| " + in_path + " | " + str(nbits) + " | " + str(ones3) + " | " + str(ndist) + " | " + str(sub) + " | " + str(so) + " | " + str(sl) + " | " + str(sd) + " | " + str(sw) + " | " + str(ca) + " | " + str(alag) + " | " + str(acfz) + " | " + str(bml) + " | " + str(bmz) + " | " + str(rw) + " | " + str(rh) + " | " + str(rasz) + " | " + str(tsteps) + " | " + str(tdep) + " | " + str(tfire) + " | " + str(jeq) + " | " + str(mloops) + " | " + str(mbmz) + " | " + str(scorex) + " | " + verdict + " |\n"
+    csv = csv + in_path + "," + str(nbits) + "," + str(ones3) + "," + str(ndist) + "," + str(sub) + "," + str(so) + "," + str(sl) + "," + str(sd) + "," + str(sw) + "," + str(ca) + "," + str(alag) + "," + str(acfz) + "," + str(bml) + "," + str(bmz) + "," + str(rw) + "," + str(rh) + "," + str(rasz) + "," + str(tsteps) + "," + str(tdep) + "," + str(tfire) + "," + str(jeq) + "," + str(mloops) + "," + str(mbmz) + "," + str(scorex) + "," + verdict + "\n"
+    println(md)
+    println("xvm: sub=" + str(sub) + " stk=" + str(so) + "/" + str(sl) + "/w" + str(sw) + " ca=" + str(ca) + " acf=" + str(acfz) + "@" + str(alag) + " bmL=" + str(bml) + " bmz=" + str(bmz) + " ras=" + str(rasz) + "@" + str(rw) + "x" + str(rh) + " tag=" + str(tsteps) + "/" + str(tdep) + "/" + str(tfire) + " jit=" + str(jeq) + " mut=" + str(mloops) + "/" + str(mbmz) + " score=" + str(scorex) + " " + verdict)
+    if out_path != "":
+        if write_text_file(out_path, md) != 0:
+            println("xvm_sandbox: md write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        println("xvm: wrote " + out_path)
+    if csv_path != "":
+        if write_text_file(csv_path, csv) != 0:
+            println("xvm_sandbox: csv write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        println("xvm: wrote " + csv_path)
+    if json == 1:
+        println("{\"tool\": \"xvm_sandbox\", \"version\": \"0.1.0\", \"nbits\": " + str(nbits) + ", \"score_x100\": " + str(scorex) + ", \"verdict\": \"" + verdict + "\", \"tag_fire\": " + str(tfire) + ", \"jit_equiv\": " + str(jeq) + "}")
+    let t2: Int = now_millis()
+    println("xvm: timing ms io_gate=" + str(t1 - t0) + " machines=" + str(t2 - t1))
+    println("receipt=PASS score_x100=" + str(scorex) + " verdict=" + verdict + " trips=" + str(XvmAuthority.trip_count) + " served=" + str(XvmAuthority.served))
+    decay rawbuf
+    decay nslot
+    decay o4
+    decay lag
+    decay li
+    decay wh
+    decay tg
+    return EXIT_OK

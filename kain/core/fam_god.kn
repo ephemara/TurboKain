@@ -34,6 +34,33 @@ use std::fs
 use std::process
 use std::runtime
 use std::text
+use std::intent
+use std::os
+
+component GodPanel():
+    render <panel title="fam-god" />
+
+// ── Evidence ledger: compiler-owned persistence state ───────────────────────
+// Journal repeats patch this world; resonate fires when repeat-count state
+// moves. Telemetry deltas prove every layer engaged (cadence pattern).
+world EvidenceLedger:
+    state repeats: Int = 0
+    state top_repeat: Int = 0
+    state trips: Int = 0
+    state ticks: Int = 0
+    surface web => GodPanel
+
+patch ledger_hit(ledger: EvidenceLedger, rep: Int) -> Int:
+    ledger.repeats = ledger.repeats + 1
+    if rep > ledger.top_repeat:
+        ledger.top_repeat = rep
+    return ledger.repeats
+
+resonate EvidenceLedger.repeats dampen 0 ms:
+    EvidenceLedger.trips = EvidenceLedger.trips + 1
+
+pulse god_clock every 8 ms jitter 1 ms:
+    EvidenceLedger.ticks = EvidenceLedger.ticks + 1
 
 // ── kernel32 file API (no fs bridge for bulk) ───────────────────────────────
 @extern @link_name("CreateFileA")
@@ -503,6 +530,7 @@ fn usage() -> String:
     t = t + "USAGE:\n"
     t = t + "  fam_god --in <f32> [--fs HZ] [--seg N] [--segbank] [--topk K]\n"
     t = t + "          [--pfwe P] [--drift D] [--tbdsnr S] [--journal J]\n"
+    t = t + "          SCD zoom + evidence-ledger tripwires ride every run.\n"
     t = t + "          [--cand path] [--out fam.md] [--csv fam.csv]\n"
     t = t + "          [--data-dir D] [--json]\n"
     t = t + "  fam_god <f32> [fs] [seg] [topK] [candpath|-]\n"
@@ -731,6 +759,10 @@ fn main() -> Int with Unsafe:
     if ntbd > TBD_MAXSEGS:
         ntbd = TBD_MAXSEGS
     let mut pmat: ptr<Float> = alloc_zeroed(ntbd * nb0, "Float")
+    // SCD-zoom frame store: first 128 segs of Y2 spectra (first SEG only).
+    let mut zre: ptr<Float> = alloc_zeroed(128 * fseg0, "Float")
+    let mut zim: ptr<Float> = alloc_zeroed(128 * fseg0, "Float")
+    var zstore: Int = 0
     // Peak store for the journal (tag, seg, bin per emitted row).
     let mut pk_tag: ptr<Int> = alloc_zeroed(4096, "Int")
     let mut pk_seg: ptr<Int> = alloc_zeroed(4096, "Int")
@@ -824,6 +856,15 @@ fn main() -> Int with Unsafe:
                     if frc != 0:
                         println("fam_god: fft fail")
                         return EXIT_ERROR
+                    if tag == 0:
+                        if si == 0:
+                            if zstore < 128:
+                                var zc: Int = 0
+                                while zc < cseg:
+                                    mem_store(ptr_offset(zre, zstore * cseg + zc, "Float"), mem_load(ptr_offset(re, zc, "Float"), "Float"), "Float")
+                                    mem_store(ptr_offset(zim, zstore * cseg + zc, "Float"), mem_load(ptr_offset(im, zc, "Float"), "Float"), "Float")
+                                    zc = zc + 1
+                                zstore = zstore + 1
                     var b: Int = 0
                     while b < nbins:
                         let rv: Float = mem_load(ptr_offset(re, b, "Float"), "Float")
@@ -1008,6 +1049,81 @@ fn main() -> Int with Unsafe:
         md = md + "| 0 | " + str(fseg0) + " | " + str((tbd_b0 as Float) * fhz / (fseg0 as Float) * 100.0) + " | " + str(tbd_drift) + " | " + str(tbd_score_x) + " | " + str(ntbd) + " | " + tbd_verd + " |\n"
     else:
         md = md + "| 0 | " + str(fseg0) + " | 0 | 0 | 0 | " + str(ntbd) + " | CLEAN |\n"
+    // ── SCD zoom: carrier + coherence at top-3 Y2 α (first SEG) ──
+    // S(f,α) = mean_z X_z(f+ah)·conj(X_z(f-ah)); MSC = |S|²/(A·B).
+    // Coherence gate 0.25 PROVISIONAL (uncalibrated — report, don't gate).
+    let mut zsa: ptr<Float> = alloc_zeroed(nb0, "Float")
+    let mut zsb: ptr<Float> = alloc_zeroed(nb0, "Float")
+    let mut zsr: ptr<Float> = alloc_zeroed(nb0, "Float")
+    let mut zsi: ptr<Float> = alloc_zeroed(nb0, "Float")
+    let seghz0: Float = fhz / (fseg0 as Float)
+    md = md + "\n| zoom | alpha_bin | alpha_hz_x100 | carrier_hz_x100 | msc_x1000 | flag |\n"
+    md = md + "|---|---|---|---|---|---|\n"
+    var za: Int = 0
+    while za < 3:
+        var zbin: Int = -1
+        var zseen: Int = 0
+        var zi: Int = 0
+        while zi < pk_n:
+            if mem_load(ptr_offset(pk_tag, zi, "Int"), "Int") == 0:
+                if mem_load(ptr_offset(pk_seg, zi, "Int"), "Int") == fseg0:
+                    if zseen == za:
+                        zbin = mem_load(ptr_offset(pk_bin, zi, "Int"), "Int")
+                    zseen = zseen + 1
+            zi = zi + 1
+        if zbin < 0:
+            break
+        let ah: Int = zbin / 2
+        var zf0: Int = 0
+        while zf0 < nb0:
+            mem_store(ptr_offset(zsa, zf0, "Float"), 0.0, "Float")
+            mem_store(ptr_offset(zsb, zf0, "Float"), 0.0, "Float")
+            mem_store(ptr_offset(zsr, zf0, "Float"), 0.0, "Float")
+            mem_store(ptr_offset(zsi, zf0, "Float"), 0.0, "Float")
+            zf0 = zf0 + 1
+        var z: Int = 0
+        while z < zstore:
+            zf0 = 0
+            while zf0 < nb0:
+                let i1: Int = zf0 - ah
+                let i2: Int = zf0 + ah
+                if i1 >= 0 and i2 < fseg0:
+                    let a1r: Float = mem_load(ptr_offset(zre, z * fseg0 + i1, "Float"), "Float")
+                    let a1i: Float = mem_load(ptr_offset(zim, z * fseg0 + i1, "Float"), "Float")
+                    let a2r: Float = mem_load(ptr_offset(zre, z * fseg0 + i2, "Float"), "Float")
+                    let a2i: Float = mem_load(ptr_offset(zim, z * fseg0 + i2, "Float"), "Float")
+                    mem_store(ptr_offset(zsr, zf0, "Float"), mem_load(ptr_offset(zsr, zf0, "Float"), "Float") + a1r * a2r + a1i * a2i, "Float")
+                    mem_store(ptr_offset(zsi, zf0, "Float"), mem_load(ptr_offset(zsi, zf0, "Float"), "Float") + a1i * a2r - a1r * a2i, "Float")
+                    mem_store(ptr_offset(zsa, zf0, "Float"), mem_load(ptr_offset(zsa, zf0, "Float"), "Float") + a1r * a1r + a1i * a1i, "Float")
+                    mem_store(ptr_offset(zsb, zf0, "Float"), mem_load(ptr_offset(zsb, zf0, "Float"), "Float") + a2r * a2r + a2i * a2i, "Float")
+                zf0 = zf0 + 1
+            z = z + 1
+        var cf: Int = 0
+        var cmax: Float = -1.0
+        var cb: Int = 0
+        while cb < nb0:
+            let mrr: Float = mem_load(ptr_offset(zsr, cb, "Float"), "Float")
+            let mii: Float = mem_load(ptr_offset(zsi, cb, "Float"), "Float")
+            let mm2: Float = mrr * mrr + mii * mii
+            if mm2 > cmax:
+                cmax = mm2
+                cf = cb
+            cb = cb + 1
+        let deno: Float = mem_load(ptr_offset(zsa, cf, "Float"), "Float") * mem_load(ptr_offset(zsb, cf, "Float"), "Float")
+        var msc: Float = 0.0
+        if deno > 0.0:
+            msc = cmax / deno
+        var zflag: String = "-"
+        if msc >= 0.25:
+            zflag = "COH"
+        md = md + "| " + str(za) + " | " + str(zbin) + " | " + str((zbin as Float) * seghz0 * 100.0) + " | " + str((cf as Float) * seghz0 * 100.0) + " | " + str(msc * 1000.0) + " | " + zflag + " |\n"
+        za = za + 1
+    decay zsa
+    decay zsb
+    decay zsr
+    decay zsi
+    decay zre
+    decay zim
     decay xbuf
     decay nslot
     if cand_set == 1 and cand_path != "-":
@@ -1036,6 +1152,10 @@ fn main() -> Int with Unsafe:
         let jsc: Int = col_index(jhead, "seg")
         let jbc: Int = col_index(jhead, "bin")
         var newrows: String = ""
+        let lres0: Int = resonate_fire_count()
+        let lent0: Int = entangle_propagation_count()
+        let lpat0: Int = patch_journal_count()
+        let lpul0: Int = runtime_machine_pulse_total_fire_count()
         var matched_files: Int = 0
         if jtc >= 0 and jsc >= 0 and jbc >= 0:
             matched_files = 1
@@ -1067,6 +1187,8 @@ fn main() -> Int with Unsafe:
                                         rep = rep + 1
                         scanned = scanned + 1
                     rl = rl + 1
+            if rep >= 2:
+                let _lh: Int = ledger_hit(EvidenceLedger, rep)
             var tn: String = "Y2"
             if pt == 1:
                 tn = "Y4"
@@ -1079,6 +1201,8 @@ fn main() -> Int with Unsafe:
                 jtxt = jtxt + "\n"
         fs_write_text(journal_path, jtxt + newrows)
         println("fam_god: journal peaks=" + str(pk_n) + " path=" + journal_path)
+        os_sleep_millis(100)
+        println("fam_god: ledger repeats=" + str(EvidenceLedger.repeats) + " top=" + str(EvidenceLedger.top_repeat) + " trips=" + str(EvidenceLedger.trips) + " ticks=" + str(EvidenceLedger.ticks) + " dRes+" + str(resonate_fire_count() - lres0) + " dEnt+" + str(entangle_propagation_count() - lent0) + " dPat+" + str(patch_journal_count() - lpat0) + " dPul+" + str(runtime_machine_pulse_total_fire_count() - lpul0))
     println("fam_god: tbd score_x100=" + str(tbd_score_x) + " span=" + str(ntbd) + " drift_x100=" + str(tbd_drift) + " hit=" + str(tbd_hit))
     println("fam_god: timing ms scan=" + str(now_millis() - t_scan0))
     if out_path != "":
