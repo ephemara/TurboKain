@@ -1,0 +1,43 @@
+keyword	syntax	purpose	file_field	related
+world	world Name:\n    state field: Type = initial\n    surface kind => Component	Compiler-owned state authority with surface projections	WORLD.MD(state, surface, entangle, patch)
+world	Name	World identifier used in dotted paths (WorldName.field)	WORLD.MD	entangle, patch, resonate
+state	state field: Type = initial	Declares a typed state slot with compile-time validated initializer	WORLD.MD	patch, entangle, resonate
+surface native_ui	surface native_ui => Component	Native OS window with retained-mode UI (GDI + GPU backends)	WORLD_SURFACES.MD	component (18-slot vtable)
+surface shader_canvas	surface shader_canvas => FragmentName	Fullscreen GPU shader rendering (19-slot vtable + GPU extension)	WORLD_SURFACES.MD	shader fragment (SPIR-V embedding blocked)
+surface viewport3d	"surface viewport3d => ""name"""	3D viewport (parsed only, no codegen)	WORLD_SURFACES.MD	planned: shader_canvas alias
+surface web	surface web => Component	Web browser projection (parsed only, no codegen)	WORLD_SURFACES.MD	planned WASM backend
+world surface requirement	(no surface declaration)	World without surfaces is a valid pure-state authority	WORLD.MD	benchmark, CI, server-mode
+entangle	entangle WorldA.field <-> WorldB.field with single_writer	Bidirectional state coupling with single-writer policy	WORLD.MD, ENTANGLE.MD	patch, mirror
+single_writer	with single_writer	Only one world may write the coupled state; mirror writes rejected at compile time	WORLD.MD	entangle
+pub	[pub] world Name	Visibility modifier — world visible across modules	WORLD.MD	module system
+world runtime contract	RuntimeWorldContract { name, state_slots, surfaces }	Produced at compile time; includes state slot type names and initializers	WORLD.MD	realtime_app_bundle
+world LLVM struct	%WorldName = type { field_types }	World compiles to LLVM struct type with GEP field access	WORLD.MD	LLVM codegen
+world LLVM global	@__kain_world_WorldName	Zero-initialized LLVM global for world state	WORLD.MD	LLVM codegen
+world LLVM init guard	@__kain_world_init_flag_WorldName + @__kain_init_world_WorldName()	Lazy initialization guard called before first field access	WORLD.MD	LLVM codegen
+world interpreter	register_world_value() → Arc<RwLock<HashMap>>	Interpreter evaluates initializers and stores world values at load time	WORLD.MD	interpreter runtime
+world field read	WorldName.field	Resolved via init guard + GEP load in LLVM; read-lock HashMap in interpreter	WORLD.MD	field access
+world field write	WorldName.field = value	Entangle write permissions checked before mutation	WORLD.MD	entangle, patch
+world telemetry (field count)	runtime_world_field_count(name)	Returns number of state fields in a named world	WORLD.MD	std::runtime
+world telemetry (surface count)	runtime_world_surface_count(name)	Returns number of surfaces on a named world	WORLD.MD	std::runtime
+world telemetry (name by index)	runtime_world_name(index)	Returns world name by registered index	WORLD.MD	std::runtime
+authority+mirror pattern	world Authority: + world Mirror: + entangle ... single_writer	Canonical dual-world: authority owns mutable state + native_ui, mirror receives via entangle + web	WORLD.MD	entangle, surface
+single-world pattern	world App: + surface native_ui => App	Simple pattern — one world, one surface, all state in one place	WORLD.MD	small apps, prototypes
+multi-world decomposition	world Audio: + world Video: + world Input:	Split state across worlds by domain concern	WORLD.MD	independent domains
+experiment telemetry world	world with ptr<Int> buffers + scalar counters	World holds raw pointers for performance data + entangled scalars for display	WORLD.MD	selective entangle
+effects engine world	world with 30+ state slots organized by section	Complex parameter system with selective mirroring	WORLD.MD	domain-organized state
+frame state world	world with small fields updated every frame	Game loops, realtime systems, frame-driven state	WORLD.MD	fusion chain, pulse
+world + patch	patch fn(world: Authority, value) -> Int	Canonical mutation mechanism for world state; triggers entangle propagation	WORLD.MD	patch
+world + law	law signal_in_bounds(value) -> Bool	Laws constrain what values are valid for world fields; can read world state directly	WORLD.MD	law
+world + resonate	resonate Authority.field dampen Nms:	Reactive tripwire attached to world state slot, fires on mutation	WORLD.MD	resonate
+world + pulse	pulse tick_world every 16ms:	Pulse handlers read and write world state on a timed interval	WORLD.MD	pulse
+world + teleport	teleport shard from Authority to Mirror via bus	Destructive zero-copy cross-world value transfer	WORLD.MD	teleport
+world + orchestrate	orchestrate with world stage	Orchestrate pipelines use world operations as state endpoints	WORLD.MD	orchestrate
+world + actor	actor reads Mirror, writes Authority	Actors read mirrored state, write authority state	WORLD.MD	actor
+world + converge	converge using values from world state	Converge lanes select computation paths using world-derived values	WORLD.MD	converge
+world anti-pattern (global var)	var global instead of world	Global var has no surface, entangle, patch, law, or resonate	WORLD.MD	use world
+world anti-pattern (struct)	struct instead of world	Struct cannot entangle, has no LLVM init guard, no surface	WORLD.MD	use world
+world anti-pattern (duplicate surface)	two surfaces of same kind	Duplicate surface kinds rejected per world	WORLD.MD	unique surface kinds
+world anti-pattern (monolithic)	one world for everything	Decompose by domain for independent surfaces/entangles/resonates	WORLD.MD	decompose by domain
+world anti-pattern (no epoch)	world without epoch counter	Epoch counters make state transitions observable to downstream consumers	WORLD.MD	add epoch field
+world anti-pattern (bag of state)	inconsistent field grouping	Each world should represent a coherent state domain	WORLD.MD	domain decomposition
+world anti-pattern (no debug surface)	world without any visible surface	Add debug surface for runtime observation during development	WORLD.MD	add surface

@@ -1,0 +1,26 @@
+error	symptom	cause	fix	reference
+bazel not found on PATH	Script fails at step 0	Bazel not installed or not in PATH	"Install Bazelisk or Bazel; run ""where bazel"""	TROUBLESHOOTING:LLM Table
+repo root not found	Script fails with exit code 4	Running from wrong directory	cd X:/ then re-run; script needs MODULE.bazel or .git parent	TROUBLESHOOTING:LLM Table
+runtime manifest not found	Script fails with exit code 4	native_core_runtime.toml deleted or repo damaged	Check file at X:/runtime/native_core_runtime.toml; re-clone if needed	TROUBLESHOOTING:LLM Table
+runtime source directory not found	Script fails with exit code 4	runtime/native/src/ missing	git status / re-clone repo	TROUBLESHOOTING:LLM Table
+bazel build FAILED	Script exits code 1	C compilation error, cold server, or disk full	See Entry 3 (Bazel Cache) and Entry 7 (Cold Bazel Server)	TROUBLESHOOTING:Entry 3
+bazel info bazel-bin failed	Script exits code 4	Server not ready or build never succeeded	Run bazel build first; see Entry 7	TROUBLESHOOTING:Entry 7
+no .obj files found	Script exits code 2	Build produced no objects or wrong config	See Entry 1; check --config matches	TROUBLESHOOTING:Entry 1
+no librarian found	Script exits code 2	Neither llvm-lib nor lib.exe installed	Install LLVM (scoop install llvm) or VS Build Tools	TROUBLESHOOTING:Entry 1 Pitfalls
+librarian FAILED	Script exits code 2	llvm-lib or lib.exe crashed on .obj files	Try manually: llvm-lib /OUT:test.lib *.obj in obj dir	TROUBLESHOOTING:Entry 1
+file LOCKED	Script exits code 2, permission denied	A running process holds the .lib	Kill kain.exe/kn.exe/ui_test.exe; re-run update_runtime.py	TROUBLESHOOTING:Entry 6
+runtime library NOT found after archive	Script exits code 3	Archive step said OK but .lib didn't appear	Disk full? Permission error on .kain/lib/? Check dir X:/.kain/lib/	TROUBLESHOOTING:Entry 5
+smoke test compilation FAILED	Script exits code 3	.lib is corrupt or incompatible	Try --skip-build to re-archive; if still fails .obj files are bad	TROUBLESHOOTING:Entry 1
+manifest generator failed	Script exits code 4	TOML file has syntax errors	Validate TOML; try py -3 tools/bazel/sync_native_runtime_builds.py	TROUBLESHOOTING:LLM Table
+KAIN_RUNTIME_LIB_PATH: file not found	Warning at verification	Env var points to wrong location	See Entry 5 (Runtime Library Not Found by Compiler)	TROUBLESHOOTING:Entry 5
+unexpected error / BUG	Script exits code 9	Bug in the script itself	Report the traceback; script at scripts/python/update_runtime.py	TROUBLESHOOTING:LLM Table
+Stale runtime	Linking fails; old features missing	.c files changed but .lib wasn't rebuilt	Run py -3 scripts/python/update_runtime.py	TROUBLESHOOTING:Entry 1
+Missing C source files	lld-link: undefined symbol: X	New .c file not added to manifest	Add to native_core_runtime.toml; regen with --manifest	TROUBLESHOOTING:Entry 2
+Bazel cache stale	Bazel returns old objects after .c change	Disk cache has stale hash matching changed file	Run bazel build --disk_cache= or bazel clean --expunge	TROUBLESHOOTING:Entry 3
+kain_sync_binary doesn't sync runtime	Runtime still old after sync	MCP tool only syncs compiler binary, not runtime lib	Run py -3 scripts/python/update_runtime.py separately	TROUBLESHOOTING:Entry 4
+File lock preventing .lib sync	Permission denied: kain_runtime.lib	KAIN.exe/kn.exe process holds the file locked	taskkill /F /IM kain.exe; taskkill /F /IM kn.exe	TROUBLESHOOTING:Entry 6
+Bazel server cold/unresponsive	Commands hang 30-90 seconds; script times out	Bazel server needs warming or restart	Check server_pid; run bazel info; or bazel shutdown + restart	TROUBLESHOOTING:Entry 7
+Cold Bazel Server	update_runtime.py times out at build step	Bazel server is cold or uninitialized	bazel shutdown; bazel info --config=dev to warm up	TROUBLESHOOTING:Entry 7
+source uses runtime features but no library	Compile error; cannot find runtime lib	KAIN_HOME/lib/kain_runtime.lib missing	Set KAIN_RUNTIME_LIB_PATH or run update_runtime.py	TROUBLESHOOTING:Entry 5
+py -3 not found	Script cannot start	Python 3 not installed or not in PATH	Install Python 3; ensure python.exe in PATH	TROUBLESHOOTING:Entry 8
+Bazel path mangling in Git Bash	Build command fails with path error	Git Bash mangles //runtime:... into filesystem path	Use PowerShell or py -3 to run Bazel commands	TROUBLESHOOTING:Entry 1 Pitfalls

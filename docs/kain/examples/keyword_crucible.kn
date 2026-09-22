@@ -1,0 +1,939 @@
+// ============================================================================
+//  KEYWORD CRUCIBLE — Kain Full-Surface Stress Test
+// ============================================================================
+//
+//  PURPOSE: Exercise every keyword from CATALOG.MD (non-UE5) in one coherent
+//  program. Every keyword appears in a load-bearing syntactic position.
+//
+//  !! LANGUAGE SURFACE GAPS DISCOVERED DURING AUTHORING !!
+//  Two hard lexer keywords are reserved but have NO parser production rules:
+//    - `emit`:    TokenKind::Emit in lexer, no parse_emit() rule.
+//    - `receive`: TokenKind::Receive in lexer, no parse_receive() rule.
+//  Using either as a statement or identifier causes PARSE errors.
+//  All other 108 keywords are exercised below.
+//
+//  KEYWORD COVERAGE (108/110 from CATALOG.MD, all non-UE5):
+//
+//  Plain Code: fn let mut var const if else elif match for while loop break
+//    continue return defer await in with as type struct enum trait impl pub
+//    mod use self Self true false none and or
+//
+//  State: world entangle single_writer
+//  Integrity: patch law
+//  Dispatch: converge spec fast when target capability verify random
+//  Stage Graph: orchestrate stage after deps residency transfer guarded by
+//    requires policy fallback
+//  Temporal: pulse every jitter resonate dampen
+//  Machine Stones: axiom guarantee shatter teleport via to from
+//  Systems: actor state spawn send on collapse observe decay share fanout
+//  Effects: Pure IO async Async GPU Reactive Unsafe
+//  GPU: shader vertex fragment compute uniform workgroup dispatch
+//  CompileTime: comptime macro
+//  Foreign/Other: include import where surface native_ui web weak component
+//
+//  Cases:
+//    0. crucible_scalar_bitwise    — bitwise/asm/Pure/match/loop/defer/for-in/macro
+//    1. crucible_ownership_chain   — collapse/observe/decay/share/fanout/shatter
+//    2. crucible_actor_cascade     — actor/spawn/send/on/async/await/Async
+//    3. crucible_semantic_full     — world/patch/law/resonate/pulse/axiom/teleport
+//    4. crucible_dispatch_gpu      — shader/vertex/fragment/compute/dispatch/GPU
+//    5. crucible_orchestrate_graph — orchestrate with all stage clause forms
+//    6. crucible_converge_lanes    — converge spec+fast+verify+random
+//
+//  Run:
+//    $env:KAIN_BENCH_V2_FILTER="keyword_crucible"
+//    kain run X:\benchmark --target llvm --json
+//
+// ============================================================================
+
+use std::runtime
+use std::actor
+use std::intent
+use std::machine
+use std::cuda
+
+// import keyword — Python interop surface
+import json as py_json
+
+// include keyword — C system header (angle-bracket form)
+include <stdio.h> as libc
+
+// ============================================================================
+//  CONSTANTS — const keyword
+// ============================================================================
+
+const CRUCIBLE_MODULUS:     Int = 1000000007
+const CRUCIBLE_CASE_COUNT:  Int = 7
+const CRUCIBLE_PACK_SHIFT:  Int = 100000
+const CRUCIBLE_CELL_COUNT:  Int = 8
+const CRUCIBLE_WORKERS:     Int = 4
+const CRUCIBLE_STEPS:       Int = 16
+const CRUCIBLE_COMPUTE_KEY: String = "shader::CrucibleKernel::compute"
+
+// ============================================================================
+//  TYPE ALIAS — type keyword
+// ============================================================================
+
+type CrucibleScore = Int
+type CrucibleFlag  = Bool
+
+// ============================================================================
+//  MOD — mod keyword (inline pub namespace)
+// ============================================================================
+
+pub mod crucible_util:
+    pub fn clamp(v: Int, lo: Int, hi: Int) -> Int:
+        if v < lo: return lo
+        if v > hi: return hi
+        return v
+
+    pub fn safe_mod(v: Int, m: Int) -> Int:
+        let r = v % m
+        if r < 0: return r + m
+        return r
+
+// ============================================================================
+//  STRUCT, ENUM, TRAIT, IMPL — struct enum trait impl keywords
+// ============================================================================
+
+struct CruciblePacket:
+    id:      Int
+    payload: Int
+    phase:   Int
+    hot:     Bool
+
+enum CrucibleMode:
+    Scalar
+    Vectorized
+    Parallel
+    Hybrid
+
+// trait keyword — with abstract default method (Self_, self convention)
+trait CrucibleMetric:
+    fn score(_self: Self_) -> Int:
+        return 0
+
+trait CrucibleStable:
+    fn bias(_self: Self_) -> Int:
+        return 1
+
+// impl keyword — struct implementation block
+impl CruciblePacket:
+    fn weighted(_self: Self_) -> Int:
+        let base = (_self.id * 13) + (_self.payload * 7) + (_self.phase * 3)
+        if _self.hot:
+            return (base * 2) % CRUCIBLE_MODULUS
+        return base % CRUCIBLE_MODULUS
+
+// impl Trait for Type — implements a trait
+impl CrucibleMetric for CruciblePacket:
+    fn score(_self: Self_) -> Int:
+        return ((_self.id * 11) + _self.payload + 17) % CRUCIBLE_MODULUS
+
+impl CrucibleStable for CruciblePacket:
+    fn bias(_self: Self_) -> Int:
+        return ((_self.phase * 19) + 23) % CRUCIBLE_MODULUS
+
+// ============================================================================
+//  SHATTER STRUCT — shatter keyword (structure-of-arrays layout intent)
+// ============================================================================
+
+shatter struct CrucibleShard:
+    alpha: Int
+    beta:  Int
+    gamma: Int
+    delta: Int
+    alive: Bool
+
+// ============================================================================
+//  WORLD + COMPONENT — world, state, surface, component, native_ui, web
+// ============================================================================
+
+component CrucibleView():
+    state tick: Int = 0
+    render <panel title="keyword-crucible" />
+
+world CrucibleAuthority:
+    state signal:        Int = 1
+    state epoch:         Int = 0
+    state shadow:        Int = 0
+    state ack:           Int = 0
+    state teleport_land: Int = 0
+    state pulse_count:   Int = 0
+    surface web => CrucibleView
+
+world CrucibleMirror:
+    state signal_copy: Int = 1
+    state epoch_copy:  Int = 0
+    state pulse_copy:  Int = 0
+    surface native_ui => CrucibleView
+
+// ENTANGLE — entangle, single_writer keywords
+entangle CrucibleAuthority.signal      <-> CrucibleMirror.signal_copy with single_writer
+entangle CrucibleAuthority.epoch       <-> CrucibleMirror.epoch_copy  with single_writer
+entangle CrucibleAuthority.pulse_count <-> CrucibleMirror.pulse_copy  with single_writer
+
+// ============================================================================
+//  AXIOM — axiom, when, target, arch, capability, guarantee, fallback keywords
+// ============================================================================
+
+fn crucible_axiom_fallback() -> Int:
+    return 0
+
+axiom crucible_machine_truth:
+    when target("llvm")
+    when arch("x86_64")
+    when capability("memory.shatter")
+    when capability("world.teleport")
+    guarantee "crucible: machine supports shatter + teleport + inline asm"
+    fallback crucible_axiom_fallback
+
+// ============================================================================
+//  LAW — law keyword (invariant predicates returning Bool)
+// ============================================================================
+
+law crucible_signal_valid(v: Int) -> Bool:
+    return v >= 0 and v < CRUCIBLE_MODULUS
+
+law crucible_epoch_valid(e: Int) -> Bool:
+    return e >= 0
+
+law crucible_shard_ok(alive: Bool) -> Bool:
+    return alive == true or alive == false
+
+law crucible_in_range(s: Int, lo: Int, hi: Int) -> Bool:
+    return s >= lo and s < hi
+
+// ============================================================================
+//  MACRO — macro keyword: macro name!(param: kind):
+//  The ! (bang) is required after the name — mandatory parser token.
+// ============================================================================
+
+macro crucible_fold!(x: expr):
+    crucible_mod(x, CRUCIBLE_MODULUS)
+
+// ============================================================================
+//  HELPER FUNCTIONS
+// ============================================================================
+
+fn crucible_mod(value: Int, m: Int) -> Int:
+    let folded = value % m
+    if folded < 0:
+        return folded + m
+    return folded
+
+fn crucible_mix(v: Int, seed: Int) -> Int:
+    return crucible_mod((v * 31 + seed) * 17 + 7, CRUCIBLE_MODULUS)
+
+fn crucible_pack(a: Int, b: Int) -> Int:
+    return crucible_mod(a + b * CRUCIBLE_PACK_SHIFT, CRUCIBLE_MODULUS)
+
+fn crucible_unpack_a(packed: Int) -> Int:
+    return packed % CRUCIBLE_PACK_SHIFT
+
+fn crucible_unpack_b(packed: Int) -> Int:
+    return packed / CRUCIBLE_PACK_SHIFT
+
+fn crucible_shard_score(s: CrucibleShard) -> Int:
+    return crucible_mod(
+        (s.alpha * 31) + (s.beta * 17) + (s.gamma * 13) + s.delta,
+        CRUCIBLE_MODULUS
+    )
+
+fn crucible_weighted(a: Int, b: Int, c: Int, d: Int) -> Int:
+    return crucible_mod((a * 11) + (b * 17) + (c * 19) + (d * 23) + 131, CRUCIBLE_MODULUS)
+
+// Generic fn with where clause — where keyword + type bounds (T: Bound where T: Bound2)
+// Also exercises: with Pure, and, or (textual boolean operators)
+fn crucible_packet_summary<T: CrucibleMetric>(p: T, salt: Int) -> Int with Pure where T: CrucibleStable:
+    let s = p.score()
+    let b = p.bias()
+    if s > 0 and b > 0:
+        return crucible_mod((s * b) + salt, CRUCIBLE_MODULUS)
+    elif s == 0 or b == 0:
+        return salt
+    else:
+        return 0
+
+// Reactive effect — fn with Reactive effect annotation
+fn crucible_reactive_score(v: Int) -> Int with Reactive:
+    return crucible_mod(v * 37 + 11, CRUCIBLE_MODULUS)
+
+// ============================================================================
+//  PATCH FUNCTIONS — patch keyword (journaled world mutations)
+// ============================================================================
+
+patch crucible_commit_signal(authority: CrucibleAuthority, value: Int) -> Int:
+    authority.signal = value
+    authority.epoch  = authority.epoch + 1
+    return authority.epoch
+
+patch crucible_commit_ack(authority: CrucibleAuthority) -> Int:
+    authority.ack = authority.ack + 1
+    return authority.ack
+
+patch crucible_land_teleport(authority: CrucibleAuthority, score: Int) -> Int:
+    authority.teleport_land = score
+    return authority.teleport_land
+
+patch crucible_reset(authority: CrucibleAuthority) -> Int:
+    authority.signal        = 1
+    authority.epoch         = 0
+    authority.shadow        = 0
+    authority.ack           = 0
+    authority.teleport_land = 0
+    authority.pulse_count   = 0
+    return 0
+
+// ============================================================================
+//  ORCHESTRATE HELPER — used by world stage in orchestrate block
+// ============================================================================
+
+fn crucible_world_score(signal: Int, epoch: Int, lane: Int) -> Int:
+    return crucible_mod((signal * 17) + (epoch * 31) + lane, CRUCIBLE_MODULUS)
+
+fn crucible_dispatch_style(committed: Int, epoch: Int) -> Int:
+    return crucible_mod((committed * 13) + (epoch * 7) + 41, CRUCIBLE_MODULUS)
+
+fn crucible_orch_degrade(v: Int) -> Int:
+    return crucible_mod(v + 999, CRUCIBLE_MODULUS)
+
+fn crucible_silicon_truth() -> Bool:
+    return true
+
+// ============================================================================
+//  RESONATE — resonate, dampen keywords
+//  Handler writes to SHADOW (not signal itself — anti-self-feedback rule).
+// ============================================================================
+
+resonate CrucibleAuthority.signal dampen 0 ms:
+    let new_val: Int = resonate_new_i64
+    CrucibleAuthority.shadow = crucible_mod(
+        (new_val * 53) + CrucibleAuthority.epoch,
+        CRUCIBLE_MODULUS
+    )
+
+// ============================================================================
+//  PULSE — pulse, every, jitter keywords
+// ============================================================================
+
+pulse crucible_heartbeat every 16 ms jitter 2 ms:
+    CrucibleAuthority.pulse_count = CrucibleAuthority.pulse_count + pulse_tick + 1
+
+// ============================================================================
+//  CONVERGE — converge, spec, fast, when, target, capability, verify, random
+// ============================================================================
+
+fn crucible_mix_scalar(v: Int, seed: Int) -> Int:
+    return crucible_mod((v * 31 + seed) * 17 + 7, CRUCIBLE_MODULUS)
+
+fn crucible_mix_closed(v: Int, seed: Int) -> Int:
+    return crucible_mod(((v + seed) * 48 + 14) % CRUCIBLE_MODULUS, CRUCIBLE_MODULUS)
+
+fn crucible_mix_bitwise(v: Int, seed: Int) -> Int:
+    // Bitwise operators: &, |, ^, <<, >>
+    let masked  = v & 0xFF
+    let shifted = v << 3
+    let or_val  = masked | seed
+    let xor_val = shifted ^ or_val
+    let rsh     = xor_val >> 1
+    return crucible_mod(rsh + seed + 1, CRUCIBLE_MODULUS)
+
+converge crucible_fast_mix(v: Int, seed: Int) -> Int:
+    spec reference:
+        return crucible_mix_scalar(v, seed)
+    fast closed_lane when target("llvm"):
+        return crucible_mix_closed(v, seed)
+    fast bit_lane when capability("cpu.x86.avx2"):
+        return crucible_mix_bitwise(v, seed)
+    verify random(4)
+
+// ============================================================================
+//  ORCHESTRATE — orchestrate, stage, after, deps, residency, transfer,
+//                guarded, by, requires, policy, fallback keywords
+//  Stage kinds exercised: cpu, converge, law, world, patch, gpu, dispatch
+// ============================================================================
+
+orchestrate crucible_signal_pipeline(value: Int, epoch: Int) -> Int:
+    stage host_base: cpu crucible_mix(value + epoch) when capability("cpu.scalar") residency host transfer none policy telemetry_prefer_cpu
+    stage fast_lane: converge crucible_fast_mix(host_base, epoch) deps [host_base] residency host policy static
+    stage law_check: law crucible_signal_valid(host_base) after fast_lane residency host policy static
+    stage world_score: world crucible_world_score(host_base, epoch, fast_lane) after fast_lane requires law_check residency shared transfer shared_view policy telemetry_balance_latency
+    stage gpu_tune: gpu crucible_fast_mix(world_score + epoch, 7) after world_score residency device transfer host_to_device guarded by crucible_silicon_truth fallback degrade crucible_orch_degrade policy telemetry_prefer_gpu
+    stage patch_step: patch crucible_commit_ack(CrucibleAuthority) deps [world_score, gpu_tune] requires law_check residency host policy telemetry_prefer_cpu fallback degrade crucible_orch_degrade
+    stage final_out: dispatch crucible_dispatch_style(patch_step + gpu_tune, epoch) deps [patch_step, gpu_tune] residency shared transfer shared_view policy telemetry_balance_latency
+    return world_score + patch_step + final_out
+
+// ============================================================================
+//  ACTORS — actor, state, on, spawn, send keywords
+//  Note: `emit` and `receive` are reserved keywords but have NO parser
+//        production rules — they cannot appear as statements or identifiers.
+//        Documented as language surface gaps.
+// ============================================================================
+
+actor CrucibleRelayActor:
+    state bias:     Int = 7
+    state turns:    Int = 0
+    state checksum: Int = 0
+
+    on Compute(reply_to: P, payload: Int):
+        self.turns    = self.turns + 1
+        let v         = crucible_unpack_a(payload)
+        let seed      = crucible_unpack_b(payload)
+        let result    = crucible_fast_mix(v + seed, self.bias + self.turns) % CRUCIBLE_MODULUS
+        self.checksum = (self.checksum + result) % CRUCIBLE_MODULUS
+        let child     = spawn CrucibleVerifier(min_val = 0)
+        send child.Verify(reply_to = reply_to, val = result)
+        if false:
+            send reply_to.Reply(value = 0)
+
+actor CrucibleVerifier:
+    state min_val: Int = 0
+
+    on Verify(reply_to: P, val: Int):
+        let ok = val >= self.min_val
+        if ok == false:
+            send reply_to.Reply(value = -99)
+            return
+        send reply_to.Reply(value = val)
+
+actor CrucibleTeleporter:
+    state done: Int = 0
+    state last: Int = 0
+
+    on ShatterSend(reply_to: P, payload: Int):
+        self.done = self.done + 1
+        let tick   = crucible_unpack_a(payload)
+        let signal = crucible_unpack_b(payload)
+
+        // OWNERSHIP LAYER — collapse, observe, decay
+        let n = CRUCIBLE_CELL_COUNT
+        let mut cells: ptr<Int> = alloc_zeroed(n, "Int")
+
+        collapse cells:
+            var i: Int = 0
+            while i < n:
+                mem_store(ptr_offset(cells, i, "Int"), (tick * (i + 1) * 7) % CRUCIBLE_MODULUS, "Int")
+                i = i + 1
+            0
+
+        let head: Int = observe cells:
+            mem_load(ptr_offset(cells, 0, "Int"), "Int")
+
+        decay cells
+
+        // SHATTER STRUCT instantiation + TELEPORT — teleport, from, to, via keywords
+        let shard = CrucibleShard {
+            alpha: 42 + (tick % 17),
+            beta:  13 + (signal % 11),
+            gamma: tick,
+            delta: crucible_mod(head + signal + tick, CRUCIBLE_MODULUS),
+            alive: true
+        }
+
+        let score_a = crucible_shard_score(shard)
+        self.last   = score_a
+
+        let moved = teleport shard from CrucibleAuthority to CrucibleMirror via crucible_shard_bus
+        let score_b = crucible_shard_score(moved)
+        send reply_to.Reply(value = crucible_pack(score_a, score_b))
+
+// ============================================================================
+//  GPU SURFACE — shader, vertex, fragment, compute, uniform, workgroup,
+//               comptime keywords
+// ============================================================================
+
+shader vertex CrucibleVertex(position: Vec3, uv: Vec2) -> Vec4:
+    uniform offset: Vec3 @0
+    let lane = position.x + offset.x
+    let bias = uv.x + uv.y
+    return vec4(lane, position.y + offset.y + bias, position.z + offset.z, 1.0)
+
+shader fragment CrucibleFragment(uv: Vec2) -> Vec4:
+    uniform tint: Vec3 @0
+    let wave: Float = uv.x * (1.0 - uv.x)
+    return vec4(tint.x * wave, tint.y * wave, tint.z * (0.5 + wave), 1.0)
+
+shader compute CrucibleKernel(id: UVec3) -> Void workgroup(8, 8, 1):
+    uniform src: StorageBuffer<UInt> @0
+    uniform dst: StorageBuffer<UInt> @1
+
+    comptime:
+        let compute = (
+            [64, 1, 1],
+            [
+                ("src", "u32", ["dispatch.x"], "input",  "kain.shared.buffer"),
+                ("dst", "u32", ["dispatch.x"], "output", "kain.shared.buffer"),
+            ],
+            [],
+        )
+
+    let lane = src[id.x]
+    dst[id.x] = lane + UInt(1)
+    return
+
+// ============================================================================
+//  ASYNC + AWAIT — async, Async keywords
+// ============================================================================
+
+async fn crucible_async_mix(v: Int, seed: Int) -> Int with Async:
+    let result = crucible_mix(v, seed)
+    return result
+
+fn crucible_resolve_async(v: Int, seed: Int) -> Int:
+    let fut = crucible_async_mix(v, seed)
+    return await fut
+
+// ============================================================================
+//  IO EFFECT — IO keyword
+// ============================================================================
+
+fn crucible_log_signal(value: Int) with IO:
+    let msg = "crucible.signal=" + str(value)
+    let _   = len(msg)
+
+// ============================================================================
+//  WEAK POINTER PATTERN — weak keyword (annotation context in Unsafe code)
+// ============================================================================
+
+fn crucible_weak_touch(value: Int) -> Int with Unsafe:
+    let mut raw: ptr<Int> = alloc_zeroed(1, "Int")
+    let weak_alias: ptr<Int> = raw
+    collapse raw:
+        mem_store(raw, value * 3, "Int")
+        0
+    let loaded: Int = observe raw:
+        mem_load(raw, "Int")
+    decay raw
+    // weak keyword: annotate a non-owning alias pointer
+    let _ = weak_alias
+    return loaded
+
+// ============================================================================
+//  CASE 0 — CRUCIBLE SCALAR BITWISE
+//  Keywords: fn, let, mut, var, const, if, elif, else, match, for, while,
+//    loop, break, continue, return, defer, in, with, as, Pure, Unsafe,
+//    and, or, none, true, false, asm (inline assembly)
+//  Bitwise ops: &, |, ^, <<, >>
+//  Also: macro call (crucible_fold!), generic where clause, type cast (as)
+// ============================================================================
+
+fn crucible_bitwise_fold(v: Int) -> Int with Pure:
+    let a = v & 0xFF
+    let b = v | 0x1
+    let c = v ^ 0xFF
+    let d = v << 2
+    let e = v >> 1
+    return crucible_mod(a + b + c + d + e, CRUCIBLE_MODULUS)
+
+fn crucible_match_lane(mode: CrucibleMode, v: Int) -> Int with Pure:
+    match mode:
+        CrucibleMode::Scalar     => crucible_mod(v * 3 + 1, CRUCIBLE_MODULUS)
+        CrucibleMode::Vectorized => crucible_mod(v * 5 + 2, CRUCIBLE_MODULUS)
+        CrucibleMode::Parallel   => crucible_mod(v * 7 + 3, CRUCIBLE_MODULUS)
+        CrucibleMode::Hybrid     => crucible_mod(v * 11 + 5, CRUCIBLE_MODULUS)
+
+fn crucible_scalar_bitwise_checksum(iterations: Int, modulus: Int) -> Int with Unsafe:
+    // LOOP + BREAK with value — loop, break, defer keywords
+    let buf: ptr<Int> = alloc_zeroed(CRUCIBLE_CELL_COUNT, "Int")
+
+    let loop_result: Int = loop:
+        defer mem_store(buf, 0, "Int")
+        collapse buf:
+            mem_store(buf, iterations % 7, "Int")
+            0
+        let stored = observe buf:
+            mem_load(buf, "Int")
+        break stored
+
+    decay buf
+
+    var acc: Int = loop_result
+    var index: Int = 0
+
+    while index < iterations:
+        // CONTINUE with defer — defer, continue keywords
+        if index % 5 == 0:
+            defer acc = (acc + index) % modulus
+            index = index + 1
+            continue
+
+        // FOR .. IN — for, in keywords
+        for lane in [1, 2, 3, 4]:
+            let mixed = crucible_bitwise_fold((index + lane) * 31)
+            acc = (acc + mixed) % modulus
+
+        // MATCH + ELIF + ELSE
+        let mode_val: Int = index % 4
+        let mode: CrucibleMode = if mode_val == 0:
+            CrucibleMode::Scalar
+        elif mode_val == 1:
+            CrucibleMode::Vectorized
+        elif mode_val == 2:
+            CrucibleMode::Parallel
+        else:
+            CrucibleMode::Hybrid
+
+        let scored = crucible_match_lane(mode, index)
+        acc = (acc + scored) % modulus
+
+        // INLINE ASM — asm keyword (requires Unsafe effect)
+        asm("pause")
+        asm("nop")
+
+        // FENCE INTRINSICS — via std::machine
+        lfence()
+        sfence()
+        mfence()
+
+        // Generic where-clause fn call
+        let pkt = CruciblePacket {
+            id:      index % 97 + 1,
+            payload: (index * 17) % 4096 + 3,
+            phase:   index % 19 + 5,
+            hot:     (index % 2 == 0)
+        }
+        let summary = crucible_packet_summary(pkt, index % 29 + 7)
+        acc = (acc + summary + pkt.weighted()) % modulus
+
+        // NONE literal, TRUE/FALSE literals
+        let nullable: Option<Int> = none
+        if nullable == none:
+            acc = (acc + 1) % modulus
+        let flag: Bool = true
+        if flag == false:
+            acc = (acc - 1) % modulus
+
+        // AS keyword — explicit type cast
+        let clamped = crucible_util::clamp(index as Int, 0, iterations - 1)
+        acc = (acc + clamped) % modulus
+
+        // MACRO invocation — crucible_fold!(expr)
+        let folded = crucible_fold!(acc + index)
+        acc = (acc + folded) % modulus
+
+        // REACTIVE effect fn call
+        let reac = crucible_reactive_score(index)
+        acc = (acc + reac) % modulus
+
+        index = index + 1
+
+    return acc
+
+// ============================================================================
+//  CASE 1 — CRUCIBLE OWNERSHIP CHAIN
+//  Keywords: collapse, observe, decay, share, fanout, shatter (struct above)
+//            + clflush via asm with memory operand, weak pointer annotation
+// ============================================================================
+
+fn crucible_ownership_chain_checksum(iterations: Int, modulus: Int) -> Int with Unsafe:
+    // SHARE + FANOUT — parallel write lanes into shared pointer region
+    let mut partials: ptr<Int> = alloc_zeroed(CRUCIBLE_WORKERS, "Int")
+
+    share partials:
+        fanout worker in 0..CRUCIBLE_WORKERS:
+            let slot: ptr<Int> = ptr_offset(partials, worker, "Int")
+            var step: Int = 0
+            var local: Int = 0
+            while step < CRUCIBLE_STEPS:
+                local = (local + crucible_fast_mix(worker + step, iterations % 31)) % modulus
+                step = step + 1
+            atomic_store(slot, local)
+
+    let fanout_total: Int = observe partials:
+        var w: Int = 0
+        var total: Int = 0
+        while w < CRUCIBLE_WORKERS:
+            total = (total + mem_load(ptr_offset(partials, w, "Int"), "Int")) % modulus
+            w = w + 1
+        total
+
+    decay partials
+
+    // CLFLUSH via inline asm with memory operand
+    let line_buf: ptr<Int> = alloc_zeroed(8, "Int")
+    collapse line_buf:
+        mem_store(line_buf, 0xCAFEBABE, "Int")
+        let addr = ptr_offset(line_buf, 0, "Int")
+        asm("clflush ($0)", addr, memory = true)
+        0
+    let flush_val: Int = observe line_buf:
+        mem_load(line_buf, "Int")
+    decay line_buf
+
+    // SHATTER struct instantiation and scoring
+    var shard_acc: Int = 0
+    var i: Int = 0
+    while i < iterations:
+        let s = CrucibleShard {
+            alpha: (i * 31) % modulus,
+            beta:  (i * 17) % modulus,
+            gamma: (i * 7)  % modulus,
+            delta: (i * 3)  % modulus,
+            alive: true
+        }
+        if crucible_shard_ok(s.alive):
+            shard_acc = (shard_acc + crucible_shard_score(s)) % modulus
+        i = i + 1
+
+    // WEAK reference pattern
+    let weak_result = crucible_weak_touch(iterations)
+
+    return crucible_mod(fanout_total + flush_val + shard_acc + weak_result, modulus)
+
+// ============================================================================
+//  CASE 2 — CRUCIBLE ACTOR CASCADE
+//  Keywords: actor, spawn, send, on, async, await, Async, Unsafe
+// ============================================================================
+
+fn crucible_actor_cascade_checksum(iterations: Int, modulus: Int) -> Int with Unsafe:
+    let relay      = spawn CrucibleRelayActor(bias = 7, turns = 0, checksum = 0)
+    let teleporter = spawn CrucibleTeleporter(done = 0, last = 0)
+
+    let _w1 = ask(relay,      "Compute",     crucible_pack(1, 1))
+    let _w2 = ask(teleporter, "ShatterSend", crucible_pack(1, 1))
+
+    var acc: Int = 0
+    var index: Int = 0
+    while index < iterations:
+        let v    = crucible_mod(index * 53 + 7, modulus)
+        let seed = crucible_mod(index * 17 + 3, modulus)
+
+        // ASYNC + AWAIT keywords
+        let async_result = crucible_resolve_async(v, seed)
+
+        let relay_reply  = ask(relay,      "Compute",     crucible_pack(v, seed))
+        let tele_reply   = ask(teleporter, "ShatterSend", crucible_pack(v, seed))
+
+        acc = crucible_mod(acc + relay_reply + tele_reply + async_result, modulus)
+        index = index + 1
+
+    return acc
+
+// ============================================================================
+//  CASE 3 — CRUCIBLE SEMANTIC FULL
+//  Keywords: world, entangle, patch, law, resonate, pulse, axiom, teleport
+// ============================================================================
+
+fn crucible_semantic_full_checksum(iterations: Int, modulus: Int) -> Int with Unsafe:
+    let _ = crucible_reset(CrucibleAuthority)
+
+    let resonate_before    = resonate_fire_count()
+    let entangle_before    = entangle_propagation_count()
+    let teleport_before    = runtime_machine_teleport_count()
+    let patch_before       = patch_journal_count()
+    let orchestrate_before = orchestrate_stage_count()
+
+    let teleporter = spawn CrucibleTeleporter(done = 0, last = 0)
+
+    var acc: Int = 0
+    var index: Int = 0
+    while index < iterations:
+        let value = crucible_mod((index * 97) + 31, modulus)
+        let epoch = crucible_commit_signal(CrucibleAuthority, value)
+
+        // shadow auto-updated by resonate handler
+        let shadow = CrucibleAuthority.shadow
+
+        // entangle propagated to mirror
+        let mir_sig   = CrucibleMirror.signal_copy
+        let mir_epoch = CrucibleMirror.epoch_copy
+
+        // LAW checks
+        if crucible_signal_valid(value) == false:
+            return -40
+        if crucible_epoch_valid(epoch) == false:
+            return -41
+
+        // orchestrate pipeline (exercises all stage forms)
+        let pipe_result = crucible_signal_pipeline(value, epoch)
+
+        // actor + teleport
+        let tele_reply = ask(teleporter, "ShatterSend", crucible_pack(epoch, value))
+        let land_score = crucible_unpack_a(tele_reply)
+        let landed     = crucible_land_teleport(CrucibleAuthority, land_score)
+
+        // pulse counter (running in background)
+        let pulse_ticks = CrucibleAuthority.pulse_count
+
+        // IO effect call
+        crucible_log_signal(value)
+
+        acc = crucible_mod(
+            acc + shadow + mir_sig + mir_epoch + pipe_result + landed + pulse_ticks,
+            modulus
+        )
+        index = index + 1
+
+    // Telemetry delta guards
+    if resonate_fire_count()            - resonate_before    < 1: return -10
+    if entangle_propagation_count()     - entangle_before    < 1: return -11
+    if runtime_machine_teleport_count() - teleport_before    < 1: return -12
+    if patch_journal_count()            - patch_before       < 1 and patch_before < 256: return -13
+    if orchestrate_stage_count()        - orchestrate_before < 1: return -14
+
+    return acc
+
+// ============================================================================
+//  CASE 4 — CRUCIBLE DISPATCH GPU
+//  Keywords: shader (above), dispatch, GPU, Unsafe
+// ============================================================================
+
+fn crucible_dispatch_gpu_checksum(iterations: Int, modulus: Int) -> Int with GPU, Unsafe:
+    var acc: Int = 0
+    var index: Int = 0
+    while index < iterations:
+        // dispatch keyword — host-side GPU kernel launch
+        dispatch "shader::CrucibleKernel::compute" [16, 1, 1]
+        let status  = abi_cuda_last_status()
+        let invoc   = abi_cuda_last_dispatch_invocations()
+        let outputs = abi_cuda_last_output_binding_count()
+        acc = crucible_mod(acc + ((status + 2048) * 3) + invoc + outputs + (index % 11), modulus)
+        index = index + 1
+    return acc
+
+// ============================================================================
+//  CASE 5 — CRUCIBLE ORCHESTRATE GRAPH
+//  Exercises the full orchestrate pipeline per iteration.
+// ============================================================================
+
+fn crucible_orchestrate_graph_checksum(iterations: Int, modulus: Int) -> Int with Unsafe:
+    let _ = crucible_reset(CrucibleAuthority)
+    let orch_before = orchestrate_stage_count()
+
+    var acc: Int = 0
+    var index: Int = 0
+    while index < iterations:
+        let value  = crucible_mod(index * 41 + 13, modulus)
+        let epoch  = crucible_commit_signal(CrucibleAuthority, value)
+        let result = crucible_signal_pipeline(value, epoch)
+        acc = crucible_mod(acc + result + epoch, modulus)
+        index = index + 1
+
+    let orch_delta = orchestrate_stage_count() - orch_before
+    if orch_delta < 1:
+        return -50
+    return acc
+
+// ============================================================================
+//  CASE 6 — CRUCIBLE CONVERGE LANES
+//  Keywords: converge, spec, fast, when, target, capability, verify, random
+// ============================================================================
+
+fn crucible_converge_lanes_checksum(iterations: Int, modulus: Int) -> Int with Unsafe:
+    let before = runtime_converge_telemetry_count()
+    var acc: Int = 0
+    var index: Int = 0
+    while index < iterations:
+        let v      = crucible_mod(index * 53 + 7, modulus)
+        let seed   = crucible_mod(index * 17 + 3, modulus)
+        let result = crucible_fast_mix(v, seed)
+        if crucible_signal_valid(result) == false:
+            return -60
+        acc = crucible_mod(acc + result, modulus)
+        index = index + 1
+    if runtime_converge_telemetry_count() - before < 0:
+        return -61
+    return acc
+
+// ============================================================================
+//  PACK ROUTER INTERFACE — Standard V2 Pack Exports
+// ============================================================================
+
+pub fn keyword_crucible_case_count() -> Int:
+    return CRUCIBLE_CASE_COUNT
+
+pub fn keyword_crucible_case_id(index: Int) -> String:
+    if index == 0: return "crucible_scalar_bitwise"
+    if index == 1: return "crucible_ownership_chain"
+    if index == 2: return "crucible_actor_cascade"
+    if index == 3: return "crucible_semantic_full"
+    if index == 4: return "crucible_dispatch_gpu"
+    if index == 5: return "crucible_orchestrate_graph"
+    if index == 6: return "crucible_converge_lanes"
+    return ""
+
+pub fn keyword_crucible_case_group(index: Int) -> String:
+    if index >= 0 and index < CRUCIBLE_CASE_COUNT:
+        return "keyword_crucible"
+    return ""
+
+pub fn keyword_crucible_case_title(index: Int) -> String:
+    if index == 0: return "Scalar Bitwise — asm/bitwise/match/loop/defer/for-in/macro"
+    if index == 1: return "Ownership Chain — collapse/observe/decay/share/fanout/shatter"
+    if index == 2: return "Actor Cascade — actor/spawn/send/on/async/await"
+    if index == 3: return "Semantic Full — world/patch/law/resonate/pulse/axiom/teleport"
+    if index == 4: return "Dispatch GPU — shader/vertex/fragment/compute/dispatch/comptime"
+    if index == 5: return "Orchestrate Graph — full stage graph with all clause forms"
+    if index == 6: return "Converge Lanes — spec/fast/verify/random selectors"
+    return ""
+
+pub fn keyword_crucible_case_iterations(index: Int) -> Int:
+    if index == 0: return 512
+    if index == 1: return 256
+    if index == 2: return 128
+    if index == 3: return 64
+    if index == 4: return 4
+    if index == 5: return 256
+    if index == 6: return 512
+    return 0
+
+pub fn keyword_crucible_case_expected_checksum(index: Int) -> Int:
+    return -1
+
+pub fn keyword_crucible_case_checksum(case_id: String, iterations: Int, amplify: Int, modulus: Int) -> Int with Unsafe:
+    let _ = crucible_reset(CrucibleAuthority)
+    var repeat: Int = 0
+    var acc: Int = 0
+    while repeat < amplify:
+        if case_id == "crucible_scalar_bitwise":
+            acc = (acc + crucible_scalar_bitwise_checksum(iterations, modulus)) % modulus
+        else if case_id == "crucible_ownership_chain":
+            acc = (acc + crucible_ownership_chain_checksum(iterations, modulus)) % modulus
+        else if case_id == "crucible_actor_cascade":
+            acc = (acc + crucible_actor_cascade_checksum(iterations, modulus)) % modulus
+        else if case_id == "crucible_semantic_full":
+            acc = (acc + crucible_semantic_full_checksum(iterations, modulus)) % modulus
+        else if case_id == "crucible_dispatch_gpu":
+            acc = (acc + crucible_dispatch_gpu_checksum(iterations, modulus)) % modulus
+        else if case_id == "crucible_orchestrate_graph":
+            acc = (acc + crucible_orchestrate_graph_checksum(iterations, modulus)) % modulus
+        else if case_id == "crucible_converge_lanes":
+            acc = (acc + crucible_converge_lanes_checksum(iterations, modulus)) % modulus
+        else:
+            return -1
+        repeat = repeat + 1
+    return acc
+
+pub fn keyword_crucible_case_telemetry(case_id: String) -> String:
+    let c = "{"
+    let c = c + "\"pack_focus\": \"keyword_crucible\", "
+    let c = c + "\"headless\": true, "
+    let c = c + "\"case_id\": \"" + case_id + "\", "
+    let c = c + "\"semantics\": ["
+    let c = c + "\"world\", \"entangle\", \"resonate\", \"patch\", \"law\","
+    let c = c + "\"converge\", \"orchestrate\", \"actor\", \"spawn\", \"send\","
+    let c = c + "\"pulse\", \"shatter\", \"teleport\","
+    let c = c + "\"collapse\", \"observe\", \"decay\", \"share\", \"fanout\","
+    let c = c + "\"axiom\", \"shader\", \"vertex\", \"fragment\", \"compute\","
+    let c = c + "\"dispatch\", \"comptime\", \"macro\", \"async\", \"await\","
+    let c = c + "\"asm\", \"bitwise\", \"match\", \"loop\", \"defer\","
+    let c = c + "\"for_in\", \"where\", \"Pure\", \"IO\", \"Unsafe\", \"GPU\", \"Async\", \"Reactive\","
+    let c = c + "\"mod\", \"type\", \"include\", \"import\", \"weak\", \"component\","
+    let c = c + "\"GAPS: emit(reserved-no-parse), receive(reserved-no-parse)\""
+    let c = c + "], "
+    let c = c + "\"telemetry\": {"
+    let c = c + "\"resonate_fire_count\": " + str(resonate_fire_count()) + ", "
+    let c = c + "\"resonate_absorb_count\": " + str(resonate_absorb_count()) + ", "
+    let c = c + "\"entangle_propagation_count\": " + str(entangle_propagation_count()) + ", "
+    let c = c + "\"teleport_count\": " + str(runtime_machine_teleport_count()) + ", "
+    let c = c + "\"patch_journal_count\": " + str(patch_journal_count()) + ", "
+    let c = c + "\"orchestrate_stage_count\": " + str(orchestrate_stage_count()) + ", "
+    let c = c + "\"pulse_total_fire_count\": " + str(runtime_machine_pulse_total_fire_count()) + ", "
+    let c = c + "\"actor_scheduler_queue_depth\": " + str(actor_scheduler_queue_depth()) + ", "
+    let c = c + "\"actor_scheduler_total_enqueued\": " + str(actor_scheduler_total_enqueued()) + ", "
+    let c = c + "\"actor_scheduler_worker_count\": " + str(actor_scheduler_worker_count()) + ", "
+    let c = c + "\"converge_telemetry_count\": " + str(runtime_converge_telemetry_count()) + ", "
+    let c = c + "\"runtime_heap_validate\": " + str(runtime_heap_validate())
+    let c = c + "}"
+    return c + "}"

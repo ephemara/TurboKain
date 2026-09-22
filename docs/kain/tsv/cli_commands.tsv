@@ -1,0 +1,50 @@
+command	subcommand	args	purpose	example
+kain	check	<input> [--target <TARGET>] [--json] [--json-out <FILE>] [--fail-fast] [--pedantic] [--audit]	Typecheck source without emitting artifacts	kain check src/main.kn --json
+kain	build	native-ui <INPUT> [--root <COMPONENT>] [--app-name <NAME>] [--window-title <TITLE>] [-o/--out <DIR>] [--bundle-only] [--release] [--host qt|tauri]	Build Kain UI source to native desktop app	kain build native-ui src/app.kn --app-name MyApp
+kain	run	[input] [--target auto] [-g/--debug] [--json] [--dry-run] [--keep-artifacts] [-- <ARGS>...]	Compile + execute through unified pipeline	kain run src/main.kn --target llvm -- -arg1
+kain	run	dev <input> [--dry-run] [-- <ARGS>...]	Dev loop — watch + re-run on changes	kain run dev src/main.kn
+kain	run	plan <input> [--json]	Print resolved run plan without executing	kain run plan src/main.kn
+kain	test	<input> [--mode check-pass|check-fail|run-pass|run-fail|kain-test] [--target <TARGET>] [--ignored] [--fail-fast] [--json] [--json-out <FILE>]	Run Kain source tests with compiletest directives	kain test src/ --json
+kain	doctor	[--repair <FILE>] [--repair-tree <DIR>] [--repair-preview] [--profile safe|aggressive]	Show binary/build diagnostics and environment wiring	kain doctor
+kain	clean	[path] [--scope build|run|amalgamate|all] [--dry-run] [--json]	Clean build/run/amalgamate artifacts	kain clean --scope build --dry-run
+kain	format	<inputs...> [--check] [-w/--write]	Canonical source formatting	kain fmt src/ --check
+kain	repl		Interactive REPL session	kain repl
+kain	watch	[input] [--target auto] [-g/--debug] [-- <ARGS>...]	Watch file changes + re-run automatically	kain watch src/main.kn
+kain	init	[path] [--name <NAME>]	Scaffold a new Kain project	kain init my-project
+kain	add	<package> [--version <VER>] [--manifest <FILE>]	Record capsule-backed dependency in KAIN.lock	kain add ./path/to/mylib.kn
+kain	install	<package> [--version <VER>]	Install package into global Kain package store	kain install mylib
+kain	publish	<input> [-o/--output <PATH>] [--name <NAME>] [--version <VER>] [--artifacts] [--evidence] [--archive]	Publish portable source capsule(s)	kain publish . --name my-lib --version 1.0.0
+kain	amalgamate	[input] [-o/--output <OUT>] [--name <NAME>] [--version <VER>] [--author <AUTHOR>] [--tag <TAG>] [--meta KEY=VALUE] [--contents source|snapshot|assets|artifacts|evidence] [--archive] [--raw] [--header rich|minimal|off] [--compression zstd|none] [--capsule-set <NAME>] [--api-index auto|off] [--module-index auto|off]	Pack sources into portable capsule (.kn file)	kain amalgamate src/ -o mylib.kn --archive
+kain	amalgamate	inspect <input> [--json]	Inspect capsule metadata + file inventory	kain amalgamate inspect mylib.kn
+kain	amalgamate	unpack <input> [-o/--output <DIR>]	Unpack capsule to directory	kain amalgamate unpack mylib.kn -o ./vendor/
+kain	import	platform <pkg> [--sdk <PATH>] [--header <FILE>] [--target-triple <TRIPLE>] [--dry-run] [--report-json <FILE>] [--registry <FILE>]	Import native SDK (Vulkan, Windows, FFmpeg) via libclang	"kain import platform vulkan --sdk ""C:/VulkanSDK/1.3.296.0"""
+kain	import	crates [path] [--blades] [--flat] [--include <FILTER>] [--exclude <FILTER>] [--fail-fast]	Bundle Rust workspace crates into Kain (experimental)	kain import crates --blades
+kain	import-c	<input> [-I <include_paths>] [-D <defines>] [-o/--output <FILE>] [--flat] [--include <FILTER>] [--exclude <FILTER>] [--report-json <FILE>] [--fail-fast]	Import C source via libclang extraction	kain import-c vendor/sdk -I vendor/include -o gen/sdk.kn
+kain	import-rust	<input> [-o/--output <FILE>] [-t/--target <TARGET>] [--flat] [--include <FILTER>] [--exclude <FILTER>] [--fail-fast] [--report-json <FILE>]	Import Rust source (Ouroboros) (experimental)	kain import-rust src/lib.rs --flat
+kain	import-crate	<crate_name> [--manifest-path <FILE>] [--mode live|generate|both] [-o/--output <DIR>] [--features <F1,F2>] [--all-features] [--no-default-features] [--report-json <FILE>]	Import Rust crate via FFI layer (experimental)	kain import-crate serde_json --mode generate
+kain	import-asm	<input> [--format 6502-furby|LR35902|Z80] [--out <FILE>] [--validate-only]	Import legacy assembly (6502, Z80, LR35902) (experimental)	kain import-asm game.asm --format LR35902
+kain	import-ts	<input> [-o/--output <FILE>] [-t/--target <TARGET>] [--flat] [--include <FILTER>] [--exclude <FILTER>] [--fail-fast] [--report-json <FILE>]	Import TypeScript source (requires typescript-import feature) (experimental)	kain import-ts src/types.ts --flat
+kain	lsp		Start Kain Language Server (stdio protocol) (stub — deprecated)	kain lsp
+kain	config	show [--json]	Show active config	kain config show --json
+kain	config	set <key> <value>	Set a config key	kain config set build.native-debug-info true
+kain	config	init [--path <FILE>] [--force]	Initialize a fresh config file	kain config init
+kain	selfhost	bootstrap [--manifest-path <FILE>] [--backend llvm] [--combine-only] [--emit-llvm-only] [--link-native] [--verify-ouroboros]	Self-host bootstrap workflow (deprecated)	kain selfhost bootstrap
+kain	selfhost	phase1 [--inventory-dir <DIR>] [--output-dir <DIR>] [--profile-path <FILE>] [--emit-bundles] [--all-crates] [--force]	Self-host phase 1 (deprecated)	kain selfhost phase1
+kain	selfhost	phase2 [--inventory-dir <DIR>] [--output-dir <DIR>] [--profile-path <FILE>] [--emit-bundles] [--emit-roundtrip-rust] [--assemble-stage2] [--build-stage2] [--all-crates] [--force]	Self-host phase 2 (deprecated)	kain selfhost phase2
+kain	stdlib-map	[--repo-root <DIR>] [--stdlib-root <DIR>] [--native-manifest <FILE>] [--json-out <FILE>] [--llm-out <FILE>] [--write] [--check] [--json]	Generate/check stdlib symbol atlas	kain stdlib-map --check
+kain	commands	list [--bin <NAME>] [--runtime] [--json]	List registry entries for a launcher view	kain commands list
+kain	commands	export [--bin <NAME>] [--runtime]	Export registry metadata as JSON	kain commands export
+kain	commands	packs [--json]	List command packs loaded into registry	kain commands packs
+kain	commands	help [--bin <NAME>] [--runtime]	Render help from dynamic Clap builder	kain commands help
+kain	runtime	build [--release] [--verbose]	Build manifest-driven native runtime bundle	kain runtime build
+kain	runtime	validate [--release] [--verbose] [--skip-cli-build] [--skip-runtime-build] [--skip-fixtures] [--skip-conformance]	Run native runtime validation lane	kain runtime validate
+kain	bridge	serve --entry <FILE> [--dispatch-function <NAME>]	Run resident Kain JSON-lines bridge process	kain bridge serve --entry app.kn
+kain	codebase	inspect	Inspect current workspace	kain codebase inspect
+kain	codebase	run	Run trusted workspace codebase operations	kain codebase run
+kain	gpu-artifacts	<input> [-o/--output <PATH>] [--target all|spirv|cuda|hlsl|wgsl] [--no-residency] [--no-derived]	Generate SPIR-V/PTX/HLSL/WGSL sidecars with reflection	kain gpu-artifacts shaders.kn --target spirv
+kain	omni	init [path]	Create Omni polyglot project from template	kain omni init my-project
+kain	omni	build [path]	Stage imports and compile to all declared targets	kain omni build
+kain	fabric	init [path]	Create Fabric manifest from template (local or polyglot)	kain fabric init
+kain	fabric	validate	Validate Fabric manifest	kain fabric validate
+kain	fabric	run	Execute Fabric step DAG	kain fabric run
+kain	install-c-extras	[packages...] [--target <TARGET>] [--dry-run]	Auto-resolve and install C/C++ toolchain extras via vcpkg	kain install-c-extras --dry-run

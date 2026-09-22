@@ -1,0 +1,38 @@
+keyword	syntax	purpose	related
+actor	actor Name:\n    state field: Type = initial\n    on Message(reply_to: P, params):\n        send reply_to.Reply(value = expr)	Isolated concurrent unit of computation with private state and message-passing communication	spawn, send, ask, state, on, reply_to, self
+state (actor)	state field: Type = initial	Private mutable actor state; never shared, never externally accessible	self
+on	on MessageName(reply_to: P, params):	Message handler for a typed message; each on handles one message type	send, reply_to, ask
+reply_to: P	reply_to: P (in handler params)	Compiler-injected typed reply port for ask/response pattern	send reply_to.Reply(), ask
+send	send target.Message(field = value)	Fire-and-forget asynchronous message dispatch (cast)	on, ask
+ask	"ask(actor, ""MessageName"", payload) -> Int"	Synchronous-looking request with reply (blocks caller until reply or timeout)	send, reply_to, spawn
+spawn	spawn ActorName(field = value, ...)	Create an actor instance; returns typed actor handle	ask, send, actor
+P (reply port type)	P (synthetic type in handler params)	Compiler-generated synthetic actor ref for ask reply routing; reused via TLS cache	reply_to, ask
+pack/unpack	pack(a,b) -> Int; unpack_a(v), unpack_b(v)	Pack multiple values into single Int for ask replies (temporary limitation)	ask, reply_to
+supervision tree	(supervisor actor + children with restart policy)	Hierarchical fault containment — supervisor restarts child actors on failure	spawn, supervisor
+OneForOne	(supervision strategy)	Only the failed child is restarted; siblings unaffected	supervision
+OneForAll	(supervision strategy)	All children terminated and restarted if any one fails	supervision
+RestForOne	(supervision strategy)	Failed child and all children spawned after it are terminated and restarted	supervision
+SimpleOneForOne	(supervision strategy)	All children identical; only failed instance restarted	supervision
+Permanent	(restart policy)	Always restart child regardless of exit reason	supervision
+Temporary	(restart policy)	Never restart child; stays dead	supervision
+Transient	(restart policy)	Restart only on abnormal exit (crash, kill, escalation)	supervision
+monitor	actor_monitor(watcher_id, watched_id)	Unidirectional lifecycle observation — watcher notified when watched exits	link, supervision
+link	actor_link(a_id, b_id)	Bidirectional crash-propagation — if either dies abnormally, both die	monitor, supervision
+mailbox	(actor owns KainActorMailbox)	Lock-protected linked-list queue; bounded (default 1024) or unbounded	mailbox_capacity, mailbox_policy
+mailbox policy	(Block | DropNewest | DropOldest | FailSender)	Overflow behavior for bounded mailboxes	mailbox
+scheduler ring	(ring buffer of 1024 slots)	Work queue with worker pool (4 threads default); round-robin scheduling	scheduler_telemetry
+microcell turn	(64 messages default)	Messages processed per scheduling turn before yielding	scheduler
+actor lifecycle	UNINITIALIZED -> INITIALIZING -> RUNNING -> SHUTTING_DOWN -> TERMINATED|FAILED	Actor state machine with 7 states; Z3-verified cleanup order	state, on, spawn
+actor execution class	MICROCELL | WORLDCELL | NETCELL | HOSTCELL | ACCELERATOR_CELL | SYNTHETIC_REPLY_PORT	Defines how actor executes: standard worker, world-tick, remote, host-language, GPU, or reply port	actor, scheduler
+actor locality	LOCAL | WORLD_AFFINE | HOST_AFFINE | REMOTE	Where actor runs: local process, world node, host runtime, or remote machine	actor, execution_class
+actor registry	actor_registry_register/lookup/unregister/has	Maps string names to actor IDs for discovery	spawn
+inline ask fast path	(if target mailbox empty and actor not owned)	First ask message processed inline on caller's thread to avoid context switch	ask, scheduler
+reply port lifecycle	prepare_direct -> ask_send_ref -> (maybe inline turn) -> wait -> reply -> rearm or destroy	Per-thread synthetic ref with generation token; reused via TLS cache	ask, reply_to
+ask timeout	default 30 seconds; configurable via actor_default_ask_timeout_ms()	Blocking wait with timeout; reply port destroyed on timeout	ask, reply_port
+actor + world + entangle	(actor reads Mirror, writes Authority)	Actors read mirrored world state, write authority world state	world, entangle
+actor + collapse/observe/decay	(actor handler allocates, collapses, observes, decays raw memory)	Actors can own and safely operate on raw memory inside handlers	collapse, observe, decay
+actor + shatter/teleport	(teleport shard from Authority to Mirror via bus)	Actors cross world boundaries via zero-copy teleport	shatter, teleport
+actor + converge	(converge function inside actor handler)	Actor handlers call converge for platform-gated fast lane dispatch	converge
+actor + pulse	(pulse drives actor asks)	Pulse clocks drive actor message sends on timed interval	pulse
+actor + orchestrate	(orchestrate pipeline with actor stages)	Actors participate in multi-stage orchestrate pipelines	orchestrate
+actor + patch + law	(patch from actor handler; law guards world state)	Actors trigger journaled world mutations via patch; law enforces invariants	patch, law

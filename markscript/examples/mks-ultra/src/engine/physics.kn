@@ -1,0 +1,179 @@
+// ============================================================================
+//  MKS-ULTRA PHYSICS ENGINE CORE 1.0
+//  Rigid body simulation with Euler integration.
+//  Layer 0: fn + struct, pure value semantics.
+//
+//  Vec3 is a built-in tuple type (Float, Float, Float) created via vec3(x,y,z).
+//  Every mutation returns a new PhysicsWorld — the original is never modified.
+// ============================================================================
+
+pub struct RigidBody:
+    position: Vec3
+    velocity: Vec3
+    acceleration: Vec3
+    mass: Float
+    mass_inv: Float
+    radius: Float
+
+pub struct PhysicsWorld:
+    bodies: Array<RigidBody>
+    gravity: Float
+    dt: Float
+
+// ---------------------------------------------------------------------------
+//  World lifecycle
+// ---------------------------------------------------------------------------
+
+pub fn init_world(gravity: Float, dt: Float) -> PhysicsWorld:
+    return PhysicsWorld {
+        bodies: [],
+        gravity: gravity,
+        dt: dt
+    }
+
+// ---------------------------------------------------------------------------
+//  Body management — value semantics (returns new world, original untouched)
+// ---------------------------------------------------------------------------
+
+pub fn add_body(world: PhysicsWorld, pos: Vec3, vel: Vec3, mass: Float, radius: Float) -> PhysicsWorld:
+    var mass_inv: Float = 0.0
+    if mass > 0.0:
+        mass_inv = 1.0 / mass
+
+    let body = RigidBody {
+        position: pos,
+        velocity: vel,
+        acceleration: vec3(0.0, 0.0, 0.0),
+        mass: mass,
+        mass_inv: mass_inv,
+        radius: radius
+    }
+
+    // Copy existing bodies into a new array (no shared mutation)
+    var new_bodies: Array<RigidBody> = []
+    var i: Int = 0
+    while i < len(world.bodies):
+        push(new_bodies, world.bodies[i])
+        i = i + 1
+    push(new_bodies, body)
+
+    return PhysicsWorld {
+        bodies: new_bodies,
+        gravity: world.gravity,
+        dt: world.dt
+    }
+
+// ---------------------------------------------------------------------------
+//  Force application — gravity on Y axis
+// ---------------------------------------------------------------------------
+
+pub fn apply_gravity(world: PhysicsWorld) -> PhysicsWorld:
+    var new_bodies: Array<RigidBody> = []
+    var i: Int = 0
+    while i < len(world.bodies):
+        let body = world.bodies[i]
+        let updated = RigidBody {
+            position: body.position,
+            velocity: body.velocity,
+            acceleration: vec3(body.acceleration.x, body.acceleration.y - world.gravity, body.acceleration.z),
+            mass: body.mass,
+            mass_inv: body.mass_inv,
+            radius: body.radius
+        }
+        push(new_bodies, updated)
+        i = i + 1
+
+    return PhysicsWorld {
+        bodies: new_bodies,
+        gravity: world.gravity,
+        dt: world.dt
+    }
+
+// ---------------------------------------------------------------------------
+//  Semi-implicit Euler integration for a single body
+//  Updates velocity first, then position using the new velocity.
+// ---------------------------------------------------------------------------
+
+pub fn integrate(world: PhysicsWorld, body_index: Int) -> PhysicsWorld:
+    let body = world.bodies[body_index]
+
+    let dt = world.dt
+    let new_vx = body.velocity.x + body.acceleration.x * dt
+    let new_vy = body.velocity.y + body.acceleration.y * dt
+    let new_vz = body.velocity.z + body.acceleration.z * dt
+
+    let new_px = body.position.x + new_vx * dt
+    let new_py = body.position.y + new_vy * dt
+    let new_pz = body.position.z + new_vz * dt
+
+    let new_vel = vec3(new_vx, new_vy, new_vz)
+    let new_pos = vec3(new_px, new_py, new_pz)
+
+    let integrated_body = RigidBody {
+        position: new_pos,
+        velocity: new_vel,
+        acceleration: vec3(0.0, 0.0, 0.0),
+        mass: body.mass,
+        mass_inv: body.mass_inv,
+        radius: body.radius
+    }
+
+    // Replace body at index, copy the rest
+    var new_bodies: Array<RigidBody> = []
+    var i: Int = 0
+    while i < len(world.bodies):
+        if i == body_index:
+            push(new_bodies, integrated_body)
+        else:
+            push(new_bodies, world.bodies[i])
+        i = i + 1
+
+    let new_world = PhysicsWorld {
+        bodies: new_bodies,
+        gravity: world.gravity,
+        dt: world.dt
+    }
+
+    return new_world
+
+// ---------------------------------------------------------------------------
+//  Full simulation step
+// ---------------------------------------------------------------------------
+
+pub fn step_world(world: PhysicsWorld) -> PhysicsWorld:
+    // 1. Clear all accelerations
+    var cleared_bodies: Array<RigidBody> = []
+    var i: Int = 0
+    while i < len(world.bodies):
+        let body = world.bodies[i]
+        let cleared = RigidBody {
+            position: body.position,
+            velocity: body.velocity,
+            acceleration: vec3(0.0, 0.0, 0.0),
+            mass: body.mass,
+            mass_inv: body.mass_inv,
+            radius: body.radius
+        }
+        push(cleared_bodies, cleared)
+        i = i + 1
+
+    var w = PhysicsWorld {
+        bodies: cleared_bodies,
+        gravity: world.gravity,
+        dt: world.dt
+    }
+
+    // 2. Apply gravity to all bodies
+    w = apply_gravity(w)
+
+    // 3. Semi-implicit Euler integration for all bodies
+    var j: Int = 0
+    while j < len(w.bodies):
+        w = integrate(w, j)
+        j = j + 1
+
+    return w
+
+// ============================================================================
+//  End of physics.kn
+// ============================================================================

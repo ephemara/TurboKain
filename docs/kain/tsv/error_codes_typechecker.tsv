@@ -1,0 +1,187 @@
+code	title	severity	category	summary	example_bad	example_good	spec
+KAIN-BORROW-0001	Borrow Error	error	borrow/general	A borrow-checking rule has been violated.			yes
+KAIN-BORROW-0002	Multiple Mutable Borrows	error	borrow/multiple-mutable	A mutable reference to shared state overlaps with another active mutable or immutable reference.	"let mut x = 0
+a = &mut x
+b = &mut x"	"let mut x = 0
+{
+    a = &mut x
+}
+b = &mut x"	yes
+KAIN-BORROW-0003	Borrow And Mutation Conflict	error	borrow/borrow-mutation-conflict	A value is borrowed while a mutation occurs through another path.			yes
+KAIN-BORROW-0004	Use After Move	error	borrow/use-after-move	A value has been moved and is used afterwards.	"x = [1,2,3]
+y = x
+print(x)"	"x = [1,2,3]
+y = x.clone()
+print(x)"	yes
+KAIN-BORROW-0005	Shared State Without Annotation	error	borrow/missing-shared-annotation	State from multiple actors must be annotated shared or single_writer.			yes
+KAIN-BORROW-0006	Single Writer Violation	error	borrow/single-writer-violation	single_writer state mutated from multiple locations simultaneously.			yes
+KAIN-BORROW-0007	Weak Reference Upgraded Unsafely	error	borrow/weak-upgrade	Weak reference upgraded but target has been dropped.	strong = weak_ref.upgrade()	if let Some(strong) = weak_ref.upgrade(): ...	yes
+KAIN-BORROW-0008	Lifetime Mismatch	error	borrow/lifetime-mismatch	A reference outlives the value it points to.	"let ref: &i32
+{
+    x = 5
+    ref = &x
+}
+print(ref)"	"x = 5
+ref = &x
+print(ref)"	yes
+KAIN-BORROW-0009	Send Constraint Violation	error	borrow/send-violation	A value is being sent but does not satisfy the Send trait.			yes
+KAIN-BORROW-0010	Implicit Clone On Large Value	warning	borrow/large-clone	A potentially large value is being implicitly cloned.			yes
+KAIN-CODEGEN-0001	Codegen Error	error	codegen/general				yes
+KAIN-CODEGEN-0002	Unknown Codegen Variable	error	codegen/unknown-variable				yes
+KAIN-CODEGEN-0003	Lowering Pass Failed	error	codegen/lowering-failed				yes
+KAIN-CODEGEN-0004	Backend Compilation Failed	error	codegen/backend-failed				yes
+KAIN-CODEGEN-0005	Linking Failed	error	codegen/linking-failed				yes
+KAIN-CODEGEN-0006	Unsupported Target Architecture	error	codegen/unsupported-target				yes
+KAIN-CODEGEN-0007	Target Capability Missing	error	codegen/capability-missing				yes
+KAIN-CODEGEN-0008	Foreign ABI Mismatch	error	codegen/foreign-abi-mismatch				yes
+KAIN-CODEGEN-0009	Codegen Intrinsic Not Found	error	codegen/intrinsic-not-found				yes
+KAIN-CODEGEN-0010	Optimization Pass Failed	warning	codegen/optimization-failed				yes
+KAIN-CODEGEN-0011	Codegen Budget Exceeded	error	codegen/budget-exceeded				yes
+KAIN-ACTOR-0001	Component/Actor Error	error	actor/general				yes
+KAIN-ACTOR-0002	Actor Spawn Failed	error	actor/spawn-failed				yes
+KAIN-ACTOR-0003	Send To Invalid Actor	error	actor/send-invalid				yes
+KAIN-ACTOR-0004	Receive Handler Missing	error	actor/receive-missing				yes
+KAIN-ACTOR-0005	Emit Without Listener	warning	actor/emit-no-listener				yes
+KAIN-ACTOR-0006	Decay Transition Invalid	error	actor/decay-invalid				yes
+KAIN-ACTOR-0007	Component Lifecycle Violation	error	actor/lifecycle-violation				yes
+KAIN-ACTOR-0008	On Handler Duplicate	error	actor/on-duplicate				yes
+KAIN-COMPTIME-0001	Comptime Error	error	comptime/general				yes
+KAIN-COMPTIME-0002	Comptime Recursion Limit Exceeded	error	comptime/recursion-limit				yes
+KAIN-COMPTIME-0003	Comptime Access To Runtime Value	error	comptime/runtime-value				yes
+KAIN-COMPTIME-0004	Macro Expansion Error	error	comptime/macro-expansion				yes
+KAIN-COMPTIME-0005	Patch Target Not Found	error	comptime/patch-target				yes
+KAIN-COMPTIME-0006	Law Violation	error	comptime/law-violation				yes
+KAIN-COMPTIME-0007	Axiom Contradiction	error	comptime/axiom-contradiction				yes
+KAIN-COMPTIME-0008	Orchestrate Dependency Cycle	error	comptime/orchestrate-cycle				yes
+KAIN-COMPTIME-0009	Converge Failed	error	comptime/converge-failed				yes
+KAIN-COMPTIME-0010	Shatter Pattern Incomplete	error	comptime/shatter-incomplete				yes
+KAIN-CONFIG-0001	Config Error	error	config/general				yes
+KAIN-CONFIG-0002	Manifest Parse Error	error	config/manifest-parse				yes
+KAIN-CONFIG-0003	Toolchain Not Found	error	config/toolchain-not-found				yes
+KAIN-CONFIG-0004	Target Specification Invalid	error	config/target-invalid				yes
+KAIN-CONFIG-0005	Feature Flag Conflict	error	config/feature-conflict				yes
+KAIN-CONFIG-0006	Dependency Resolution Failed	error	config/dependency-failed				yes
+KAIN-CONVERGE-0001	Converge Error	error	converge/general				yes
+KAIN-CONVERGE-0002	Converge Missing Spec Lane	error	converge/missing-spec				yes
+KAIN-CONVERGE-0003	Fast Lane Contract Mismatch	error	converge/fast-lane-mismatch				yes
+KAIN-CONVERGE-0004	Converge Verifier Failed	error	converge/verifier-failed				yes
+KAIN-CONVERGE-0005	Capability Gap At Target	error	converge/capability-gap				yes
+KAIN-CONVERGE-0006	Return Type Divergence	error	converge/return-type-divergence				yes
+KAIN-CONVERGE-0007	Effect Set Divergence	error	converge/effect-set-divergence				yes
+KAIN-CONVERGE-0008	Ambiguous Lane Selection	error	converge/ambiguous-lane				yes
+KAIN-EFFECT-0001	Effect Violation	error	effects/violation				yes
+KAIN-EFFECT-0002	Missing Effect Capability	error	effects/missing-capability				yes
+KAIN-EFFECT-0003	Effect Polymorphism Mismatch	error	effects/polymorphism-mismatch				yes
+KAIN-EFFECT-0004	Pure Function With Side Effect	error	effects/pure-side-effect				yes
+KAIN-EFFECT-0005	Capability Gate Failure	error	effects/capability-gate				yes
+KAIN-EFFECT-0006	Async In Sync Context	error	effects/async-in-sync				yes
+KAIN-EFFECT-0007	Await Outside Async	error	effects/await-outside-async				yes
+KAIN-EFFECT-0008	GPU Effect In Host Context	error	effects/gpu-in-host				yes
+KAIN-EFFECT-0009	Reactive Cycle Detected	error	effects/reactive-cycle				yes
+KAIN-EFFECT-0010	Unsafe Block Not Allowed	error	effects/unsafe-disallowed				yes
+KAIN-EFFECT-0011	Effect Leakage Through Public API	warning	effects/public-leakage				yes
+KAIN-EFFECT-0012	Conflicting Effect Annotations	error	effects/conflicting				yes
+KAIN-ENTANGLE-0001	Entangle Error	error	entangle/general				yes
+KAIN-ENTANGLE-0002	Entangle Cycle Detected	error	entangle/cycle				yes
+KAIN-ENTANGLE-0003	Entangle Single Writer Violation	error	entangle/single-writer				yes
+KAIN-ENTANGLE-0004	Entangle Dangling Reference	error	entangle/dangling				yes
+KAIN-ENTANGLE-0005	Entangle Cross-World Scope Error	error	entangle/cross-world-scope				yes
+KAIN-ENTANGLE-0006	Entangle Type Mismatch	error	entangle/type-mismatch				yes
+KAIN-ENTANGLE-0007	Entangle Direction Conflict	error	entangle/direction-conflict				yes
+KAIN-INTERNAL-0001	Internal Error	error	internal/general	Compiler or runtime hit an internal invariant failure.			yes
+KAIN-IO-0001	IO Error	error	io/general				yes
+KAIN-IO-0002	File Not Found	error	io/file-not-found				yes
+KAIN-IO-0003	File Read Error	error	io/read-error				yes
+KAIN-IO-0004	File Write Error	error	io/write-error				yes
+KAIN-IO-0005	Network Request Failed	error	io/network-failed				yes
+KAIN-IO-0006	Asset Import Failed	error	io/asset-import				yes
+KAIN-MEM-0001	Memory Lowering Required	error	memory/lowering				yes
+KAIN-MEM-0002	Memory Semantics Unsupported	error	memory/backend-capabilities				yes
+KAIN-MEM-0003	Illegal Bitfield Address	error	memory/bitfields				yes
+KAIN-MEM-0004	Memory Layout Overflow	error	memory/layout-overflow				yes
+KAIN-MEM-0005	Alignment Not Satisfied	error	memory/alignment				yes
+KAIN-MEM-0006	Null Pointer Dereference	error	memory/null-deref				yes
+KAIN-MEM-0007	Out Of Bounds Access	error	memory/out-of-bounds				yes
+KAIN-MEM-0008	Address Space Mismatch	error	memory/address-space				yes
+KAIN-PATCH-0001	Patch Error	error	patch/general				yes
+KAIN-PATCH-0002	Patch Target Is Not A World	error	patch/target-not-world				yes
+KAIN-PATCH-0003	Patch Law Precondition Failed	error	patch/law-precondition				yes
+KAIN-PATCH-0004	Patch Law Postcondition Failed	error	patch/law-postcondition				yes
+KAIN-PATCH-0005	Patch Outside World Scope	error	patch/outside-scope				yes
+KAIN-PATCH-0006	Conflicting Patch Mutations	error	patch/conflicting-mutations				yes
+KAIN-PATCH-0007	Patch Law Return Type Mismatch	error	patch/law-return-type				yes
+KAIN-RUNTIME-0001	Runtime Error	error	runtime/general				yes
+KAIN-RUNTIME-0002	Actor Panic	error	runtime/actor-panic				yes
+KAIN-RUNTIME-0003	Message Delivery Failed	error	runtime/message-delivery				yes
+KAIN-RUNTIME-0004	Resource Exhausted	error	runtime/resource-exhausted				yes
+KAIN-RUNTIME-0005	Deadlock Detected	error	runtime/deadlock				yes
+KAIN-RUNTIME-0006	World Initialization Failed	error	runtime/world-init				yes
+KAIN-RUNTIME-0007	Shader Dispatch Failed	error	runtime/shader-dispatch				yes
+KAIN-RUNTIME-0008	Timeout Exceeded	error	runtime/timeout				yes
+KAIN-SHADER-0001	Unsupported Shader Call	error	shader/unsupported-call				yes
+KAIN-SHADER-0002	Shader Stage Mismatch	error	shader/stage-mismatch				yes
+KAIN-SHADER-0003	Uniform Binding Error	error	shader/uniform-binding				yes
+KAIN-SHADER-0004	Compute Dispatch Dimension Error	error	shader/compute-dispatch				yes
+KAIN-SHADER-0005	Shader Resource Not GPU-Compatible	error	shader/resource-compat				yes
+KAIN-SHADER-0006	Vertex Input Layout Error	error	shader/vertex-input				yes
+KAIN-SHADER-0007	Fragment Output Layout Error	error	shader/fragment-output				yes
+KAIN-SHADER-0008	Collapse Target Invalid	error	shader/collapse-invalid				yes
+KAIN-SHADER-0009	Fanout Width Exceeded	error	shader/fanout-width				yes
+KAIN-SHADER-0010	Shader Compilation Failed	error	shader/compilation				yes
+KAIN-SHADER-0011	GPU Memory Budget Exceeded	error	shader/memory-budget				yes
+KAIN-SHADER-0012	Shared Memory Bank Conflict	warning	shader/bank-conflict				yes
+KAIN-SHADER-0042	Subgroup Nested	error	shader/subgroup-nested				no
+KAIN-SHADER-0043	Subgroup Divergent Escape	error	shader/subgroup-divergent-escape				no
+KAIN-STATE-0001	State Error	error	state/general				yes
+KAIN-STATE-0002	State Machine Inexhaustive	error	state/inexhaustive				yes
+KAIN-STATE-0003	State Transition Cycle	error	state/cycle				yes
+KAIN-STATE-0004	Invalid State Transition	error	state/invalid-transition				yes
+KAIN-STATE-0005	Pulse Without State	error	state/pulse-no-state				yes
+KAIN-STATE-0006	Guarantee Violation	error	state/guarantee-violation				yes
+KAIN-STATE-0007	Every Clause Unbounded	warning	state/every-unbounded				yes
+KAIN-STATE-0008	Fallback Handler Unreachable	warning	state/fallback-unreachable				yes
+KAIN-TEST-0001	Test Error	error	test/general				yes
+KAIN-TEST-0002	Assertion Failed	error	test/assertion-failed				yes
+KAIN-TEST-0003	Spec Property Violated	error	test/spec-violated				yes
+KAIN-TEST-0004	Fast Test Time Budget Exceeded	warning	test/fast-timeout				yes
+KAIN-TEST-0005	Verify Block Infallible	warning	test/verify-infallible				yes
+KAIN-TEST-0006	Random Seed Not Reproducible	warning	test/seed-missing				yes
+KAIN-TEST-0007	Jitter Range Invalid	warning	test/jitter-range				yes
+KAIN-TYPE-0001	Type Error	error	types/general				yes
+KAIN-TYPE-0002	Unknown Identifier	error	types/unknown-identifier				yes
+KAIN-TYPE-0003	World Requires Surface	error	world/missing-surface				yes
+KAIN-TYPE-0004	Duplicate Symbol	error	types/duplicate-symbol				yes
+KAIN-TYPE-0005	Builtin Symbol Shadowed	warning	types/shadowed-builtin				yes
+KAIN-TYPE-0006	Missing Type Annotation	error	types/missing-annotation				yes
+KAIN-TYPE-0007	Trait Not Satisfied	error	types/trait-not-satisfied				yes
+KAIN-TYPE-0008	Trait Method Missing	error	types/trait-method-missing				yes
+KAIN-TYPE-0009	Ambiguous Trait Implementation	error	types/ambiguous-trait				yes
+KAIN-TYPE-0010	Unresolved Import	error	types/unresolved-import				yes
+KAIN-TYPE-0011	Cyclic Type Definition	error	types/cyclic-definition				yes
+KAIN-TYPE-0012	Mutable/Immutable Conflict	error	types/mutability-conflict				yes
+KAIN-TYPE-0013	Pattern Match Inexhaustive	error	types/inexhaustive-match				yes
+KAIN-TYPE-0014	Recursive Type Without Indirection	error	types/recursive-without-indirection				yes
+KAIN-TYPE-0015	Type Alias Cycle	error	types/alias-cycle				yes
+KAIN-TYPE-0016	Impl On Foreign Type	error	types/foreign-impl				yes
+KAIN-TYPE-0017	Self Type In Static Context	error	types/self-in-static				yes
+KAIN-TYPE-0018	Invalid Type Parameter Count	error	types/param-count				yes
+KAIN-TYPE-0019	Type Argument Kind Mismatch	error	types/arg-kind-mismatch				yes
+KAIN-TYPE-0020	Return Type Mismatch	error	types/return-mismatch				yes
+KAIN-TYPE-0021	Missing Return In Non-Void Function	error	types/missing-return				yes
+KAIN-TYPE-0022	Void Value Used In Expression	error	types/void-in-expression				yes
+KAIN-TYPE-0023	Callable Type Expected	error	types/not-callable				yes
+KAIN-TYPE-0024	Field Not Found	error	types/field-not-found				yes
+KAIN-TYPE-0025	Type Mismatch	error	types/mismatch				yes
+KAIN-TYPE-0026	Index Not Supported	error	types/index-not-supported				yes
+KAIN-VALIDATE-0001	Validation Error	error	validation/general	Structural validation pass rejected the program.			yes
+KAIN-WORLD-0001	World Missing Surface	error	world/missing-surface				yes
+KAIN-WORLD-0002	Duplicate Surface Kind	error	world/duplicate-surface				yes
+KAIN-WORLD-0003	Surface Component Type Error	error	world/surface-component-type				yes
+KAIN-WORLD-0004	World Orphan	error	world/orphan				yes
+KAIN-WORLD-0005	Entanglement Target Invalid	error	world/entanglement-invalid				yes
+KAIN-WORLD-0006	Teleport Destination Invalid	error	world/teleport-invalid				yes
+KAIN-WORLD-0007	World Cross-Reference Cycle	error	world/cross-reference				yes
+KAIN-WORLD-0008	Surface Kind Platform Mismatch	error	world/platform-mismatch				yes
+KAIN-PULSE-BUDGET-0001	Pulse Budget Alloc Violation	error	pulse/budget-alloc	Allocation in pulse with budget(alloc=0) violates real-time safety.			no
+KAIN-PULSE-BUDGET-0002	Pulse Budget Lock Violation	error	pulse/budget-lock	Locking/ownership operation in pulse with budget(lock=0) violates real-time safety.			no
+KAIN-PULSE-BUDGET-0003	Pulse Budget IO Violation	error	pulse/budget-io	I/O operation in pulse with budget(io=0) violates real-time safety.			no

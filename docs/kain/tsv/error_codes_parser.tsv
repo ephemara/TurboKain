@@ -1,0 +1,71 @@
+code	title	severity	category	summary	example_bad	example_good	spec
+KAIN-PARSE-0001	Parse Error	error	parser/general	Generic fallback — the parser cannot understand the input			yes
+KAIN-PARSE-0002	Expected Token	error	parser/expected-token	A required token (usually :) is missing at this position	fn main {\n    return\n}	fn main: {\n    return\n}	yes
+KAIN-PARSE-0003	Unexpected Token	error	parser/unexpected-token	A token appeared in a position where the grammar forbids it	let x = 5\n  let y = 10	let x = 5\nlet y = 10	yes
+KAIN-PARSE-0004	Reserved Identifier	error	parser/reserved-identifiers	A user-defined name collides with a word reserved by Kain, HLSL, C++, or host runtime			yes
+KAIN-PARSE-0005	Missing Delimiter Before Newline	error	parser/missing-delimiter-before-newline	Block header missing : before the body — the most common parse error	"fn greet\n    return ""hi"""	"fn greet:\n    return ""hi"""	yes
+KAIN-PARSE-0007	Expected Contextual Keyword	error	parser/contextual-keywords	A contextual keyword (patch, law, axiom, pulse, etc.) was expected but not found			yes
+KAIN-PARSE-0008	Unclosed Delimiter	error	parser/unclosed-delimiter	A bracket, brace, or parenthesis was opened but never closed	let x = (a + b	let x = (a + b)	yes
+KAIN-PARSE-0009	Mismatched Delimiter	error	parser/mismatched-delimiter	A closing delimiter did not match its opening counterpart	let arr = [1, 2, 3}	let arr = [1, 2, 3]	yes
+KAIN-PARSE-0010	Invalid Numeric Literal	error	parser/numeric-literal	A numeric literal could not be parsed (malformed hex, binary, octal, float)	let x = 0xZZZ	let x = 0xFF	yes
+KAIN-PARSE-0011	Invalid String Literal	error	parser/string-literal	A string literal is malformed or unescaped	"let s = ""hello\nworld"""	"let s = ""hello\\nworld"""	yes
+KAIN-PARSE-0012	Invalid Character Literal	error	parser/char-literal	A character literal contains more than one codepoint	let c = 'ab'	let c = 'a'	yes
+KAIN-PARSE-0013	Attribute Syntax Error	error	parser/attribute	@name or @name(args...) attribute syntax is malformed	@ material_graph	@material_graph	yes
+KAIN-PARSE-0014	Effect Annotation Syntax Error	error	parser/effect-annotation	Effect annotation (Pure, IO, Async, GPU, Reactive, Unsafe) in an invalid position			yes
+KAIN-PARSE-0015	Module Declaration Error	error	parser/module	mod declaration is incomplete (missing name or body/path)	mod	mod graphics { ... }	yes
+KAIN-PARSE-0016	Use/Import Syntax Error	error	parser/use-import	use import path is malformed (e.g., double ::)	use std..math	use std::math	yes
+KAIN-PARSE-0017	Visibility Modifier Error	error	parser/visibility	pub stands alone without an attached declaration	pub	pub fn greet: ...	yes
+KAIN-PARSE-0018	Comptime Block Syntax Error	error	parser/comptime	comptime block body could not be parsed			yes
+KAIN-PARSE-0019	Macro Invocation Syntax Error	error	parser/macro	macro definition or invocation is malformed			yes
+KAIN-PARSE-0020	Test Declaration Syntax Error	error	parser/test	test block declaration is malformed	test: {}	"test ""my test"": { assert true }"	yes
+KAIN-PARSE-0001-IMPL	Trait path before for expected (impl)	error	parser/general	Expected trait path before 'for' in impl block, found non-path type	impl Vec for SomeType:	fn my_method: ...	no
+KAIN-PARSE-0001-IMPL2	Only fn allowed in impl blocks	error	parser/general	Expected 'fn' in impl block (impl blocks can only contain function definitions)			no
+KAIN-PARSE-0001-INCLUDE	Invalid C include target	error	parser/general	"Expected C include target such as nuklear, native/nuklear, ""../native/nuklear.h"", or <vulkan/vulkan.h>"	include	include <vulkan/vulkan.h> as vk	no
+KAIN-PARSE-0001-INCLUDE2	Bare include with version rejected	error	parser/general	bare include form does not accept a version; use angle brackets: include <foo.h> 1.0 as bar	include nuklear 1.0 as nk	include <nuklear.h> 1.0 as nk	no
+KAIN-PARSE-0001-MACRO	Unknown macro param kind	error	parser/general	Unknown macro param kind (must be expr, type, ident, block, or token)			no
+KAIN-PARSE-0001-AXIOM	Duplicate axiom fallback	error	parser/general	axiom blocks may only declare one fallback			no
+KAIN-PARSE-0001-AXIOM2	Invalid axiom keyword	error	parser/general	axiom blocks expect 'when', 'guarantee', or 'fallback'			no
+KAIN-PARSE-0001-AXIOM3	Unknown axiom predicate	error	parser/general	Unknown axiom predicate; expected target(...), arch(...), or capability(...)			no
+KAIN-PARSE-0001-CONVERGE	Duplicate converge spec lane	error	parser/general	converge blocks may only declare one spec lane			no
+KAIN-PARSE-0001-CONVERGE2	Invalid converge keyword	error	parser/general	Expected 'spec', 'fast', or 'verify' inside converge block			no
+KAIN-PARSE-0001-CONVERGE3	Converge requires spec lane	error	parser/general	converge blocks require exactly one spec lane			no
+KAIN-PARSE-0001-CONVERGE4	Converge requires fast lane	error	parser/general	converge blocks require at least one fast lane			no
+KAIN-PARSE-0001-COMPONENT	Missing state after weak in component	error	parser/general	Expected 'state' keyword after 'weak' in component (use 'weak state name: Type = value')	component Foo: weak x: i32 = 0	component Foo: weak state x: i32 = 0	no
+KAIN-PARSE-0001-COMPONENT2	Unexpected identifier in component body	error	parser/general	Unexpected identifier in component. Valid keywords: state, weak, pulse, resonate, render, or fn			no
+KAIN-PARSE-0001-COMPONENT3	Unexpected token in component	error	parser/general	Unexpected token in component. Expected state, weak, pulse, resonate, render, fn, or JSX element			no
+KAIN-PARSE-0001-COMPONENT4	Component missing render body	error	parser/general	Component must have a render body (JSX element)	component Foo:	component Foo: render <box/>	no
+KAIN-PARSE-0001-SHADER	Invalid shader stage	error	parser/general	Expected one of: vertex, fragment, compute, surface, mesh, task, raygen, anyhit, closesthit, miss, intersection, callable	shader foo():	void	shader compute foo(): void	no
+KAIN-PARSE-0001-SHADER2	Expected shader stage	error	parser/general	Expected a shader stage	shader 123:	void	shader vertex main(): void	no
+KAIN-PARSE-0001-SHADER3	Invalid uniform binding	error	parser/general	Expected integer binding after '@' (e.g., @0, @1, @2)	uniform data: f32 @x	uniform data: f32 @0	no
+KAIN-PARSE-0001-ACTOR	Unexpected identifier in actor	error	parser/general	Unexpected identifier in actor. Valid keywords: state, var, fn, or on			no
+KAIN-PARSE-0001-ACTOR2	Invalid token in actor	error	parser/general	Expected 'state', 'var', 'fn', or 'on' in actor definition			no
+KAIN-PARSE-0001-ORCH	Unknown orchestrate stage kind	error	parser/general	Unknown orchestrate stage kind; expected kain, c, cpu, gpu, dispatch, converge, law, patch, world, python, rust, or node			no
+KAIN-PARSE-0001-ORCH2	Unknown orchestrate residency	error	parser/general	Unknown orchestrate residency; expected host, shared, or device			no
+KAIN-PARSE-0001-ORCH3	Unknown orchestrate transfer	error	parser/general	Unknown orchestrate transfer; expected none, host_to_device, device_to_host, or shared_view			no
+KAIN-PARSE-0001-ORCH4	Unknown orchestrate policy	error	parser/general	Unknown orchestrate policy; expected static, telemetry_prefer_gpu, telemetry_prefer_cpu, or telemetry_balance_latency			no
+KAIN-PARSE-0001-PRIMARY	Struct literal syntax rejected	error	parser/general	Struct literal syntax is not supported in KAIN. Use field-by-field assignment instead	let obj = Point { x: 1, y: 2 }	let obj = Point(); obj.x = 1; obj.y = 2	no
+KAIN-PARSE-0001-PRIMARY2	Unclosed brace in f-string	error	parser/general	Unclosed '{' in f-string	"f""hello {name"""	"f""hello {name}"""	no
+KAIN-PARSE-0001-PRIMARY3	Spawn requires named arguments	error	parser/general	Spawn requires named arguments	spawn(actor)	spawn(target: actor)	no
+KAIN-PARSE-0001-UNARY	Send requires named arguments	error	parser/general	Send requires named arguments	send(actor.msg)	send(target: actor, msg: greet())	no
+KAIN-PARSE-0001-UNARY2	Expected message call after send	error	parser/general	Expected message call after send	send target: actor	send target: actor, msg: greet()	no
+KAIN-PARSE-0001-UNARY3	Unknown scoped ownership keyword	error	parser/general	Unknown scoped ownership keyword	collapse x { ... } with unknown	collapse x: observe { ... }	no
+KAIN-PARSE-0001-INCDEC	No ++ or -- in Kain	error	parser/general	++ and -- are not valid operators in Kain. Use x += 1 or x -= 1	x++	x += 1	no
+KAIN-PARSE-0001-JSX	Expected attribute value	error	parser/general	Expected attribute value	<box width=>	<box width=100>	no
+KAIN-PARSE-0001-JSX2	JSX element name must be uppercase	error	parser/general	JSX element name must start with an uppercase letter	<box/>	<Box/>	no
+KAIN-PARSE-0001-JSX3	Expected closing tag	error	parser/general	Expected closing tag for <Name>	<Box>...	<Box>...</Box>	no
+KAIN-PARSE-0001-JSX4	Expected JSX tag name	error	parser/general	Expected JSX tag name	< />	<Box/>	no
+KAIN-PARSE-0001-JSX5	Expected = in JSX attribute	error	parser/general	Expected '=' in JSX attribute	<Box width 100>	<Box width=100>	no
+KAIN-PARSE-0001-ITEM	Top-level item expected	error	parser/general	Expected item (fn, patch, law, axiom, converge, world, entangle, ...)	42	fn main: {}	no
+KAIN-PARSE-0001-DEFER	Defer missing expression	error	parser/general	defer expects an expression payload in v1	defer	defer file.close()	no
+KAIN-PARSE-0001-WORLD	World missing surface (parse-level)	error	parser/general	world block must contain at least one surface projection	world My: {}	world My: surface native_ui => Panel	no
+KAIN-PARSE-0001-ENTANGLE	Entangle missing from/to	error	parser/general	entangle requires both 'from' and 'to' target components	entangle World.comp	entangle from World.a to World.b	no
+KAIN-PARSE-0001-ENTANGLE2	Invalid entangle endpoint	error	parser/general	Entangle endpoint must be a dotted path like World.component.field	entangle from x to y	entangle from W.a.field to W.b.field	no
+KAIN-PARSE-0001-RESONATE	Invalid resonate endpoint	error	parser/general	Resonate endpoint must be a dotted path like World.component.field			no
+KAIN-PARSE-0001-STRUCTLIT	Duplicate struct update ..base	error	parser/general	Struct update syntax only supports one '..base' expression	Struct { ..a, ..b }	Struct { ..a }	no
+KAIN-PARSE-0001-STRUCTLIT2	Empty struct update ..	error	parser/general	Struct update syntax requires an expression after '..'	Struct { .. }	Struct { ..base }	no
+KAIN-PARSE-0001-IF	Expected if after else	error	parser/general	Expected if expression after else	else { x }	else if cond: { x }	no
+KAIN-PARSE-0001-DELEGATE	Expected delegate keyword	error	parser/general	Expected 'delegate' keyword			no
+KAIN-PARSE-0001-STATE	Unexpected method in state definition	error	parser/general	Unexpected method in state definition. Use @transition for transitions.			no
+KAIN-PARSE-0001-STATE2	Animation property not a string	error	parser/general	Expected string literal for animation property			no
+KAIN-PARSE-0001-IDENT	Expected identifier	error	parser/general	Expected identifier			no
+KAIN-PARSE-0001-IDENT2	Unexpected end of input	error	parser/general	Unexpected end of input			no

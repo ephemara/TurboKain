@@ -1,0 +1,209 @@
+// ============================================================================
+// lane_sieve.kn — SETIYETI Kain example 01
+//
+// Per-lane quarantine sieve over backend-quantized voltage codes, written in
+// the fastest Kain idiom the benchmark suite establishes:
+//
+//   * Int-domain quantized codes (mirrors 2/8-bit digitizer output — the
+//     backend-matched representation, not floats)
+//   * ptr<Int> + alloc_zeroed + collapse/observe/decay (explicit ownership,
+//     zero GC, arena-friendly)
+//   * converge spec/fast lanes: scalar reference + AVX2 runtime intrinsic,
+//     capability-gated, with an explicit spec-vs-fast receipt in main
+//   * law predicates as the quarantine gates (compiler-witnessed invariants)
+//   * main() -> Int exit-code contract: 0 proven pass, 1 mask mismatch,
+//     2 spec/fast divergence (telemetry-delta-guard philosophy)
+//
+// Mirrors SETIYETI rule: "Quarantine bad lanes before analysis — per-lane RMS
+// + range/diversity; a dark digitizer (few distinct codes, low RMS) must be
+// quarantined, not scanned."
+//
+// Deterministic by construction: an LCG fills normal lanes, one lane is
+// planted dark (constant code), one hot (raised codes). Expected quarantine
+// mask is known at compile time, so a passing run IS the receipt.
+//
+// NO hardcoded data paths. Defaults are synthetic; the --data-dir file
+// backend plugs in where fill_buffer lives (see README).
+// ============================================================================
+
+use std::runtime
+use std::process
+
+// ── Quarantine gates (band-matched, integer domain: q = sumsq / samples) ──
+// Normal 8-bit uniform codes: E[x^2] = 21717. Dark/hot lanes sit far outside.
+const Q_LO: Int = 8000
+const Q_HI: Int = 30000
+// Minimum distinct codes per lane (dark digitizer => 1).
+const DIV_MIN: Int = 8
+// Planted lanes for the deterministic receipt (defaults only).
+const DARK_LANE: Int = 3
+const HOT_LANE: Int = 7
+const DARK_CODE: Int = 7
+const HOT_BASE: Int = 192
+const HIST_BINS: Int = 256
+// Self-dot modulus: identity for our magnitudes, keeps the AVX2 intrinsic honest.
+const MODULUS: Int = 1000000007
+
+law qrms_ok(q: Int) -> Bool:
+    return q >= Q_LO and q <= Q_HI
+
+law diverse_ok(d: Int) -> Bool:
+    return d >= DIV_MIN
+
+// ── Deterministic LCG (matches backend test-vector style) ──────────────────
+fn lcg_next(state: Int) -> Int:
+    return ((state * 1103515245) + 12345) & 2147483647
+
+// ── Fill: exclusive mutation lane (proven collapse pattern) ────────────────
+fn fill_buffer(buf: ptr<Int>, lanes: Int, samples: Int) -> Int:
+    collapse buf:
+        var lane: Int = 0
+        var state: Int = 123456789
+        while lane < lanes:
+            var s: Int = 0
+            while s < samples:
+                state = lcg_next(state)
+                var code: Int = state % 256
+                if lane == DARK_LANE:
+                    code = DARK_CODE
+                elif lane == HOT_LANE:
+                    code = HOT_BASE + (state % 64)
+                mem_store(ptr_offset(buf, lane * samples + s, "Int"), code, "Int")
+                s = s + 1
+            lane = lane + 1
+        0
+    return 0
+
+// ── Scalar reference stats: sum, sumsq, min, max in one pass ───────────────
+fn lane_stats_scalar(lane_ptr: ptr<Int>, n: Int) -> Int:
+    // Packed: sum in high 40 bits is overkill; return sumsq and stash the
+    // rest through out-params is unsupported, so stats live in two fns.
+    // This one returns sumsq (the quarantine observable).
+    var i: Int = 0
+    var sumsq: Int = 0
+    while i < n:
+        let v: Int = mem_load(ptr_offset(lane_ptr, i, "Int"), "Int")
+        sumsq = sumsq + v * v
+        i = i + 1
+    return sumsq
+
+fn lane_minmax_scalar(lane_ptr: ptr<Int>, n: Int) -> Int:
+    // Packed min/max: min * 1000 + max (codes are 0..255, no collision).
+    var i: Int = 0
+    var lo: Int = 999999
+    var hi: Int = -1
+    while i < n:
+        let v: Int = mem_load(ptr_offset(lane_ptr, i, "Int"), "Int")
+        if v < lo:
+            lo = v
+        if v > hi:
+            hi = v
+        i = i + 1
+    return lo * 1000 + hi
+
+// ── sumsq with a fast lane: scalar truth vs AVX2 runtime intrinsic ─────────
+converge lane_sumsq(lane_ptr: ptr<Int>, n: Int) -> Int:
+    spec reference:
+        return lane_stats_scalar(lane_ptr, n)
+    fast avx2_lane when capability("cpu.x86.avx2"):
+        return runtime_simd_i32_domain_dot_avx2_mod(lane_ptr, lane_ptr, n, 0, MODULUS)
+    // NOTE: verify random(N) cannot synthesize ptr params (types.rs); lane
+    // equivalence is proven at runtime instead: main() runs spec and fast
+    // lanes on the live buffer and returns 2 on any divergence.
+
+// ── Diversity: distinct-code count over a reused 256-bin histogram ─────────
+fn count_diversity(hist: ptr<Int>, lane_ptr: ptr<Int>, n: Int) -> Int:
+    var i: Int = 0
+    while i < n:
+        let v: Int = mem_load(ptr_offset(lane_ptr, i, "Int"), "Int")
+        let bin: Int = v & 255
+        let c: Int = mem_load(ptr_offset(hist, bin, "Int"), "Int")
+        mem_store(ptr_offset(hist, bin, "Int"), c + 1, "Int")
+        i = i + 1
+    var distinct: Int = 0
+    var b: Int = 0
+    while b < HIST_BINS:
+        if mem_load(ptr_offset(hist, b, "Int"), "Int") > 0:
+            distinct = distinct + 1
+        b = b + 1
+    return distinct
+
+fn zero_hist(hist: ptr<Int>) -> Int:
+    collapse hist:
+        var b: Int = 0
+        while b < HIST_BINS:
+            mem_store(ptr_offset(hist, b, "Int"), 0, "Int")
+            b = b + 1
+        0
+    return 0
+
+fn lane_ptr_at(buf: ptr<Int>, lane: Int, samples: Int) -> ptr<Int>:
+    return ptr_offset(buf, lane * samples, "Int")
+
+fn main() -> Int:
+    let args: Array<String> = process_user_args()
+    // NOTE: `and` does not short-circuit, so argv indexing must sit behind
+    // nested ifs — never `len(args) > 0 and args[0] ...`.
+    var lanes: Int = 16
+    if len(args) > 0:
+        if to_int(args[0]) > 0:
+            lanes = to_int(args[0])
+    var samples: Int = 8192
+    if len(args) > 1:
+        if to_int(args[1]) > 0:
+            samples = to_int(args[1])
+    let check_mask: Bool = lanes == 16 and samples == 8192
+
+    let cells: Int = lanes * samples
+    let mut buf: ptr<Int> = alloc_zeroed(cells, "Int")
+    let mut hist: ptr<Int> = alloc_zeroed(HIST_BINS, "Int")
+
+    let _filled: Int = fill_buffer(buf, lanes, samples)
+
+    println("sieve: lanes=" + str(lanes) + " samples=" + str(samples))
+    var quarantined: Int = 0
+    var mask_bad: Int = 0
+    var lane: Int = 0
+    while lane < lanes:
+        let lp: ptr<Int> = lane_ptr_at(buf, lane, samples)
+        let _zeroed: Int = zero_hist(hist)
+        let div: Int = observe hist:
+            count_diversity(hist, lp, samples)
+        // Spec receipt vs fast lane (converge picks AVX2 when present).
+        let sq_spec: Int = observe buf:
+            lane_stats_scalar(lp, samples)
+        let sq_fast: Int = observe buf:
+            lane_sumsq(lp, samples)
+        if sq_spec != sq_fast:
+            println("DIVERGENCE lane=" + str(lane) + " spec=" + str(sq_spec) + " fast=" + str(sq_fast))
+            decay buf
+            decay hist
+            return 2
+        let q: Int = sq_spec / samples
+        let mm: Int = observe buf:
+            lane_minmax_scalar(lp, samples)
+        let ok_rms: Bool = qrms_ok(q)
+        let ok_div: Bool = diverse_ok(div)
+        var verdict: String = "PASS"
+        var reason: String = "-"
+        if ok_rms == false or ok_div == false:
+            verdict = "QUARANTINE"
+            quarantined = quarantined + 1
+            reason = if ok_rms == false and ok_div == false: "rms+diversity" elif ok_rms == false: "rms" else: "diversity"
+        println("lane=" + str(lane) + " q=" + str(q) + " minmax=" + str(mm) + " div=" + str(div) + " verdict=" + verdict + " reason=" + reason)
+        if check_mask:
+            let expect_q: Bool = lane == DARK_LANE or lane == HOT_LANE
+            let got_q: Bool = verdict == "QUARANTINE"
+            if expect_q != got_q:
+                mask_bad = mask_bad + 1
+        lane = lane + 1
+
+    decay buf
+    decay hist
+
+    if mask_bad > 0:
+        println("receipt=FAIL mask_mismatch=" + str(mask_bad))
+        return 1
+    let receipt: String = if check_mask: "PASS mask=3,7" else: "PASS custom-geometry"
+    println("sieve: quarantined=" + str(quarantined) + " receipt=" + receipt)
+    return 0

@@ -1,0 +1,223 @@
+keyword	syntax	purpose	file_line	related
+asm	"asm(""instruction"")"	Emit raw LLVM inline assembly	SYSTEMS:§2.1	Unsafe
+asm_pause	"asm(""pause"")"	CPU spin-loop yield hint	SYSTEMS:§2.1	spin_loop_hint
+asm_nop	"asm(""nop"")"	Single-byte no-op	SYSTEMS:§2.1	asm
+asm_clflush	"asm(""clflush ($0)"", addr, memory=true)"	Cache line flush with address binding	SYSTEMS:§2.1	clflush
+asm_rep_stosd	"asm(""rep stosd"", ptr, cnt, val, constraints=""{rdi},{rcx},{rax}"", clobbers=""rdi,rcx,rax"", memory=true, intel=true)"	Fast memory fill with register binding	SYSTEMS:§2.1	mem_store
+asm_ret	"asm(""ret"")"	Function return in @naked	SYSTEMS:§2.11	naked
+lfence	lfence()	Load fence — serialize load instructions	SYSTEMS:§2.2	mfence
+sfence	sfence()	Store fence — serialize store instructions	SYSTEMS:§2.2	mfence
+mfence	mfence()	Full memory barrier — serialize all memory ops	SYSTEMS:§2.2	lfence
+atomic_fence_seqcst	atomic_fence_seqcst()	Sequentially consistent atomic fence	SYSTEMS:§6.1	mfence
+atomic_fence_acquire	atomic_fence_acquire()	Acquire fence	SYSTEMS:§6.1	atomic_fence_release
+atomic_fence_release	atomic_fence_release()	Release fence	SYSTEMS:§6.1	atomic_fence_acquire
+atomic_fence_acqrel	atomic_fence_acqrel()	Acquire+Release fence	SYSTEMS:§6.1	atomic_fence_seqcst
+rdtsc	rdtsc()	Read CPU timestamp counter	SYSTEMS:§2.4	lfence
+cpuid_eax	cpuid_eax(leaf, subleaf)	CPUID EAX output register	SYSTEMS:§2.4	cpuid_ebx
+cpuid_ebx	cpuid_ebx(leaf, subleaf)	CPUID EBX output register	SYSTEMS:§2.4	cpuid_eax
+cpuid_ecx	cpuid_ecx(leaf, subleaf)	CPUID ECX output register	SYSTEMS:§2.4	cpuid_eax
+cpuid_edx	cpuid_edx(leaf, subleaf)	CPUID EDX output register	SYSTEMS:§2.4	cpuid_eax
+cpu_core_count	cpu_core_count()	Physical core count	SYSTEMS:§2.6	cpu_logical_count
+cpu_logical_count	cpu_logical_count()	Logical processor count (hyperthreads)	SYSTEMS:§2.6	cpu_core_count
+cpu_package_count	cpu_package_count()	Physical socket count	SYSTEMS:§2.6	cpu_core_count
+cpu_cache_line_bytes	cpu_cache_line_bytes()	L1 cache line size (typically 64)	SYSTEMS:§2.6	cache_flush
+numa_node_count	numa_node_count()	Number of NUMA domains	SYSTEMS:§2.6	numa_current_node
+numa_current_node	numa_current_node()	NUMA node of current thread	SYSTEMS:§2.6	numa_bind_current_thread
+numa_bind_current_thread	numa_bind_current_thread(node_index)	Bind thread to NUMA node	SYSTEMS:§2.6	set_current_thread_affinity
+current_thread_id	current_thread_id()	OS thread ID	SYSTEMS:§2.6	set_current_thread_affinity
+current_thread_affinity_mask	current_thread_affinity_mask()	Current CPU affinity bitmask	SYSTEMS:§2.6	set_current_thread_affinity
+set_current_thread_affinity	set_current_thread_affinity(core_index)	Pin thread to specific core	SYSTEMS:§2.6	current_thread_id
+prefetch_read	prefetch_read(ptr, locality)	Prefetch into cache (0-3 locality)	SYSTEMS:§2.4	prefetch_write
+prefetch_write	prefetch_write(ptr, locality)	Prefetch for write (0-3 locality)	SYSTEMS:§2.4	prefetch_read
+cache_flush	cache_flush(ptr)	Flush a cache line by address	SYSTEMS:§2.4	cpu_cache_line_bytes
+spin_loop_hint	spin_loop_hint()	"Equivalent to asm(""pause"")"	SYSTEMS:§2.4	asm_pause
+vm_page_size	vm_page_size()	System page size in bytes	SYSTEMS:§2.5	vm_reserve
+vm_reserve	vm_reserve(byte_count)	Reserve virtual address space	SYSTEMS:§2.5	vm_commit
+vm_commit	vm_commit(address, count)	Commit backed physical pages	SYSTEMS:§2.5	vm_decommit
+vm_decommit	vm_decommit(address, count)	Release physical pages, keep VA	SYSTEMS:§2.5	vm_commit
+vm_unmap	vm_unmap(address, count)	Unmap entire virtual address range	SYSTEMS:§2.5	vm_release
+vm_release	vm_release(address, count)	Same as vm_unmap	SYSTEMS:§2.5	vm_unmap
+vm_map	vm_map(byte_count)	Map (reserve+commit) in one call	SYSTEMS:§2.5	vm_map_huge
+vm_map_huge	vm_map_huge(byte_count)	Map with huge pages if available	SYSTEMS:§2.5	vm_map
+vm_protect_none	vm_protect_none(address, count)	Remove all access	SYSTEMS:§2.5	vm_protect_read
+vm_protect_read	vm_protect_read(address, count)	Read-only	SYSTEMS:§2.5	vm_protect_read_write
+vm_protect_read_write	vm_protect_read_write(address, count)	Read-write	SYSTEMS:§2.5	vm_protect_execute_read
+vm_protect_execute_read	vm_protect_execute_read(address, count)	Read-execute	SYSTEMS:§2.5	vm_protect_execute_read_write
+vm_protect_execute_read_write	vm_protect_execute_read_write(address, count)	Read-write-execute	SYSTEMS:§2.5	vm_protect_read
+vm_lock	vm_lock(address, count)	Lock pages into RAM (mlock)	SYSTEMS:§2.5	vm_unlock
+vm_unlock	vm_unlock(address, count)	Unlock pages from RAM	SYSTEMS:§2.5	vm_lock
+alloc	"alloc(n, ""Type"")"	Heap allocation	SYSTEMS:§9.1	free
+alloc_zeroed	"alloc_zeroed(n, ""Type"")"	Zeroed heap allocation	SYSTEMS:§9.1	alloc
+free	"free(ptr, n, ""Type"")"	Heap deallocation	SYSTEMS:§9.1	alloc
+realloc_mem	"realloc_mem(ptr, old, new, ""Type"")"	Resize allocation	SYSTEMS:§9.1	alloc
+collapse	collapse ptr: ...	Enter mutable ownership scope on raw pointer	SYSTEMS:§9.1	observe
+observe	observe ptr: ...	Enter read-only ownership scope	SYSTEMS:§9.1	collapse
+decay	decay ptr	Release ownership of raw pointer	SYSTEMS:§9.1	collapse
+mem_load	"mem_load(ptr, ""Type"")"	Read value from raw pointer	SYSTEMS:§9.1	mem_store
+mem_store	"mem_store(ptr, val, ""Type"")"	Write value to raw pointer	SYSTEMS:§9.1	mem_load
+ptr_offset	"ptr_offset(ptr, i, ""Type"")"	Pointer arithmetic (offset by i elements)	SYSTEMS:§9.1	mem_load
+ptr_to_int	ptr_to_int(ptr)	Convert pointer to integer address	SYSTEMS:§9.5	int_to_ptr
+int_to_ptr	"int_to_ptr(i, ""Type"")"	Convert integer to pointer	SYSTEMS:§9.5	ptr_to_int
+bitcast	"bitcast(ptr, ""From"", ""To"")"	Reinterpret pointer type	SYSTEMS:§9.5	mem_load
+volatile_load_int	volatile_load_int(address)	Volatile MMIO read (never optimized out)	SYSTEMS:§2.3	volatile_store_int
+volatile_store_int	volatile_store_int(address, value)	Volatile MMIO write (hardware-visible)	SYSTEMS:§2.3	volatile_load_int
+atomic_load_relaxed	atomic_load_relaxed(ptr)	Atomic load with Relaxed ordering	SYSTEMS:§6.1	atomic_load_acquire
+atomic_load_acquire	atomic_load_acquire(ptr)	Atomic load with Acquire ordering	SYSTEMS:§6.1	atomic_store_release
+atomic_load_seqcst	atomic_load_seqcst(ptr)	Atomic load with SeqCst ordering	SYSTEMS:§6.1	atomic_store_seqcst
+atomic_store_relaxed	atomic_store_relaxed(ptr, val)	Atomic store with Relaxed ordering	SYSTEMS:§6.1	atomic_store_release
+atomic_store_release	atomic_store_release(ptr, val)	Atomic store with Release ordering	SYSTEMS:§6.1	atomic_load_acquire
+atomic_store_seqcst	atomic_store_seqcst(ptr, val)	Atomic store with SeqCst ordering	SYSTEMS:§6.1	atomic_load_seqcst
+atomic_add_acqrel	atomic_add_acqrel(ptr, delta)	Atomic fetch-add with Acquire-Release	SYSTEMS:§6.1	atomic_sub_acqrel
+atomic_sub_acqrel	atomic_sub_acqrel(ptr, delta)	Atomic fetch-sub with Acquire-Release	SYSTEMS:§6.1	atomic_add_acqrel
+atomic_and_acqrel	atomic_and_acqrel(ptr, mask)	Atomic fetch-and with Acquire-Release	SYSTEMS:§6.1	atomic_or_acqrel
+atomic_or_acqrel	atomic_or_acqrel(ptr, bits)	Atomic fetch-or with Acquire-Release	SYSTEMS:§6.1	atomic_and_acqrel
+atomic_xor_acqrel	atomic_xor_acqrel(ptr, bits)	Atomic fetch-xor with Acquire-Release	SYSTEMS:§6.1	atomic_or_acqrel
+atomic_exchange_acqrel	atomic_exchange_acqrel(ptr, val)	Atomic exchange with Acquire-Release	SYSTEMS:§6.1	atomic_compare_exchange_seqcst
+atomic_compare_exchange_seqcst	atomic_compare_exchange_seqcst(ptr, expected, desired)	Compare-and-swap with SeqCst ordering	SYSTEMS:§6.1	atomic_exchange_acqrel
+atomic_int_new	atomic_int_new(initial_value)	Create AtomicInt	SYSTEMS:§6.2	atomic_int_destroy
+atomic_int_destroy	atomic_int_destroy(a)	Destroy AtomicInt	SYSTEMS:§6.2	atomic_int_new
+atomic_int_load	atomic_int_load(self, order)	AtomicInt load	SYSTEMS:§6.2	atomic_int_store
+atomic_int_store	atomic_int_store(self, value, order)	AtomicInt store	SYSTEMS:§6.2	atomic_int_load
+atomic_int_add	atomic_int_add(self, delta)	AtomicInt addition	SYSTEMS:§6.2	atomic_int_sub
+atomic_int_sub	atomic_int_sub(self, delta)	AtomicInt subtraction	SYSTEMS:§6.2	atomic_int_add
+atomic_int_exchange	atomic_int_exchange(self, desired)	AtomicInt exchange	SYSTEMS:§6.2	atomic_int_compare_exchange
+atomic_int_compare_exchange	atomic_int_compare_exchange(self, expected, desired)	AtomicInt CAS	SYSTEMS:§6.2	atomic_int_exchange
+atomic_int_wait	atomic_int_wait(self, expected, timeout_ms)	Futex-like wait on AtomicInt	SYSTEMS:§6.2	atomic_int_notify_one
+atomic_int_notify_one	atomic_int_notify_one(self)	Futex wake one on AtomicInt	SYSTEMS:§6.2	atomic_int_wait
+atomic_int_notify_all	atomic_int_notify_all(self)	Futex wake all on AtomicInt	SYSTEMS:§6.2	atomic_int_notify_one
+atomic_bool_new	atomic_bool_new(initial_value)	Create AtomicBool	SYSTEMS:§6.2	atomic_bool_exchange
+atomic_bool_load	atomic_bool_load(self, order)	AtomicBool load	SYSTEMS:§6.2	atomic_bool_store
+atomic_bool_store	atomic_bool_store(self, value, order)	AtomicBool store	SYSTEMS:§6.2	atomic_bool_load
+atomic_bool_exchange	atomic_bool_exchange(self, desired)	AtomicBool exchange	SYSTEMS:§6.2	atomic_bool_store
+atomic_ptr_new	atomic_ptr_new(initial_ptr)	Create AtomicPtr	SYSTEMS:§6.2	atomic_ptr_load
+atomic_ptr_load	atomic_ptr_load(self, order)	AtomicPtr load	SYSTEMS:§6.2	atomic_ptr_store
+atomic_ptr_store	atomic_ptr_store(self, value, order)	AtomicPtr store	SYSTEMS:§6.2	atomic_ptr_load
+atomic_ptr_exchange	atomic_ptr_exchange(self, desired)	AtomicPtr exchange	SYSTEMS:§6.2	atomic_ptr_compare_exchange
+atomic_ptr_compare_exchange	atomic_ptr_compare_exchange(self, expected, desired)	AtomicPtr CAS	SYSTEMS:§6.2	atomic_ptr_exchange
+atomic_ptr_wait	atomic_ptr_wait(self, expected, timeout_ms)	AtomicPtr wait	SYSTEMS:§6.2	atomic_ptr_notify_all
+atomic_ptr_notify_all	atomic_ptr_notify_all(self)	AtomicPtr notify all	SYSTEMS:§6.2	atomic_ptr_wait
+atomic_raw_load	atomic_raw_load(address, order)	Raw pointer atomic load	SYSTEMS:§6.3	atomic_raw_store
+atomic_raw_store	atomic_raw_store(address, value, order)	Raw pointer atomic store	SYSTEMS:§6.3	atomic_raw_load
+atomic_raw_exchange	atomic_raw_exchange(address, value, order)	Raw pointer atomic exchange	SYSTEMS:§6.3	atomic_raw_compare_exchange
+atomic_raw_fetch_add	atomic_raw_fetch_add(address, delta)	Raw pointer atomic fetch-add	SYSTEMS:§6.3	atomic_raw_fetch_sub
+atomic_raw_fetch_sub	atomic_raw_fetch_sub(address, delta)	Raw pointer atomic fetch-sub	SYSTEMS:§6.3	atomic_raw_fetch_add
+atomic_raw_compare_exchange	atomic_raw_compare_exchange(address, expected, desired, success_order, failure_order)	Raw pointer CAS	SYSTEMS:§6.3	atomic_raw_exchange
+atomic_wait	atomic_wait(address, expected, timeout_ms)	Raw pointer futex wait	SYSTEMS:§6.3	atomic_notify_one
+atomic_notify_one	atomic_notify_one(address)	Raw pointer futex wake one	SYSTEMS:§6.3	atomic_wait
+atomic_notify_all	atomic_notify_all(address)	Raw pointer futex wake all	SYSTEMS:§6.3	atomic_notify_one
+mmio_read_int	mmio_read_int(address)	Volatile MMIO register read	SYSTEMS:§8.5	mmio_write_int
+mmio_write_int	mmio_write_int(address, value)	Volatile MMIO register write	SYSTEMS:§8.5	mmio_read_int
+mmio_field_get	mmio_field_get(word, bit_offset, width)	Extract bit field from register value	SYSTEMS:§8.3	mmio_field_set
+mmio_field_set	mmio_field_set(word, bit_offset, width, value)	Insert bit field into register value	SYSTEMS:§8.3	mmio_field_get
+mmio_field_w1c	mmio_field_w1c(word, bit_offset, width, clear_bits)	Write-1-to-clear bit field	SYSTEMS:§8.3	mmio_write_one_to_clear
+mmio_write_one_to_clear	mmio_write_one_to_clear(address, bit_offset, width, clear_bits)	W1C write to MMIO register	SYSTEMS:§8.5	mmio_field_w1c
+mmio_swap16	mmio_swap16(value)	16-bit byte swap	SYSTEMS:§8.4	mmio_swap32
+mmio_swap32	mmio_swap32(value)	32-bit byte swap	SYSTEMS:§8.4	mmio_swap16
+mmio_to_little32	mmio_to_little32(value)	Host to little-endian 32-bit	SYSTEMS:§8.4	mmio_from_little32
+mmio_from_little32	mmio_from_little32(value)	Little-endian to host 32-bit	SYSTEMS:§8.4	mmio_to_little32
+mmio_to_big32	mmio_to_big32(value)	Host to big-endian 32-bit	SYSTEMS:§8.4	mmio_from_big32
+mmio_from_big32	mmio_from_big32(value)	Big-endian to host 32-bit	SYSTEMS:§8.4	mmio_to_big32
+mmio_bit_mask	mmio_bit_mask(width)	Create bitmask of given width	SYSTEMS:§8.3	mmio_field_get
+naked	@naked	No prologue/epilogue emitted for function	SYSTEMS:§2.8	asm
+section	"@section(""name"")"	Place function in custom ELF/PE section	SYSTEMS:§2.8	naked
+link_name	"@link_name(""symbol"")"	Override emitted symbol name	SYSTEMS:§2.8	section
+callconv	"@callconv(""win64"")"	Set calling convention (win64/vectorcall/sysv64)	SYSTEMS:§2.7	naked
+os_syscall0	os_syscall0(nr)	Direct OS syscall with 0 args	SYSTEMS:§3.8	os_syscall6
+os_syscall6	os_syscall6(nr, a1, a2, a3, a4, a5, a6)	Direct OS syscall with 6 args	SYSTEMS:§3.8	os_syscall0
+os_mmap_anon	os_mmap_anon(size)	Anonymous mmap	SYSTEMS:§3.6	os_munmap
+os_munmap	os_munmap(addr, size)	Unmap memory	SYSTEMS:§3.6	os_mmap_anon
+os_mprotect	os_mprotect(addr, size, prot)	Change page protections	SYSTEMS:§3.6	vm_protect_read_write
+os_make_rw	os_make_rw(addr, size)	Make read-write	SYSTEMS:§3.6	os_make_rx
+os_make_rx	os_make_rx(addr, size)	Make read-execute	SYSTEMS:§3.6	os_make_rwx
+os_make_rwx	os_make_rwx(addr, size)	Make read-write-execute	SYSTEMS:§3.6	os_make_rx
+os_madvise	os_madvise(addr, size, advice)	Memory advice	SYSTEMS:§3.6	os_madvise_sequential
+os_madvise_sequential	os_madvise_sequential(addr, size)	Sequential access hint	SYSTEMS:§3.6	os_madvise_willneed
+os_madvise_willneed	os_madvise_willneed(addr, size)	Will-need prefetch hint	SYSTEMS:§3.6	os_madvise_dontneed
+os_madvise_dontneed	os_madvise_dontneed(addr, size)	Don't-need hint	SYSTEMS:§3.6	os_madvise_hugepage
+os_madvise_hugepage	os_madvise_hugepage(addr, size)	Huge page hint	SYSTEMS:§3.6	os_mmap_anon
+os_msync	os_msync(addr, size)	Sync mmap to backing store	SYSTEMS:§3.6	os_munmap
+os_mlock	os_mlock(addr, size)	Lock pages in RAM	SYSTEMS:§3.6	vm_lock
+os_munlock	os_munlock(addr, size)	Unlock pages	SYSTEMS:§3.6	vm_unlock
+bump_create	bump_create(size)	Create bump allocator with N cells	SYSTEMS:§9.4	bump_alloc
+bump_alloc	bump_alloc(bump, cells)	Allocate from bump allocator	SYSTEMS:§9.4	bump_create
+bump_allocator_destroy	bump_allocator_destroy(bump)	Destroy bump allocator	SYSTEMS:§9.4	bump_create
+arena_create	arena_create(size)	Create arena allocator	SYSTEMS:§9.4	arena_alloc
+arena_alloc	arena_alloc(arena, cells)	Allocate from arena	SYSTEMS:§9.4	arena_create
+arena_allocator_destroy	arena_allocator_destroy(arena)	Destroy arena allocator	SYSTEMS:§9.4	arena_create
+pool_create	pool_create(blocks, block_size)	Create pool allocator	SYSTEMS:§9.4	pool_alloc
+pool_alloc	pool_alloc(pool)	Allocate from pool	SYSTEMS:§9.4	pool_free_block
+pool_free_block	pool_free_block(pool, index)	Free pool block by index	SYSTEMS:§9.4	pool_alloc
+pool_allocator_destroy	pool_allocator_destroy(pool)	Destroy pool allocator	SYSTEMS:§9.4	pool_create
+thread_spawn	thread_spawn(func, arg)	Spawn new OS thread	SYSTEMS:§3.11	thread_join
+thread_join	thread_join(thread)	Join (wait for) thread	SYSTEMS:§3.11	thread_spawn
+thread_set_name	thread_set_name(name)	Set current thread name	SYSTEMS:§3.11	thread_current_id
+thread_yield	thread_yield()	Yield current thread slice	SYSTEMS:§3.11	spin_loop_hint
+thread_current_id	thread_current_id()	Current thread OS ID	SYSTEMS:§3.11	current_thread_id
+thread_set_affinity	thread_set_affinity(core_index)	Pin thread to specific core	SYSTEMS:§3.11	set_current_thread_affinity
+thread_is_done	thread_is_done(thread)	Check if thread finished	SYSTEMS:§3.11	thread_join
+i64x4	i64x4(a, b, c, d)	Construct 256-bit SIMD vector from 4 i64 values	SYSTEMS:§3.12	i64x4_splat
+i64x4_splat	i64x4_splat(value)	Broadcast value across all 4 lanes	SYSTEMS:§3.12	i64x4
+i64x4_lane	i64x4_lane(value, index)	Extract single lane from vector	SYSTEMS:§3.12	i64x4_replace
+i64x4_replace	i64x4_replace(value, index, next)	Replace single lane in vector	SYSTEMS:§3.12	i64x4_lane
+i64x4_add	i64x4_add(left, right)	Lane-wise i64 addition	SYSTEMS:§3.12	i64x4_sub
+i64x4_sub	i64x4_sub(left, right)	Lane-wise i64 subtraction	SYSTEMS:§3.12	i64x4_add
+i64x4_mul	i64x4_mul(left, right)	Lane-wise i64 multiplication	SYSTEMS:§3.12	i64x4_add
+i64x4_and	i64x4_and(left, right)	Lane-wise AND	SYSTEMS:§3.12	i64x4_or
+i64x4_or	i64x4_or(left, right)	Lane-wise OR	SYSTEMS:§3.12	i64x4_xor
+i64x4_xor	i64x4_xor(left, right)	Lane-wise XOR	SYSTEMS:§3.12	i64x4_and
+i64x4_blend	i64x4_blend(mask, hot, cold)	Blend based on bitmask	SYSTEMS:§3.12	i64x4_select
+i64x4_dot	i64x4_dot(left, right)	Dot product (horizontal add of products)	SYSTEMS:§3.12	i64x4_horizontal_sum
+i64x4_horizontal_sum	i64x4_horizontal_sum(value)	Sum all 4 lanes	SYSTEMS:§3.12	i64x4_dot
+i64x4_gather	i64x4_gather(base, indexes)	Gather from memory using vector index	SYSTEMS:§3.12	i64x4_scatter
+i64x4_scatter	i64x4_scatter(base, indexes, values)	Scatter to memory using vector index	SYSTEMS:§3.12	i64x4_gather
+mcs_mutex_new	mcs_mutex_new()	Create MCS scalable spinlock	SYSTEMS:§3.13	mcs_mutex_lock
+mcs_mutex_lock	mcs_mutex_lock(lock, node)	Acquire MCS lock	SYSTEMS:§3.13	mcs_mutex_unlock
+mcs_mutex_unlock	mcs_mutex_unlock(lock, node)	Release MCS lock	SYSTEMS:§3.13	mcs_mutex_lock
+mcs_node_new	mcs_node_new()	Create MCS lock node	SYSTEMS:§3.13	mcs_mutex_lock
+mcs_node_destroy	mcs_node_destroy(node)	Destroy MCS node	SYSTEMS:§3.13	mcs_node_new
+rwlock_new	rwlock_new()	Create reader-writer lock	SYSTEMS:§3.13	rwlock_read_lock
+rwlock_read_lock	rwlock_read_lock(lock)	Acquire shared read lock	SYSTEMS:§3.13	rwlock_read_unlock
+rwlock_read_unlock	rwlock_read_unlock(lock)	Release shared read lock	SYSTEMS:§3.13	rwlock_read_lock
+rwlock_write_lock	rwlock_write_lock(lock)	Acquire exclusive write lock	SYSTEMS:§3.13	rwlock_write_unlock
+rwlock_write_unlock	rwlock_write_unlock(lock)	Release exclusive write lock	SYSTEMS:§3.13	rwlock_write_lock
+rwlock_destroy	rwlock_destroy(lock)	Destroy RwLock	SYSTEMS:§3.13	rwlock_new
+semaphore_new	semaphore_new(initial)	Create semaphore	SYSTEMS:§3.13	semaphore_acquire
+semaphore_acquire	semaphore_acquire(sema)	Wait on semaphore (decrement)	SYSTEMS:§3.13	semaphore_release
+semaphore_release	semaphore_release(sema, count)	Signal semaphore (increment)	SYSTEMS:§3.13	semaphore_acquire
+semaphore_destroy	semaphore_destroy(sema)	Destroy semaphore	SYSTEMS:§3.13	semaphore_new
+wait_group_new	wait_group_new()	Create WaitGroup	SYSTEMS:§3.13	wait_group_add
+wait_group_add	wait_group_add(wg, delta)	Add delta to wait counter	SYSTEMS:§3.13	wait_group_done
+wait_group_done	wait_group_done(wg)	Decrement wait counter	SYSTEMS:§3.13	wait_group_wait
+wait_group_wait	wait_group_wait(wg)	Block until counter is 0	SYSTEMS:§3.13	wait_group_done
+wait_group_destroy	wait_group_destroy(wg)	Destroy WaitGroup	SYSTEMS:§3.13	wait_group_new
+once_new	once_new()	Create Once primitive	SYSTEMS:§3.13	once_do
+once_do	once_do(once)	First caller wins initializer	SYSTEMS:§3.13	once_complete
+once_complete	once_complete(once)	Mark initialization complete	SYSTEMS:§3.13	once_do
+once_destroy	once_destroy(once)	Destroy Once	SYSTEMS:§3.13	once_new
+popcount32	popcount32(value)	Count set bits	SYSTEMS:§3.14	clz32
+clz32	clz32(value)	Count leading zeros	SYSTEMS:§3.14	ctz32
+ctz32	ctz32(value)	Count trailing zeros	SYSTEMS:§3.14	clz32
+rotl32	rotl32(value, bits)	Rotate left	SYSTEMS:§3.14	rotr32
+rotr32	rotr32(value, bits)	Rotate right	SYSTEMS:§3.14	rotl32
+bswap32	bswap32(value)	Byte swap (reverse bytes)	SYSTEMS:§3.14	rotl32
+wrapping_add_u32	wrapping_add_u32(l, r)	Wrapping addition (no overflow check)	SYSTEMS:§3.14	wrapping_sub_u32
+wrapping_sub_u32	wrapping_sub_u32(l, r)	Wrapping subtraction	SYSTEMS:§3.14	wrapping_add_u32
+wrapping_mul_u32	wrapping_mul_u32(l, r)	Wrapping multiplication	SYSTEMS:§3.14	wrapping_add_u32
+u8	u8(value)	Truncate to unsigned 8-bit	SYSTEMS:§3.14	u16
+u16	u16(value)	Truncate to unsigned 16-bit	SYSTEMS:§3.14	u32
+u32	u32(value)	Truncate to unsigned 32-bit	SYSTEMS:§3.14	u16
+i8	i8(value)	Truncate to signed 8-bit	SYSTEMS:§3.14	i16
+i16	i16(value)	Truncate to signed 16-bit	SYSTEMS:§3.14	i32
+i32	i32(value)	Truncate to signed 32-bit	SYSTEMS:§3.14	i16
+runtime_init	runtime_init()	Initialize the Kain native runtime	SYSTEMS:§5.1	runtime_shutdown
+runtime_shutdown	runtime_shutdown()	Shutdown the native runtime	SYSTEMS:§5.1	runtime_init
+runtime_heap_validate	runtime_heap_validate()	Validate heap integrity	SYSTEMS:§5.1	runtime_init
+runtime_cpu_feature_mask	runtime_cpu_feature_mask()	CPU capability bitmask	SYSTEMS:§5.2	runtime_cpu_has_capability
+runtime_cpu_has_capability	runtime_cpu_has_capability(key)	Check CPU capability by string key	SYSTEMS:§5.2	runtime_cpu_feature_mask
+runtime_machine_teleport_count	runtime_machine_teleport_count()	Total teleport operations	SYSTEMS:§5.5	runtime_machine_teleport_last_token
+runtime_machine_teleport_last_token	runtime_machine_teleport_last_token()	Last teleport token	SYSTEMS:§5.5	runtime_machine_teleport_count
+runtime_machine_pulse_total_fire_count	runtime_machine_pulse_total_fire_count()	Total pulse fires	SYSTEMS:§5.5	pulse
+with Unsafe	with Unsafe	Effect: allows raw memory, asm, fences, atomics	SYSTEMS:§13.1	with IO
+with IO	with IO	Effect: allows filesystem, console, network	SYSTEMS:§13.1	with Unsafe
+with GPU	with GPU	Effect: allows compute dispatch, shaders	SYSTEMS:§13.1	with Unsafe
+with Async	with Async	Effect: allows async operations	SYSTEMS:§13.1	with IO

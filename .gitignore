@@ -1,0 +1,7 @@
+# TurboKain — build outputs and scratch (never commit)
+.kain/
+_tmp/
+out/
+*.exe
+*.pdb
+*.ll

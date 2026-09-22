@@ -1,0 +1,43 @@
+// ============================================================================
+//  MKS-ULTRA BUILD AUTHORITY
+//  Kain physics engine — Markscript-embedded simulation runtime.
+//  Targets LLVM native executable.
+// ============================================================================
+
+use std::build
+
+fn build(ctx: BuildContext) -> BuildGraph:
+    let app = project("mks-ultra")
+        .kind("kain_executable")
+        .version("0.1.0")
+        .description("Markscript-embedded Kain physics engine — rigid body simulation with collision detection and force integration.")
+        .entry("src/main.kn")
+        .source_root("src")
+        .module_root("src")
+        .module_root("src/engine")
+        .module_root("../../markscript/src")
+        .target("llvm")
+        .artifact_root(".kain/out")
+        .cache_root(".kain/cache/build")
+        .profile("debug")
+
+    let sources = source_set("mks-ultra-sources")
+        .glob("src/**/*.kn")
+        .file("build.kn")
+        .file("KAIN.toml")
+
+    let check = check_task("check-llvm")
+        .project(app)
+        .target("llvm")
+        .inputs(sources)
+
+    let exe = native_executable("root-executable")
+        .project(app)
+        .output("$blade/mks-ultra.exe")
+        .requires(check)
+
+    return build_graph()
+        .project(app)
+        .sources(sources)
+        .task(check)
+        .task(exe)

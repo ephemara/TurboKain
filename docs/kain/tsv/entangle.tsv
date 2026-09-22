@@ -1,0 +1,9 @@
+keyword	syntax	direction	policy	purpose	notes
+entangle	A.field <-> B.field with single_writer	Bidirectional (authority writes, mirror reads)	single_writer	Basic dual-world state coupling	Mirror writes rejected at compile time
+entangle	A.field <-> B.field with single_writer	Bidirectional	single_writer	Multiple-field coupling between same pair of worlds	Each field gets its own entangle line
+entangle	A.field <-> B.field with single_writer	Bidirectional	single_writer	Experiment telemetry decoupling	Authority = raw buffers; Mirror = safe-to-display fields
+entangle	A.field <-> B.field with single_writer	Bidirectional	single_writer	Effects engine parameter mirroring	3-5+ fields per world pair typical in audio DSP
+entangle	A.field <-> C.field with single_writer	Bidirectional	single_writer	Asymmetric multi-mirror fan-out	One authority, two mirrors, different surface kinds
+entangle	A.field <-> B.field with single_writer	Bidirectional	single_writer	Law-guarded coupling (law guards patch before entangle)	Law validates before patch writes, entangle propagates
+entangle	A.field <-> B.field with single_writer	Bidirectional	single_writer	Resonate handler cascading	Resonate fires before entangle propagation
+entangle	A.field <-> B.field with single_writer	Bidirectional	single_writer	Teleport result mirroring	Teleported value propagated to third world via entangle

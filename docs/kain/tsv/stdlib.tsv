@@ -1,0 +1,240 @@
+module	symbol	kind	signature	purpose
+runtime	runtime_init	function	fn runtime_init() -> Int	Initialize the Kain runtime
+runtime	runtime_shutdown	function	fn runtime_shutdown() -> Int	Shutdown the Kain runtime
+runtime	runtime_heap_validate	function	fn runtime_heap_validate() -> Int	Validate heap integrity
+runtime	runtime_cpu_feature_mask	function	fn runtime_cpu_feature_mask() -> Int	Get CPU feature mask
+runtime	runtime_cpu_feature_fingerprint	function	fn runtime_cpu_feature_fingerprint() -> Int	Get CPU feature fingerprint
+runtime	runtime_cpu_has_capability	function	fn runtime_cpu_has_capability(capability_key: String) -> Int	Check CPU capability
+runtime	runtime_converge_telemetry_count	function	fn runtime_converge_telemetry_count() -> Int	Converge telemetry count
+runtime	runtime_machine_teleport_count	function	fn runtime_machine_teleport_count() -> Int	Machine teleport counter
+runtime	runtime_machine_pulse_total_fire_count	function	fn runtime_machine_pulse_total_fire_count() -> Int	Total pulse firings
+runtime	runtime_simd_i32_domain_dot_scalar_mod	function	fn runtime_simd_i32_domain_dot_scalar_mod(a,b,cells,bias,mod) -> Int	SIMD scalar dot product
+runtime	runtime_simd_i32_domain_dot_avx2_mod	function	fn runtime_simd_i32_domain_dot_avx2_mod(a,b,cells,bias,mod) -> Int	SIMD AVX2 dot product
+runtime	runtime_simd_i32_domain_dot_avx512_mod	function	fn runtime_simd_i32_domain_dot_avx512_mod(a,b,cells,bias,mod) -> Int	SIMD AVX-512 dot product
+runtime	runtime_simd_i32_domain_affine_accumulate_scalar_mod	function	fn runtime_simd_i32_domain_affine_accumulate_scalar_mod(...) -> Int	SIMD scalar affine accumulation
+runtime	runtime_simd_i32_domain_affine_accumulate_avx2_mod	function	fn runtime_simd_i32_domain_affine_accumulate_avx2_mod(...) -> Int	SIMD AVX2 affine accumulation
+runtime	runtime_converge_select_lane	function	fn runtime_converge_select_lane(...) -> Int	Select best converge lane
+runtime	runtime_converge_commit_winner	function	fn runtime_converge_commit_winner(...) -> Int	Commit winning converge lane
+runtime	runtime_converge_record_telemetry	function	fn runtime_converge_record_telemetry(...) -> Int	Record converge telemetry
+runtime	runtime_converge_cache_probe_count	function	fn runtime_converge_cache_probe_count() -> Int	Converge cache probe count
+runtime	runtime_converge_cache_hit_count	function	fn runtime_converge_cache_hit_count() -> Int	Converge cache hit count
+time	now_millis	function	fn now_millis() -> Int	Get current wall-clock time in ms
+time	sleep_millis	function	fn sleep_millis(milliseconds: Int) -> Int	Sleep for milliseconds
+time	duration_from_millis	function	fn duration_from_millis(ms: Int) -> Duration	Create duration from milliseconds
+time	duration_from_secs	function	fn duration_from_secs(secs: Int) -> Duration	Create duration from seconds
+time	duration_to_millis	function	fn duration_to_millis(d: Duration) -> Int	Convert duration to milliseconds
+time	instant_now	function	fn instant_now() -> Instant	Get current instant timestamp
+time	instant_elapsed	function	fn instant_elapsed(self: Instant) -> Duration	Get elapsed time from instant
+time	deadline_from_duration	function	fn deadline_from_duration(dur: Duration) -> Deadline	Create deadline from duration
+time	deadline_is_elapsed	function	fn deadline_is_elapsed(self: Deadline) -> Bool	Check if deadline elapsed
+time	ticker_new	function	fn ticker_new(interval: Duration) -> Ticker	Create new ticker
+time	ticker_next	function	fn ticker_next(t: Ticker) -> Ticker	Advance to next tick
+time	datetime_from_epoch_millis	function	fn datetime_from_epoch_millis(epoch_ms: Int) -> DateTime	Create DateTime from epoch ms
+time	Duration	struct	Duration { millis: Int }	Duration type
+time	Instant	struct	Instant { millis: Int }	Instant type
+time	Deadline	struct	Deadline { at: Int }	Deadline type
+time	Ticker	struct	Ticker	Periodic ticker type
+time	DateTime	struct	DateTime	Calendar date/time type
+result	result_ok	function	fn result_ok() -> Int	Success sentinel
+result	result_cancelled	function	fn result_cancelled() -> Int	Cancelled sentinel
+result	result_invalid_argument	function	fn result_invalid_argument() -> Int	Invalid argument sentinel
+result	result_not_found	function	fn result_not_found() -> Int	Not found sentinel
+result	result_capacity_exceeded	function	fn result_capacity_exceeded() -> Int	Capacity exceeded sentinel
+result	result_runtime_unavailable	function	fn result_runtime_unavailable() -> Int	Runtime unavailable sentinel
+result	result_is_ok	function	fn result_is_ok(status: Int) -> Bool	Check if status is OK
+result	result_is_error	function	fn result_is_error(status: Int) -> Bool	Check if status is error
+result	result_combine	function	fn result_combine(left: Int, right: Int) -> Int	Combine two statuses
+intent	entangle_reset	function	fn entangle_reset() -> Int	Reset entangle state
+intent	entangle_registered_count	function	fn entangle_registered_count() -> Int	Count registered entanglements
+intent	entangle_register	function	fn entangle_register(authority,mirror,policy,type_name) -> Int	Register an entangle coupling
+intent	entangle_has_bindings	function	fn entangle_has_bindings() -> Bool	Check if entangle has bindings
+intent	entangle_propagation_count	function	fn entangle_propagation_count() -> Int	Count entangle propagations
+intent	patch_journal_count	function	fn patch_journal_count() -> Int	Count patch journal entries
+intent	patch_last_path	function	fn patch_last_path() -> String	Get last patch path
+intent	patch_status	function	fn patch_status(changed: Bool) -> Int	Get patch status
+intent	patch_is_noop	function	fn patch_is_noop(status: Int) -> Bool	Check if patch is no-op
+intent	patch_applied	function	fn patch_applied(status: Int) -> Bool	Check if patch applied
+intent	law_status	function	fn law_status(valid: Bool) -> Int	Get law validation status
+intent	law_is_valid_status	function	fn law_is_valid_status(status: Int) -> Bool	Check law status validity
+intent	resonate_mutation_count	function	fn resonate_mutation_count() -> Int	Count resonate mutations
+intent	resonate_fire_count	function	fn resonate_fire_count() -> Int	Count resonate firings
+intent	resonate_absorb_count	function	fn resonate_absorb_count() -> Int	Count absorbed resonate events
+intent	resonate_last_target	function	fn resonate_last_target() -> String	Last resonate target field
+intent	resonate_last_old_i64	function	fn resonate_last_old_i64() -> Int	Last resonate old value
+intent	resonate_last_new_i64	function	fn resonate_last_new_i64() -> Int	Last resonate new value
+intent	resonate_last_dampen_ns	function	fn resonate_last_dampen_ns() -> Int	Last resonate dampen window (ns)
+intent	converge_mismatch_count	function	fn converge_mismatch_count() -> Int	Count converge mismatches
+intent	converge_choose_int	function	fn converge_choose_int(spec: Int, fast: Int) -> Int	Choose between spec/fast int
+intent	converge_choose_bool	function	fn converge_choose_bool(spec: Bool, fast: Bool) -> Bool	Choose between spec/fast bool
+intent	converge_status	function	fn converge_status(spec: Int, fast: Int) -> Int	Get converge status
+intent	orchestrate_stage_count	function	fn orchestrate_stage_count() -> Int	Count orchestrate stages
+intent	orchestrate_transfer_count	function	fn orchestrate_transfer_count() -> Int	Count orchestrate transfers
+intent	orchestrate_fallback_count	function	fn orchestrate_fallback_count() -> Int	Count orchestrate fallbacks
+intent	orchestrate_last_runtime	function	fn orchestrate_last_runtime() -> String	Last orchestrate runtime
+intent	orchestrate_stage_status	function	fn orchestrate_stage_status(status: Int) -> Int	Get stage status
+intent	orchestrate_merge_status	function	fn orchestrate_merge_status(left: Int, right: Int) -> Int	Merge stage statuses
+actor	actor_spawn	function	fn actor_spawn(actor_name: String, init_payload: String) -> Int	Spawn an actor
+actor	actor_send	function	fn actor_send(actor_id: Int, message_name: String, data_payload: String) -> Int	Send message to actor
+actor	actor_id_is_valid	function	fn actor_id_is_valid(actor_id: Int) -> Bool	Check actor ID validity
+actor	actor_is_running	function	fn actor_is_running(actor_id: Int) -> Bool	Check if actor is running
+actor	actor_is_terminal	function	fn actor_is_terminal(actor_id: Int) -> Bool	Check if actor is terminal
+actor	actor_shutdown	function	fn actor_shutdown(actor_id: Int) -> Int	Shutdown an actor
+actor	actor_kill	function	fn actor_kill(actor_id: Int) -> Int	Kill an actor
+actor	actor_get_state	function	fn actor_get_state(actor_id: Int) -> Int	Get actor state
+actor	actor_registry_lookup	function	fn actor_registry_lookup(name: String) -> Int	Lookup actor in registry
+actor	actor_registry_register	function	fn actor_registry_register(name: String, actor_id: Int) -> Int	Register actor in registry
+actor	actor_registry_has	function	fn actor_registry_has(name: String) -> Bool	Check if actor is registered
+actor	actor_monitor	function	fn actor_monitor(monitor_id: Int, monitored_id: Int) -> Int	Monitor an actor
+actor	actor_link	function	fn actor_link(actor_a: Int, actor_b: Int) -> Int	Link two actors
+actor	actor_unlink	function	fn actor_unlink(actor_a: Int, actor_b: Int) -> Int	Unlink two actors
+actor	actor_default_mailbox_capacity	function	fn actor_default_mailbox_capacity() -> Int	Default mailbox capacity
+actor	actor_unbounded_mailbox_capacity	function	fn actor_unbounded_mailbox_capacity() -> Int	Unbounded mailbox capacity
+actor	actor_default_ask_timeout_ms	function	fn actor_default_ask_timeout_ms() -> Int	Default ask timeout (ms)
+actor	actor_default_shutdown_grace_ms	function	fn actor_default_shutdown_grace_ms() -> Int	Default shutdown grace (ms)
+actor	actor_supervision_max_restarts	function	fn actor_supervision_max_restarts() -> Int	Max supervision restarts
+actor	actor_supervision_restart_window_millis	function	fn actor_supervision_restart_window_millis() -> Int	Supervision restart window
+actor	actor_invalid_id	function	fn actor_invalid_id() -> Int	Invalid actor ID sentinel
+actor	actor_supervision_observed_child_exit_count	function	fn actor_supervision_observed_child_exit_count(actor_id: Int) -> Int	Count observed child exits
+actor	actor_supervision_restart_attempt_count	function	fn actor_supervision_restart_attempt_count(actor_id: Int) -> Int	Count restart attempts
+actor	actor_supervision_escalation_count	function	fn actor_supervision_escalation_count(actor_id: Int) -> Int	Count supervision escalations
+actor	actor_supervision_limit_hit	function	fn actor_supervision_limit_hit(actor_id: Int) -> Bool	Check if supervision limit hit
+actor	actor_scheduler_queue_depth	function	fn actor_scheduler_queue_depth() -> Int	Scheduler queue depth
+actor	actor_scheduler_max_queue_depth	function	fn actor_scheduler_max_queue_depth() -> Int	Max scheduler queue depth
+actor	actor_scheduler_total_enqueued	function	fn actor_scheduler_total_enqueued() -> Int	Total enqueued messages
+actor	actor_scheduler_total_dequeued	function	fn actor_scheduler_total_dequeued() -> Int	Total dequeued messages
+actor	actor_scheduler_worker_count	function	fn actor_scheduler_worker_count() -> Int	Worker thread count
+actor	actor_scheduler_active_workers	function	fn actor_scheduler_active_workers() -> Int	Active worker count
+actor	actor_scheduler_busy_workers	function	fn actor_scheduler_busy_workers() -> Int	Busy worker count
+actor	actor_scheduler_overflow_thread_spawns	function	fn actor_scheduler_overflow_thread_spawns() -> Int	Overflow thread spawns
+gen_server	gen_server_start	function	fn gen_server_start(state, handle_call, handle_cast, handle_info) -> GenServer	Start a gen_server
+gen_server	gen_server_start_link	function	fn gen_server_start_link(state, ...) -> GenServer	Start linked gen_server
+gen_server	gen_server_call	function	fn gen_server_call(server: GenServer, request: M) -> R	Synchronous call to gen_server
+gen_server	gen_server_cast	function	fn gen_server_cast(server: GenServer, request: M) -> Unit	Async cast to gen_server
+gen_server	gen_server_info	function	fn gen_server_info(server: GenServer, message: M) -> Unit	Send info message to gen_server
+gen_server	gen_server_call_result	function	fn gen_server_call_result(reply: R, state: S) -> GenServerCallOutcome	Create call result
+sync	mcs_mutex_new	function	fn mcs_mutex_new() -> McsMutex	Create MCS lock
+sync	mcs_mutex_lock	function	fn mcs_mutex_lock(lock: McsMutex, node: ptr<Int>) -> Int	Lock MCS mutex
+sync	mcs_mutex_unlock	function	fn mcs_mutex_unlock(lock: McsMutex, node: ptr<Int>) -> Int	Unlock MCS mutex
+sync	teleport_channel_new	function	fn teleport_channel_new(capacity: Int) -> TeleportChannel	Create teleport channel
+sync	teleport_channel_send	function	fn teleport_channel_send(chan: TeleportChannel, item_ptr: Int) -> Bool	Send on teleport channel
+sync	teleport_channel_recv	function	fn teleport_channel_recv(chan: TeleportChannel) -> Int	Receive from teleport channel
+sync	once_new	function	fn once_new() -> Once	Create once primitive
+sync	once_do	function	fn once_do(o: Once) -> Int	Execute once
+sync	once_complete	function	fn once_complete(o: Once) -> Int	Complete once
+sync	wait_group_new	function	fn wait_group_new() -> WaitGroup	Create wait group
+sync	wait_group_add	function	fn wait_group_add(wg: WaitGroup, delta: Int) -> Int	Add to wait group
+sync	wait_group_done	function	fn wait_group_done(wg: WaitGroup) -> Int	Signal wait group done
+sync	wait_group_wait	function	fn wait_group_wait(wg: WaitGroup) -> Int	Wait for wait group
+sync	rwlock_new	function	fn rwlock_new() -> RwLock	Create RW lock
+sync	rwlock_read_lock	function	fn rwlock_read_lock(lock: RwLock) -> Int	Acquire read lock
+sync	rwlock_write_lock	function	fn rwlock_write_lock(lock: RwLock) -> Int	Acquire write lock
+sync	semaphore_new	function	fn semaphore_new(initial: Int) -> Semaphore	Create semaphore
+sync	semaphore_acquire	function	fn semaphore_acquire(sema: Semaphore) -> Int	Acquire semaphore
+sync	semaphore_release	function	fn semaphore_release(sema: Semaphore, permits: Int) -> Int	Release semaphore
+sync	condvar_new	function	fn condvar_new() -> CondVar	Create condition variable
+sync	condvar_wait_timeout	function	fn condvar_wait_timeout(cv: CondVar, ...) -> Int	Wait on condvar with timeout
+sync	condvar_notify_one	function	fn condvar_notify_one(cv: CondVar) -> Int	Notify one waiter
+sync	condvar_notify_all	function	fn condvar_notify_all(cv: CondVar) -> Int	Notify all waiters
+thread	thread_spawn	function	fn thread_spawn(func: ptr<Int>, arg: ptr<Int>) -> Thread	Spawn OS thread
+thread	thread_spawn_entry	function	fn thread_spawn_entry(entry: ThreadEntry, arg: ptr<Int>) -> Thread	Spawn thread with entry
+thread	thread_join	function	fn thread_join(thread: Thread) -> Int	Join OS thread
+thread	thread_yield	function	fn thread_yield() -> Int	Yield thread timeslice
+thread	thread_current_id	function	fn thread_current_id() -> Int	Get current thread ID
+thread	thread_set_name	function	fn thread_set_name(name: String) -> Int	Set thread name
+thread	thread_logical_count	function	fn thread_logical_count() -> Int	Get logical thread count
+thread	thread_core_count	function	fn thread_core_count() -> Int	Get physical core count
+thread	thread_is_done	function	fn thread_is_done(thread: Thread) -> Bool	Check if thread finished
+gpu	gpu_memory_policy	function	fn gpu_memory_policy(residency,access,queue,layout,descriptor) -> GpuMemoryPolicy	Create GPU memory policy
+gpu	gpu_shared_memory_policy	function	fn gpu_shared_memory_policy(...) -> GpuMemoryPolicy	Create shared memory policy
+gpu	gpu_device_local_memory_policy	function	fn gpu_device_local_memory_policy(...) -> GpuMemoryPolicy	Device-local memory policy
+gpu	gpu_upload_memory_policy	function	fn gpu_upload_memory_policy(...) -> GpuMemoryPolicy	Upload memory policy
+gpu	gpu_readback_memory_policy	function	fn gpu_readback_memory_policy(...) -> GpuMemoryPolicy	Readback memory policy
+gpu	gpu_resource_policy	function	fn gpu_resource_policy(memory,usage_flags,debug_name) -> GpuResourcePolicy	Create GPU resource policy
+gpu	gpu_binding_plan	function	fn gpu_binding_plan(binding,descriptor,stage,access,queue) -> GpuBindingPlan	Create GPU binding plan
+gpu	gpu_storage_buffer_binding	function	fn gpu_storage_buffer_binding(binding,stage,access,queue) -> GpuBindingPlan	Storage buffer binding plan
+gpu	gpu_uniform_buffer_binding	function	fn gpu_uniform_buffer_binding(binding,stage,queue) -> GpuBindingPlan	Uniform buffer binding plan
+gpu	gpu_element_size_bytes	function	fn gpu_element_size_bytes(element_type: String) -> Int	Get element byte size
+gpu	gpu_element_count	function	fn gpu_element_count(shape: Array<Int>) -> Int	Compute element count
+gpu	gpu_required_byte_length	function	fn gpu_required_byte_length(element_type,shape) -> Int	Compute required byte length
+gpu	gpu_shared_buffer_from_bytes	function	fn gpu_shared_buffer_from_bytes(bytes,type,shape,format,mime,policy) -> GpuBuffer	Create shared buffer from bytes
+gpu	gpu_shared_buffer_zeroed	function	fn gpu_shared_buffer_zeroed(type,shape,format,mime,policy) -> GpuBuffer	Create zeroed shared buffer
+gpu	gpu_shared_image_from_bytes	function	fn gpu_shared_image_from_bytes(bytes,w,h,ch,layout,format,mime,policy) -> GpuImage	Create shared image
+gpu	gpu_shared_image_zeroed	function	fn gpu_shared_image_zeroed(w,h,ch,layout,format,mime,policy) -> GpuImage	Create zeroed shared image
+gpu	gpu_backend_state	function	fn gpu_backend_state(backend_id: String) -> GpuBackendState	Get GPU backend state
+gpu	gpu_backend_preferred	function	fn gpu_backend_preferred() -> GpuBackendState	Get preferred GPU backend
+gpu	gpu_std140_vec3	function	fn gpu_std140_vec3(value: Vec3) -> Std140<Std140Vec3>	Convert Vec3 to std140
+gpu	gpu_std140_vec4	function	fn gpu_std140_vec4(value: Vec4) -> Std140<Vec4>	Convert Vec4 to std140
+gpu	gpu_std140_mat4	function	fn gpu_std140_mat4(value: Mat4) -> Std140<Mat4>	Convert Mat4 to std140
+gpu	gpu_std430_vec3a	function	fn gpu_std430_vec3a(value: Vec3A) -> Std430<Vec3A>	Convert Vec3A to std430
+gpu	gpu_cbuffer_mat4	function	fn gpu_cbuffer_mat4(value: Mat4) -> CBuffer<Mat4>	Convert Mat4 to CBuffer
+graphics	graphics_session_create	function	fn graphics_session_create(app_name: String, width: Int, height: Int) -> Int	Create graphics session
+graphics	graphics_session_destroy	function	fn graphics_session_destroy(session_id: Int) -> Int	Destroy graphics session
+graphics	graphics_backend_supported	function	fn graphics_backend_supported(backend_id: String) -> Int	Check backend support
+graphics	graphics_backend_select	function	fn graphics_backend_select(session_id: Int, backend_id: String) -> Int	Select graphics backend
+graphics	graphics_active_backend	function	fn graphics_active_backend(session_id: Int) -> String	Get active backend
+graphics	graphics_begin_frame	function	fn graphics_begin_frame(session_id: Int, delta_ms: Float) -> Int	Begin render frame
+graphics	graphics_end_frame	function	fn graphics_end_frame(session_id: Int) -> Int	End render frame
+graphics	graphics_present	function	fn graphics_present(session_id: Int) -> Int	Present frame to display
+graphics	graphics_buffer_create	function	fn graphics_buffer_create(session,kind,label,length,stride) -> Int	Create graphics buffer
+graphics	graphics_shader_spirv_from_hex	function	fn graphics_shader_spirv_from_hex(session,key,stage,entry,hex) -> Int	Create shader from hex SPIR-V
+graphics	graphics_mesh_create	function	fn graphics_mesh_create(session,label,vbuf,ibuf,vcnt,icnt) -> Int	Create mesh
+graphics	graphics_pipeline_create	function	fn graphics_pipeline_create(session,label,vs,fs,backend) -> Int	Create graphics pipeline
+graphics	graphics_draw_mesh	function	fn graphics_draw_mesh(session,pipeline,mesh,instances) -> Int	Draw mesh
+math	math module	module	250+ symbols	Pure math: vectors, matrices, quaternions, noise, intersections
+hash	hash module	module	47 symbols	Pure hashing: Wang hash, FNV-1a, CRC32, Fingerprint32
+collections	collections module	module	110 symbols	Data structures: ArrayList, HashMap, SlotMap, PriorityQueue
+text	text module	module	59 symbols	Text processing: TextSlice, StringView, trim, split, join
+ascii	ascii module	module	53 symbols	Character classification: is_alpha, is_digit, is_whitespace
+fmt	fmt module	module	76 symbols	Formatting: FmtWriter, int/float/bool/hex formatting
+bits	bits module	module	17 symbols	Bit manipulation: popcount, clz, ctz, bswap, rotl, rotr
+base64	base64 module	module	14 symbols	Base64 encode/decode
+memory	memory module	module	19 symbols	Volatile load/store, fences (lfence/sfence/mfence), prefetch
+atomic	atomic module	module	44 symbols	Atomic ops: load/store/add/sub/cas/exchange with ordering
+alloc	alloc module	module	33 symbols	Allocators: BumpAllocator, ArenaAllocator, PoolAllocator
+io	io module	module	29 symbols	Buffer primitives: RingBuffer, StringBuilder
+bytes	bytes module	module	33 symbols	Byte slices: ByteSlice, BytesBuilder, hex encode/decode
+crypto	crypto module	module	9 symbols	Hash primitives: SHA-256, SHA-512 stubs
+json	json module	module	133 symbols	JSON parser/serializer
+semver	semver module	module	28 symbols	Semantic version parser
+uri	uri module	module	10 symbols	URI parser: scheme, authority, path, query, fragment
+tar	tar module	module	9 symbols	Tar format parser
+zip	zip module	module	9 symbols	Zip format parser
+compress	compress module	module	9 symbols	Compression: deflate/inflate stubs
+unicode	unicode module	module	13 symbols	Unicode utilities: codepoint classification, UTF-8 encode/decode
+simd	simd module	module	16 symbols	SIMD vector types: I64x4 with lane ops, dot, gather/scatter
+path	path module	module	11 symbols	Path utilities: join, parent, filename, extension, normalize
+elf	elf module	module	11 symbols	ELF format header/program/section readers
+mmio	mmio module	module	20 symbols	MMIO: bit field get/set, endian swap, volatile read/write
+random	random module	module	21 symbols	RNG: Xoshiro128, random_int_in_range, random_float
+fs	fs module	module	148 symbols	Filesystem API: open, read, write, walk, watch
+os	os module	module	127 symbols	OS interface: env vars, process info, mmap, syscalls
+os_path	os_path module	module	32 symbols	OS path manipulation
+process	process module	module	63 symbols	Process spawning: fork/exec, pipes, PTY
+platform	platform module	module	24 symbols	Dynamic library loading: dlopen/dlsym
+python	python module	module	78 symbols	Python bridge: CPython embedding
+cuda	cuda module	module	93 symbols	CUDA bridge: GPU compute dispatch
+input	input module	module	45 symbols	Input devices: keyboard, mouse, gamepad
+ui	ui module	module	340 symbols	Full UI framework
+http	http module	module	44 symbols	HTTP networking
+http2	http2 module	module	10 symbols	HTTP/2 networking
+net	net module	module	58 symbols	TCP networking: connect, listen, accept
+mcp	mcp module	module	73 symbols	MCP protocol
+tls	tls module	module	11 symbols	TLS networking
+interop	interop module	module	10 symbols	Interop bridges: Python, JS, C host objects
+js	js module	module	69 symbols	JavaScript interop
+kain	kain module	module	31 symbols	Compiler tooling
+build	build module	module	51 symbols	Build system
+test	test module	module	27 symbols	Test framework
+proof	proof module	module	49 symbols	Proof framework
+certify	certify module	module	3 symbols	Certification framework
+attrition	attrition module	module	3 symbols	Attrition testing framework
+bench	bench module	module	4 symbols	Benchmark framework
+diagnostics	diagnostics module	module	25 symbols	Diagnostics and error reporting
+machine	machine module	module	38 symbols	CPU intrinsics and VM operations
+reload	reload module	module	43 symbols	Hot reload support
+reflect	reflect module	module	5 symbols	Runtime reflection
+target	target module	module	6 symbols	Target enum: Arch, OS, Env, Target
+markscript	markscript module	module	various	Markdown-as-scriptable language
+wasm	wasm module	module	18 symbols	WebAssembly target support
+mks	mks module	module	various	MKS utilities
+no_std	no_std module	module	various	Bare-metal gate module

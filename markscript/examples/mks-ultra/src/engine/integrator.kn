@@ -1,0 +1,117 @@
+// ============================================================================
+//  FORCE INTEGRATORS — Euler, Semi-Implicit Euler, Verlet
+//
+//  Pure Layer 0 integration methods for rigid body dynamics. Each function
+//  operates on value-semantic RigidBody structs and returns new instances
+//  with updated position and velocity based on the applied force (stored
+//  as acceleration in the body).
+//
+//  Vec3 is a built-in Kain math type (named-tuple with .x, .y, .z fields),
+//  constructed via vec3(x, y, z). RigidBody and PhysicsWorld are imported
+//  from the sibling module physics.kn.
+//
+//  All functions are stateless: no mutation, no side effects, pure
+//  transformation of input state to output state.
+// ============================================================================
+
+use std::math
+use physics::RigidBody
+
+// ===========================================================================
+//  EXPLICIT (FORWARD) EULER INTEGRATION
+//
+//  The simplest numerical integration method. Updates position using current
+//  velocity, then updates velocity using current acceleration.
+//
+//  Scheme:
+//    new_pos = pos + vel * dt
+//    new_vel = vel + accel * dt
+//
+//  O(dt²) local truncation error per step. Not energy-conserving — tends
+//  to add energy to the system over time. Suitable for real-time demos
+//  with small, fixed timesteps where stability is not critical.
+// ============================================================================
+
+pub fn euler_integrate(body: RigidBody, dt: Float) -> RigidBody:
+    let new_x = body.position.x + body.velocity.x * dt
+    let new_y = body.position.y + body.velocity.y * dt
+    let new_z = body.position.z + body.velocity.z * dt
+    let new_vx = body.velocity.x + body.acceleration.x * dt
+    let new_vy = body.velocity.y + body.acceleration.y * dt
+    let new_vz = body.velocity.z + body.acceleration.z * dt
+    return RigidBody {
+        position: vec3(new_x, new_y, new_z),
+        velocity: vec3(new_vx, new_vy, new_vz),
+        acceleration: body.acceleration,
+        mass: body.mass,
+        mass_inv: body.mass_inv,
+        radius: body.radius
+    }
+
+// ===========================================================================
+//  SEMI-IMPLICIT EULER (SYMPLECTIC EULER)
+//
+//  Velocity-first Euler integration. Updates velocity using current
+//  acceleration FIRST, then updates position using the new velocity.
+//
+//  Scheme:
+//    new_vel = vel + accel * dt
+//    new_pos = pos + new_vel * dt
+//
+//  O(dt²) local truncation error, but SYMPLECTIC — conserves energy
+//  over long simulations (no energy drift). The standard choice for
+//  real-time physics engines, particle systems, and game simulations.
+//  Much more stable than explicit Euler for the same timestep.
+// ============================================================================
+
+pub fn semi_implicit_euler(body: RigidBody, dt: Float) -> RigidBody:
+    let new_vx = body.velocity.x + body.acceleration.x * dt
+    let new_vy = body.velocity.y + body.acceleration.y * dt
+    let new_vz = body.velocity.z + body.acceleration.z * dt
+    let new_x = body.position.x + new_vx * dt
+    let new_y = body.position.y + new_vy * dt
+    let new_z = body.position.z + new_vz * dt
+    return RigidBody {
+        position: vec3(new_x, new_y, new_z),
+        velocity: vec3(new_vx, new_vy, new_vz),
+        acceleration: body.acceleration,
+        mass: body.mass,
+        mass_inv: body.mass_inv,
+        radius: body.radius
+    }
+
+// ===========================================================================
+//  VERLET INTEGRATION (STÖRMER-VERLET)
+//
+//  A second-order symplectic integrator that uses the previous position
+//  to compute the new position directly from acceleration, then derives
+//  velocity as (new_pos - pos) / dt.
+//
+//  Scheme:
+//    dt_sq  = dt * dt
+//    new_pos = 2 * pos - prev_pos + accel * dt_sq
+//    new_vel = (new_pos - pos) / dt
+//
+//  O(dt⁴) local truncation error on position, O(dt²) on velocity.
+//  Time-reversible and energy-conserving. Requires storing the previous
+//  position separately (provided as prev_pos parameter). Ideal for
+//  molecular dynamics, cloth simulation, and orbital mechanics where
+//  energy conservation is paramount.
+// ============================================================================
+
+pub fn verlet_integrate(body: RigidBody, prev_pos: Vec3, dt: Float) -> RigidBody:
+    let dt_sq = dt * dt
+    let new_x = 2.0 * body.position.x - prev_pos.x + body.acceleration.x * dt_sq
+    let new_y = 2.0 * body.position.y - prev_pos.y + body.acceleration.y * dt_sq
+    let new_z = 2.0 * body.position.z - prev_pos.z + body.acceleration.z * dt_sq
+    let vel_x = (new_x - body.position.x) / dt
+    let vel_y = (new_y - body.position.y) / dt
+    let vel_z = (new_z - body.position.z) / dt
+    return RigidBody {
+        position: vec3(new_x, new_y, new_z),
+        velocity: vec3(vel_x, vel_y, vel_z),
+        acceleration: body.acceleration,
+        mass: body.mass,
+        mass_inv: body.mass_inv,
+        radius: body.radius
+    }

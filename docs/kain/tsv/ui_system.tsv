@@ -1,0 +1,169 @@
+construct	syntax	purpose	file_line	related
+component	component Name(props): state fn render	Declare a UI widget with props, state, methods, and JSX render	ui.md:§6.1	world surface
+render	render <tag attr={expr}>...</tag>	Describe UI tree as JSX inside component	ui.md:§6.1	component
+state	state name: Type = initial	Declare persistent component state that survives frames	ui.md:§6.2	component
+box	"<box fill_color=""x"" width={n} height={n}>"	Filled rectangle with corner_radius, fill_color, stroke	ui.md:§3.5	panel
+text	"<text value=""x"" font_size={n} color=""x"">"	Text label element	ui.md:§3.5	label
+stack	"<stack direction=""x"" gap={n} alignment=""x"">"	Layout container (horizontal/vertical/z)	ui.md:§4.3	box
+panel	"<panel title=""x"">"	Container with title bar (via box + style)	ui.md:§3.5	box
+on_click	on_click={handler}	Event binding for click on element	ui.md:§3.5	element_set_callback
+on_change	on_change={handler}	Event binding for value change	ui.md:§3.5	on_click
+on_focus	on_focus={handler}	Event binding for focus in	ui.md:§3.5	on_blur
+on_blur	on_blur={handler}	Event binding for focus out	ui.md:§3.5	on_focus
+on_mouse_enter	on_mouse_enter={handler}	Event binding for pointer entering element	ui.md:§3.5	on_mouse_leave
+on_mouse_leave	on_mouse_leave={handler}	Event binding for pointer leaving element	ui.md:§3.5	on_mouse_enter
+for	for item in items: <tag/>	Iterate over array inside JSX render tree	ui.md:§6.5	if
+if	if cond: <tag/> else: <tag/>	Conditional rendering inside JSX tree	ui.md:§6.5	for
+HStack	component HStack(spacing, alignment, distribution)	Arranges children left-to-right horizontally	ui.md:§4.3	VStack
+VStack	component VStack(spacing, alignment, distribution)	Arranges children top-to-bottom vertically	ui.md:§4.3	HStack
+ZStack	component ZStack(alignment)	Stacks children back-to-front at same position	ui.md:§4.3	HStack
+Grid	component Grid(columns, spacing)	Arranges children in row-major column grid	ui.md:§4.3	VStack
+Spacer	component Spacer(min_size, axis)	Flexible space that expands to fill available room	ui.md:§4.3	HStack
+Padding	component Padding(all, horizontal, vertical, left, top, right, bottom)	Insets children by specified padding	ui.md:§4.3	spacing
+ScrollView	component ScrollView(axis, show_indicator) with Reactive	Scrollable viewport with scroll state	ui.md:§4.3	VStack
+Divider	component Divider(orientation, color, thickness)	Visual separator line (horizontal or vertical)	ui.md:§4.3	Spacer
+Label	component Label(value, font_size, color, align, weight)	Thin wrapper over Text with theme defaults	ui.md:§4.4	text
+Button	component Button(label, variant, disabled)	Interactive button with hover/press visual states	ui.md:§4.4	on_click
+TextInput	component TextInput(value, placeholder, width, password)	Single-line editable text field with cursor	ui.md:§4.4	Label
+Checkbox	component Checkbox(label, checked)	Square toggle box with checkmark and optional label	ui.md:§4.4	Toggle
+Slider	component Slider(value, min, max, step)	Horizontal track with draggable thumb	ui.md:§4.4	ProgressBar
+Toggle	component Toggle(checked, disabled)	Capsule-shaped toggle switch with animated thumb	ui.md:§4.4	Checkbox
+ProgressBar	component ProgressBar(value, max, variant)	Horizontal bar showing completion ratio	ui.md:§4.4	Slider
+Spinner	component Spinner(size, color, speed)	Animated loading spinner with pulse-driven rotation	ui.md:§4.4	ProgressBar
+RoundedRect	component RoundedRect(width, height, corner_radius, fill_color)	Renders filled/optionally rounded rectangle	ui.md:§4.2	box
+Circle	component Circle(radius, fill_color, stroke_color, stroke_width)	Renders filled or stroked circle	ui.md:§4.2	RoundedRect
+Text	component Text(value, font_size, color, align, weight, font_family)	Renders text via <text> JSX element	ui.md:§4.2	Label
+InteractiveArea	component InteractiveArea(width, height, cursor, enabled)	Invisible hit-testable region with pointer event tracking	ui.md:§4.2	Button
+Image	component Image(src, width, height, fit, alt)	Renders an image (stub/future)	ui.md:§4.2	RoundedRect
+GradientRect	component GradientRect(colors, stops, direction)	Renders gradient rectangle (stub/future)	ui.md:§4.2	RoundedRect
+surface_native	surface native_ui => Comp	Bind world state to native UI rendering surface	ui.md:§1	native_ui_session_create
+ui_host_session_create	ui_host_session_create(name, title, w, h, backend)	Create UI session + window + attach host	ui.md:§10.3	native_ui_session_create
+native_ui_begin_frame	native_ui_begin_frame(session, delta_ms)	Start a new UI frame	ui.md:§10.2	native_ui_end_frame
+native_ui_end_frame	native_ui_end_frame(session)	End current UI frame	ui.md:§10.2	native_ui_present
+native_ui_present	native_ui_present(session)	Present framebuffer to screen	ui.md:§10.2	native_ui_end_frame
+native_ui_poll_event	native_ui_poll_event(session, out_event, max_size)	Poll next UI event (non-blocking)	ui.md:§3.2	native_ui_push_event
+native_ui_push_event	native_ui_push_event(event)	Push event into UI event queue	ui.md:§3.2	native_ui_poll_event
+native_ui_hit_test	native_ui_hit_test(session, x, y)	Find node_id at screen point (x, y)	ui.md:§2.5	poll_event
+native_ui_font_create	native_ui_font_create(session, name, family, size)	Load font into UI session	ui.md:§2.6	native_ui_font_destroy
+native_ui_font_destroy	native_ui_font_destroy(session, font_id)	Unload font	ui.md:§2.6	native_ui_font_create
+native_ui_text_measure_width	native_ui_text_measure_width(session, font_id, text)	Measure text width in pixels	ui.md:§2.6	native_ui_font_create
+native_ui_window_open	native_ui_window_open(session, title, width, height)	Create platform window for session	ui.md:§3.2	session_create
+native_ui_host_pump	native_ui_host_pump(session)	Pump platform message loop	ui.md:§3.2	native_ui_window_open
+native_ui_host_should_close	native_ui_host_should_close(session)	Check if window close requested	ui.md:§3.2	native_ui_host_pump
+native_ui_host_attach	native_ui_host_attach(session, backend_id)	Attach platform host backend to session	ui.md:§10.3	native_ui_host_pump
+native_ui_session_create	native_ui_session_create(name, width, height)	Create UI session (returns session_id)	ui.md:§3.2	native_ui_session_destroy
+native_ui_session_destroy	native_ui_session_destroy(session)	Destroy UI session	ui.md:§3.2	native_ui_session_create
+native_ui_node_create	native_ui_node_create(session, parent_id, kind, stable_key)	Create a retained tree node	ui.md:§10.4	native_ui_node_destroy
+native_ui_node_destroy	native_ui_node_destroy(session, node_id)	Destroy retained tree node	ui.md:§10.4	native_ui_node_create
+native_ui_node_set_rect	native_ui_node_set_rect(session, node_id, x, y, w, h)	Set node bounding rect	ui.md:§10.4	native_ui_node_set_stable_key
+native_ui_node_set_stable_key	native_ui_node_set_stable_key(session, node_id, key)	Set stable key for reconciliation	ui.md:§10.4	native_ui_node_find_by_stable_key
+native_ui_node_find_by_stable_key	native_ui_node_find_by_stable_key(session, key)	Find node by stable key	ui.md:§10.4	native_ui_node_set_stable_key
+native_ui_reconcile_node	native_ui_reconcile_node(session, node_id)	Reconcile element tree node	ui.md:§10.4	native_ui_node_set_stable_key
+native_ui_focus	native_ui_focus(session, node_id)	Set focus to node	ui.md:§10.4	native_ui_focused_node
+native_ui_focused_node	native_ui_focused_node(session)	Get currently focused node	ui.md:§10.4	native_ui_focus
+native_ui_focus_next	native_ui_focus_next(session)	Move focus to next tabbable node	ui.md:§10.4	native_ui_focus_prev
+native_ui_focus_prev	native_ui_focus_prev(session)	Move focus to previous tabbable node	ui.md:§10.4	native_ui_focus_next
+native_ui_mark_dirty	native_ui_mark_dirty(session, node_id)	Mark node region as needing redraw	ui.md:§10.4	native_ui_dirty_count
+native_ui_dirty_count	native_ui_dirty_count(session)	Number of dirty regions pending redraw	ui.md:§10.4	native_ui_mark_dirty
+native_ui_draw_rect	native_ui_draw_rect(session, rect, color, corner_radius)	Emit rectangle draw command	ui.md:§10.4	native_ui_draw_text
+native_ui_draw_text	native_ui_draw_text(session, pos, text, font_id, size, color)	Emit text draw command	ui.md:§2.3	native_ui_draw_rect
+native_ui_draw_resource	native_ui_draw_resource(session, src, dst, resource_id)	Emit resource blit command	ui.md:§10.4	native_ui_draw_rect
+native_ui_draw_gradient	native_ui_draw_gradient(session, rect, colors, stops)	Emit gradient draw command	ui.md:§10.4	native_ui_draw_rect
+native_ui_resource_create_type	native_ui_resource_create_type(session, type)	Create typed resource (image, shader)	ui.md:§10.4	native_ui_resource_set_bytes_hex
+native_ui_resource_set_bytes_hex	native_ui_resource_set_bytes_hex(session, resource_id, hex_data)	Set resource bytes from hex string	ui.md:§10.4	native_ui_resource_create_type
+native_ui_shader_create	native_ui_shader_create(session, spirv_hex)	Create shader from SPIR-V hex	ui.md:§10.4	native_ui_resource_set_bytes_hex
+ui_state_set_bool	ui_state_set_bool(session, key, value)	Set boolean UI state	ui.md:§10.4	state_get_i64
+ui_state_set_f64	ui_state_set_f64(session, key, value)	Set float UI state	ui.md:§10.4	state_get_f64
+ui_state_set_string	ui_state_set_string(session, key, value)	Set string UI state	ui.md:§10.4	state_get_string
+ui_state_counter	ui_state_counter(session, key, delta)	Atomic increment/decrement UI state counter	ui.md:§10.4	ui_state_toggle
+ui_state_toggle	ui_state_toggle(session, key)	Toggle boolean UI state	ui.md:§10.4	ui_state_set_bool
+ui_fb_ptr	ui_fb_ptr(session)	Get framebuffer pointer	ui.md:§10.4	ui_fb_width
+ui_fb_width	ui_fb_width(session)	Get framebuffer width	ui.md:§10.4	ui_fb_height
+ui_fb_height	ui_fb_height(session)	Get framebuffer height	ui.md:§10.4	ui_fb_stride
+ui_fb_stride	ui_fb_stride(session)	Get framebuffer stride in elements	ui.md:§10.4	ui_fb_ptr
+native_ui_host_clipboard_get	native_ui_host_clipboard_get(session, out, cap)	Get clipboard text	ui.md:§10.4	native_ui_host_clipboard_set
+native_ui_host_clipboard_set	native_ui_host_clipboard_set(session, text)	Set clipboard text	ui.md:§10.4	native_ui_host_clipboard_get
+native_ui_host_dpi	native_ui_host_dpi(session)	Get host DPI scaling factor	ui.md:§10.4	native_ui_host_get_size
+native_ui_host_get_size	native_ui_host_get_size(session)	Get host window size	ui.md:§10.4	native_ui_host_dpi
+element_set_callback	element_set_callback(session, element_id, event_name, callback_fn)	Bind callback function to element event (vtable slot 23)	ui.md:§3.2	element_set_attr_string
+element_begin	element_begin(session, parent_id, kind, stable_key)	Start a named element in retained tree (vtable slot 2)	ui.md:§3.2	element_end
+element_end	element_end(session, element_id)	Close an element (vtable slot 3)	ui.md:§3.2	element_begin
+element_set_text	element_set_text(session, element_id, text)	Set text content on element (vtable slot 4)	ui.md:§3.2	element_set_attr_string
+element_set_attr_i64	element_set_attr_i64(session, element_id, key, value)	Set integer attribute (vtable slot 5)	ui.md:§3.5	direction
+element_set_attr_f64	element_set_attr_f64(session, element_id, key, value)	Set float attribute (vtable slot 6)	ui.md:§3.5	padding
+element_set_attr_string	element_set_attr_string(session, element_id, key, value)	Set string attribute (vtable slot 7)	ui.md:§3.5	fill_color
+state_get_i64	state_get_i64(session, key)	Get integer state (vtable slot 8)	ui.md:§3.2	state_set_i64
+state_set_i64	state_set_i64(session, key, value)	Set integer state (vtable slot 9)	ui.md:§3.2	state_get_i64
+state_get_f64	state_get_f64(session, key)	Get float state (vtable slot 19)	ui.md:§3.2	state_set_f64
+state_set_f64	state_set_f64(session, key, value)	Set float state (vtable slot 20)	ui.md:§3.2	state_get_f64
+state_get_string	state_get_string(session, key)	Get string state (vtable slot 21)	ui.md:§3.2	state_set_string
+state_set_string	state_set_string(session, key, value)	Set string state (vtable slot 22)	ui.md:§3.2	state_get_string
+begin_frame	begin_frame(session, delta_ms)	Start frame, reset per-frame arena (vtable slot 10)	ui.md:§3.2	end_frame
+end_frame	end_frame(session)	End frame, signal completion (vtable slot 11)	ui.md:§3.2	present
+present	present(session)	Present framebuffer to screen (vtable slot 12)	ui.md:§3.2	end_frame
+session_create	session_create(name, width, height)	Create UI session (vtable slot 0)	ui.md:§3.2	session_destroy
+session_destroy	session_destroy(session_id)	Destroy UI session (vtable slot 1)	ui.md:§3.2	session_create
+window_open	window_open(session_id, title, width, height)	Create platform window (vtable slot 15)	ui.md:§3.2	host_pump
+host_pump	host_pump(session_id)	Pump platform message loop (vtable slot 16)	ui.md:§3.2	should_close
+poll_event	poll_event(session_id, out_event, max_size)	Poll next event non-blocking (vtable slot 13)	ui.md:§3.2	present
+get_gpu_extension	get_gpu_extension(session_id)	Get GPU surface extension or NULL (vtable slot 18)	ui.md:§11.3	gpu_backend
+fill_color	"fill_color=""name"""	Named color key for element fill	ui.md:§10.6	theme
+corner_radius	corner_radius={n}	Corner radius attribute for rounded elements	ui.md:§3.5	fill_color
+padding	padding={n}	Padding attribute	for elements	ui.md:§3.5	spacing
+spacing	spacing={n}	Spacing between children in layout	ui.md:§3.5	padding
+font_size	font_size={n}	Font size attribute for text	ui.md:§3.5	color
+color	"color=""name"""	Text color named key	ui.md:§10.6	fill_color
+background	"background=""name"""	Alias for fill_color	ui.md:§3.5	fill_color
+border_color	"border_color=""name"""	Border color attribute	ui.md:§3.5	fill_color
+border_width	border_width={n}	Border width in pixels	ui.md:§3.5	fill_color
+opacity	opacity={n}	Element opacity (0.0-1.0)	ui.md:§3.5	fill_color
+direction	"direction=""horizontal/vertical/z"""	Stack direction attribute	ui.md:§3.5	stack
+alignment	"alignment=""start/center/end/fill"""	Alignment attribute for stacks	ui.md:§4.3	direction
+distribution	"distribution=""start/center/end/space_between/space_around/space_evenly"""	Distribution attribute for stacks	ui.md:§4.3	alignment
+disabled	disabled={bool}	Disable interactive element	ui.md:§3.5	enabled
+title	"title=""string"""	Title attribute (for panel, window)	ui.md:§3.5	value
+value	"value=""string"""	Text content attribute (maps to element_set_text)	ui.md:§3.5	title
+pulse	pulse name every Nms jitter Jms:	Temporal beat for animation inside components	ui.md:§6.6	resonate
+resonate	resonate Field.dampen Nms:	React to world field changes inside components	ui.md:§6.6	pulse
+Theme	Theme struct { bg, surface, accent, text, spacing, ... }	Complete color/spacing/font theme definition	ui.md:§5.4	DEFAULT_THEME
+DEFAULT_THEME	DEFAULT_THEME: Theme	Default dark theme with 27 color slots	ui.md:§5.5	Theme
+Color	Color(r, g, b, a) + helpers (rgba, pack, lerp, blend)	RGBA color struct with conversion utilities	ui.md:§5.2	Theme
+Spacing	Spacing { xs, sm, md, lg, xl, xxl, section }	Standard spacing scale (2px to 48px)	ui.md:§5.3	Theme
+color_rgba	color_rgba(r, g, b, a)	Construct Color from float components	ui.md:§5.2	Color
+color_pack	color_pack(c)	Pack Color to 0xAARRGGBB integer	ui.md:§5.2	color_from_packed
+color_from_packed	color_from_packed(packed)	Unpack 0xAARRGGBB to Color	ui.md:§5.2	color_pack
+color_lerp	color_lerp(a, b, t)	Linearly interpolate between two colors	ui.md:§5.2	Color
+color_blend	color_blend(over, under)	Alpha-blend foreground over background	ui.md:§5.2	color_lerp
+color_to_renderer_format	color_to_renderer_format(val)	Convert ARGB to ABGR for renderer	ui.md:§5.2	color_pack
+KainComponentSurface	24-slot vtable (session, element, style, state, frame, events, window, GPU, callbacks)	ABI contract between Kain compiler and rendering backend	ui.md:§3.1	native_ui_surface
+native_ui_surface	"vtable ""native_ui"" with GDI/software backend"	Software rendering backend registered at startup	ui.md:§3.3	KainComponentSurface
+vulkan_surface	"vtable ""vulkan"" with Vulkan backend"	Vulkan GPU rendering backend (future/live)	ui.md:§11.1	native_ui_surface
+d3d12_surface	"vtable ""d3d12"" with D3D12 backend"	D3D12 GPU rendering backend (future/live)	ui.md:§11.1	native_ui_surface
+KainGpuSurfaceExtension	{load_shader, set_uniform}	GPU extension struct for shader/uniform binding (slot 18)	ui.md:§11.3	KainComponentSurface
+Ghost Harness	python harness.py <file.kn>	Launches Kain app in invisible window for gaslight-proof UI testing	ui.md:§7.1	oracle
+kain_render_fill_rect	kain_render_fill_rect(r, rect, color)	Render filled rectangle primitive (C substrate)	ui.md:§2.3	kain_render_stroke_rect
+kain_render_fill_rounded_rect	kain_render_fill_rounded_rect(r, rect, radius, color)	Render filled rounded rectangle primitive	ui.md:§2.3	kain_render_fill_rect
+kain_render_stroke_rect	kain_render_stroke_rect(r, rect, thickness, color)	Render stroked rectangle primitive	ui.md:§2.3	kain_render_fill_rect
+kain_render_fill_circle	kain_render_fill_circle(r, center, radius, color)	Render filled circle primitive	ui.md:§2.3	kain_render_stroke_circle
+kain_render_stroke_circle	kain_render_stroke_circle(r, center, radius, thickness, color)	Render stroked circle primitive	ui.md:§2.3	kain_render_fill_circle
+kain_render_blit	kain_render_blit(r, src, dst, texture_id)	Blit texture region to framebuffer	ui.md:§2.3	kain_render_fill_rect
+kain_render_text	kain_render_text(r, pos, text, font_id, size, color)	Render text string primitive	ui.md:§2.3	kain_render_fill_rect
+kain_render_gradient_rect	kain_render_gradient_rect(r, rect, colors, stops, count)	Render gradient rectangle primitive	ui.md:§2.3	kain_render_fill_rect
+kain_render_blur	kain_render_blur(r, rect, radius)	Apply blur effect to region	ui.md:§2.3	kain_render_fill_rect
+kain_render_push_clip	kain_render_push_clip(r, rect)	Push clip rectangle onto stack	ui.md:§2.3	kain_render_pop_clip
+kain_render_pop_clip	kain_render_pop_clip(r)	Pop clip rectangle from stack	ui.md:§2.3	kain_render_push_clip
+kain_render_push_transform	kain_render_push_transform(r, matrix)	Push transform matrix onto stack	ui.md:§2.3	kain_render_pop_transform
+kain_render_pop_transform	kain_render_pop_transform(r)	Pop transform matrix from stack	ui.md:§2.3	kain_render_push_transform
+kain_renderer_clear	kain_renderer_clear(r, color)	Clear framebuffer to solid color	ui.md:§2.3	kain_renderer_present
+kain_renderer_present	kain_renderer_present(r)	Present rendered frame to screen	ui.md:§2.3	kain_renderer_submit
+kain_compositor_damage_rect	kain_compositor_damage_rect(c, x, y, w, h)	Mark rectangle region as dirty for redraw	ui.md:§2.4	kain_compositor_damaged_region
+kain_compositor_damaged_region	kain_compositor_damaged_region(c)	Get combined bounding rect of all damaged regions	ui.md:§2.4	kain_compositor_has_damage
+kain_compositor_has_damage	kain_compositor_has_damage(c)	Check if any damage regions exist	ui.md:§2.4	kain_compositor_clear_damage
+kain_font_load	kain_font_load(session_id, ttf_data, ttf_len, size)	Load font from TTF byte data	ui.md:§2.6	kain_font_load_path
+kain_font_load_path	kain_font_load_path(session_id, filepath, size)	Load font from file path	ui.md:§2.6	kain_font_load_default
+kain_font_load_default	kain_font_load_default(session_id, size)	Load platform default font	ui.md:§2.6	kain_font_load
+kain_font_measure_text	kain_font_measure_text(session_id, font_id, text)	Measure text width using loaded font	ui.md:§2.6	kain_font_line_height
+kain_font_line_height	kain_font_line_height(session_id, font_id)	Get font line height	ui.md:§2.6	kain_font_get_metrics
+KainInputEvent	KAIN_INPUT_KEY_DOWN/UP/TEXT/POINTER_*/FOCUS_*/DRAG/DROP	Typed event kind enum with 11 values	ui.md:§2.5	native_ui_poll_event
+kain_input_hit_test	kain_input_hit_test(pipeline, x, y)	Return node_id at point (x,y) or -1	ui.md:§2.5	InteractiveArea
+kain_host_vtable	{kainHostVTable with backend_id, window_create/destroy, pump_events, present, ...}	Platform-agnostic host vtable for Win32/X11/Wayland/macOS/WASM	ui.md:§2.7	native_ui_host_attach

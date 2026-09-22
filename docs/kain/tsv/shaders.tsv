@@ -1,0 +1,33 @@
+keyword	syntax	variants	bindings	workgroup	purpose
+shader	shader <kind> <Name>(<params>) -> <Return>:\n    uniform <name>: <Type> @<N>\n    // body	vertex, fragment, compute, mesh, task, raygen, anyhit, closesthit, miss, intersection, callable	uniform @N	workgroup(W,G,H) declared after return type	GPU shader stage declaration — vertex/fragment/compute core, 12 stages total
+shader	shader vertex <Name>(<inputs>) -> Vec4:\n    uniform model: Mat4 @0	vertex	uniform @N, @location	input attributes	Vertex shader — transforms vertices, outputs clip-space position
+shader	shader fragment <Name>(<uv>) -> Vec4:\n    uniform accent: Vec3 @0	fragment	uniform @N, @location	returns pixel color	Fragment shader — colors pixels, outputs RGBA
+shader	shader compute <Name>(id: UVec3) -> Void:\n    uniform src: StorageBuffer<Float> @0	compute	uniform @N, StorageBuffer<T> @N	workgroup(W,H,D)	Compute shader — general-purpose GPU compute kernel
+shader	shader compute <Name>(id: UVec3) -> Void workgroup(8, 8, 1):\n    uniform src: StorageBuffer<Float> @0	compute	uniform @N, StorageBuffer<T> @N	workgroup(8,8,1)	Compute shader with explicit workgroup size
+shader	shader mesh <Name>(...) -> ...	mesh	uniform @N, StorageBuffer<T> @N	workgroup(W,H,D)	Mesh shader — VK_EXT_mesh_shader, vertex amplification
+shader	shader task <Name>(...) -> ...	task	uniform @N, StorageBuffer<T> @N	workgroup(W,H,D)	Task shader — VK_EXT_mesh_shader companion, work generation
+shader	shader raygen <Name>(...) -> ...	raygen	uniform @N, StorageBuffer<T> @N		NVIDIA/Optix raygen — ray tracing entry point
+shader	shader anyhit <Name>(...) -> ...	anyhit	uniform @N		NVIDIA/Optix any-hit — ray intersection filtering
+shader	shader closesthit <Name>(...) -> ...	closesthit	uniform @N		NVIDIA/Optix closest-hit — ray hit processing
+shader	shader miss <Name>(...) -> ...	miss	uniform @N		NVIDIA/Optix miss — ray miss shader
+shader	shader intersection <Name>(...) -> ...	intersection	uniform @N		NVIDIA/Optix intersection — custom geometry intersection
+shader	shader callable <Name>(...) -> ...	callable	uniform @N		NVIDIA/Optix callable — indirect function call from shader
+dispatch	"dispatch ""shader::<Name>::compute"" [<X>, <Y>, <Z>]"	compute	Grid dimensions (workgroup counts)	N/A	Host-side GPU compute kernel launch — requires `with GPU, Unsafe`
+dispatch	"dispatch ""shader::<Name>::compute"" from <buf>"	compute	Indirect buffer (DispatchIndirectCommand)	N/A	Indirect dispatch — reads grid dimensions from GPU-written buffer (VkDispatchIndirectCommand)
+workgroup	workgroup(<W>, <H>, <D>)	compute (attached to shader return type)	Local thread group size	N/A	Workgroup size declaration for compute shaders
+subgroup	subgroup(<N>):\n    // lockstep code	all compute	Warp-synchronous scope	within workgroup	Warp-synchronous execution scope — all threads in lockstep, compile-time divergence safety enforced
+uniform	uniform <type> @<N>	all	Descriptor set binding @N	N/A	Resource binding — buffers, textures, samplers at descriptor slot N
+StorageBuffer	uniform <name>: StorageBuffer<T> @<N>	compute, vertex, fragment	RWStructuredBuffer (HLSL), var<storage,read_write> (WGSL)	N/A	Read-write storage buffer binding for GPU data
+Sampler2D	uniform <name>: Sampler2D @<N>	vertex, fragment	Texture2D + SamplerState (HLSL), texture_2d<f32> + sampler (WGSL)	N/A	Sampled texture binding — 2D textures with sampler
+Sampler	uniform <name>: SamplerState @<N>	vertex, fragment	SamplerState (HLSL), sampler (WGSL)	N/A	Sampler state binding for texture filtering
+Vec4	uniform <name>: Vec4 @<N>	all	cbuffer (HLSL), var<uniform> (WGSL), push_constant (SPIR-V)	N/A	Small uniform parameter — auto-lowered to push_constant if ≤128 bytes
+Mat4	uniform <name>: Mat4 @<N>	vertex	cbuffer (HLSL), var<uniform> (WGSL)	N/A	4x4 matrix uniform — model/view/projection matrices
+Float	uniform <name>: Float @<N>	all	cbuffer (HLSL), var<uniform> (WGSL)	N/A	Scalar float parameter in uniform block
+Int	uniform <name>: Int @<N>	all	cbuffer (HLSL), var<uniform> (WGSL)	N/A	Scalar signed int parameter in uniform block
+UInt	uniform <name>: UInt @<N>	all	cbuffer (HLSL), var<uniform> (WGSL)	N/A	Scalar unsigned int parameter in uniform block
+Bool	uniform <name>: Bool @<N>	all	cbuffer (HLSL), var<uniform> (WGSL)	N/A	Scalar bool parameter in uniform block
+LOCAL_SIZE_X	uniform LOCAL_SIZE_X: Int @<N>	compute	Inlined compile-time constant (not a resource binding)	N/A	Workgroup X dimension — inlined at compile time, not a real binding
+LOCAL_SIZE_Y	uniform LOCAL_SIZE_Y: Int @<N>	compute	Inlined compile-time constant (not a resource binding)	N/A	Workgroup Y dimension — inlined at compile time, not a real binding
+LOCAL_SIZE_Z	uniform LOCAL_SIZE_Z: Int @<N>	compute	Inlined compile-time constant (not a resource binding)	N/A	Workgroup Z dimension — inlined at compile time, not a real binding
+comptime	comptime:\n    let compute = (<workgroup>, <dispatch>, <tensors>, <streams>, <nodes>)	compute (shader body)	Metadata — not a binding	N/A	Compute metadata block — dispatch plan, tensor plans, stream plans, neural node plans
+spec_constants	"comptime:\n    let compute = (..., [(""name"", ""type"", default, ""SPEC""), ...])"	compute	OpSpecConstant in SPIR-V	N/A	Specialization constants in compute metadata — 6-element tuple form

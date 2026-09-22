@@ -1,0 +1,40 @@
+keyword	syntax	purpose	types	notes
+amalgamate	kain amalgamate [OPTIONS] <INPUT> -o <OUTPUT>	Pack sources into a portable Kain capsule (.kn file)	editable, archive	Alias: kain a; packs any number of modules (2-2594) into a single file
+amalgamate-inspect	kain amalgamate inspect [--json] <INPUT>	Inspect capsule metadata + public interface + file inventory	text, json	No unpacking needed; shows name, version, digest, file count, module count
+amalgamate-unpack	kain amalgamate unpack <INPUT> [-o <DIR>]	Extract all files from capsule into directory tree	directory	Default output: <capsule>.unpacked/; companion capsules auto-merge
+capsule	.kn capsule file	Self-describing Kain source file embedding file archive	editable, archive	Valid Kain source; passes kain check; comment sentinels hide metadata
+editable-capsule	--archive NOT set	Each file as discrete //!kain-file block with inline content	editable	Human-readable in editor; git diff-able; binary files base64-encoded
+archive-capsule	--archive	Single //!kain-capsule-payload block with zstd-compressed base64 JSON	archive	Max compression; payload digest verified on every read; must unpack to inspect
+raw-output	--raw	Plain concatenated .kn files with comment separators, no sentinel markers	raw	No //!kain-file sentinels; fully grep-able; for cross-ecosystem interop
+metadata-block	//!kain-capsule ... //!end-kain-capsule	TOML-encoded metadata behind comment sentinels	metadata	Schema version, kind, storage, content policy, digest, timestamp, authors, tags
+content-source	--contents source	Include .kn, .c, .h, config files, markdown (excludes artifacts/assets/evidence)	content-policy	Default content policy; distributable source package
+content-snapshot	--contents snapshot	Everything — raw directory snapshot	content-policy	Complete archival backup
+content-assets	--contents assets	Images, fonts, audio, video, 3D models, ZIPs, PDFs, non-UTF-8 binaries	content-policy	Game asset bundles, design files
+content-artifacts	--contents artifacts	.exe, .dll, .so, .lib, .obj, .wasm, .spv, .ptx, .pdb, .runtime_contract.json	content-policy	Compile output distribution, CI build artifacts
+content-evidence	--contents evidence	Telemetry, benchmark reports, attrition results, proof attestations, certify gates	content-policy	Reproducible evidence for audits
+companion-source	<name>.kn	Source companion capsule — the primary distributable capsule	companion	Contains source code; stands alone for code reuse
+companion-artifacts	<name>.artifacts.kn	Artifacts companion capsule (.exe/.dll/.spv outputs)	companion	Discovered by capsule_set name; merged on materialize
+companion-evidence	<name>.evidence.kn	Evidence companion capsule (telemetry + proof results)	companion	Discovered by capsule_set name; merged on materialize
+capsule-set	--capsule-set <NAME>	Sibling capsule set name for companion discovery	companion	Allows source+artifacts+evidence to travel together; auto-merge on unpack
+materialize	capsule .kn file -> read metadata -> discover companions -> state hash -> check cache -> unpack -> resolve imports	Import path from capsule file to compiler module resolution	workflow	Content-addressed cache at .kain/cache/amalgamate/<state-hash>/; state hash includes all companion digests
+publish	kain publish <INPUT> [--artifacts] [--evidence] [--archive] [-o <OUTPUT>]	Create distributable capsule(s) for a project	workflow	Default output: .kain/publish/<name>-<version>.kn
+add	kain add <PACKAGE> [--version <VER>]	Record capsule-backed dependency in KAIN.lock	workflow	Package can be name, local path, or capsule .kn file path
+install	kain install <PACKAGE> [--version <VER>]	Install package into ~/.kain/packages/<name>/<version>/	workflow	Stores source.kn + artifacts.kn + evidence.kn + workspace/ directory
+lockfile	KAIN.lock	Pins exact capsule digests with [[packages]] entries	metadata	schema = 1; no version range resolution; digest IS the truth
+build-graph-integration	"amalgamate_capsule(""id"") / capsule_set(""id"")"	Wired into build.kn as a build task	build.kn	Runs after its dependencies; respects build graph DAG ordering
+pack-flags	--name, --version, --author, --tag, --meta, --note	Metadata flags for capsule packaging	flags	All repeatable except name/version
+pack-flags	--header rich|minimal|off	Header rendering mode in capsule file	flags	rich: full preview directory; minimal: basic info; off: no header
+pack-flags	--compression zstd|none	Archive payload compression (archive mode only)	flags	Default: zstd; level 19 compression
+pack-flags	--api-index auto|off	Public API symbol index in header	flags	auto: scans and lists pub symbols; off: skip
+pack-flags	--preview-symbols <N>	Max preview symbols shown in header (default 40)	flags	Limits header size for large capsules
+sentinel-kain-capsule	//!kain-capsule	Start of metadata section / header	sentinel	Followed by TOML metadata
+sentinel-end-kain-capsule	//!end-kain-capsule	End of metadata section	sentinel	Closes metadata block
+sentinel-kain-file	//!kain-file	Start of editable file metadata block	sentinel	Contains path, kind, encoding, bytes, sha256
+sentinel-kain-file-content	//!kain-file-content	Content separation marker within a file block	sentinel	Actual file content follows
+sentinel-end-kain-file	//!end-kain-file	End of editable file block	sentinel	Closes file block
+sentinel-payload	//!kain-capsule-payload	Start of archive payload (base64)	sentinel	Used in archive mode
+sentinel-end-payload	//!end-kain-capsule-payload	End of archive payload	sentinel	Closes archive payload block
+proven-scale	2594 files, 15 MB, 3 seconds	Battle-tested at extreme scale	performance	316,135 lines packed; 3,211+ public symbols; typecheck: 0 errors
+cache	.kain/cache/amalgamate/<state-hash>/	Content-addressed materialization cache	cache	State hash includes primary capsule path + digest + all companion digests
+workspace-storage	~/.kain/packages/<name>/versions/<version>/	Package installation directory	storage	Contains source.kn, artifacts.kn, evidence.kn, workspace/
+capsule-relativity	forward-slash paths in capsule	All capsule-relative paths use / regardless of platform	convention	src/main.kn works on Windows, Linux, macOS

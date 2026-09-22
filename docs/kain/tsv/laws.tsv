@@ -1,0 +1,11 @@
+keyword	syntax	parameters	return_type	purpose	examples
+law	law name(params) -> Bool:	One or more params	Bool	Range/invariant guard	signal_in_bounds(value: Int)
+law	law name(params) -> Bool:	Multiple params	Bool	Multi-field invariant	cell_in_maze(x, y, width, height)
+law	law name(params) -> Bool:	Int, Int, Int	Bool	Composite law calling other laws	start_target_valid(start, target, cells)
+law	law name(params) -> Bool:	World reference	Bool	World-state reading law	world_invariant(authority: Authority)
+law	law name(params) -> Bool:	String	Bool	Non-empty string check	name_nonempty(name: String)
+law	law name(params) -> Bool:	Int, Int	Bool	Health/bounds check	health_positive(health: Int)
+law	law name(params) -> Bool:	Int, Int, Int, Int	Bool	Geometry constraint	rat_maze_geometry_valid(width, height)
+law	law name(params) -> Bool:	ptr<Int>, Int	Bool	Ptr-based integrity	entity_refs_valid(entity_count, refs, ref_count)
+law	law name(params) -> Bool:	Int	Bool	State machine constraint	state_machine_valid(phase, mode)
+law	law name(params) -> Bool:	Int	Bool	Heat/display range	rat_heat_visible(heat: Int)

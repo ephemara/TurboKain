@@ -1,0 +1,72 @@
+use std::runtime
+
+fn simd_lane_mix_scalar_dot(left: ptr<Int>, right: ptr<Int>, cells: Int, lane_bias: Int, modulus: Int) -> Int:
+    var index: Int = 0
+    var total: Int = 0
+    while index < cells:
+        let left_value: Int = mem_load(ptr_offset(left, index, "Int"), "Int") + lane_bias
+        let right_value: Int = mem_load(ptr_offset(right, index, "Int"), "Int")
+        total = (total + (left_value * right_value)) % modulus
+        index = index + 1
+    return total
+
+converge simd_lane_mix_dot(left: ptr<Int>, right: ptr<Int>, cells: Int, lane_bias: Int, modulus: Int) -> Int:
+    spec reference:
+        return simd_lane_mix_scalar_dot(left, right, cells, lane_bias, modulus)
+    fast avx512_lane when capability("cpu.x86.avx512f"):
+        return runtime_simd_i32_domain_dot_avx512_mod(left, right, cells, lane_bias, modulus)
+    fast avx2_lane when capability("cpu.x86.avx2"):
+        return runtime_simd_i32_domain_dot_avx2_mod(left, right, cells, lane_bias, modulus)
+
+fn simd_lane_mix_scalar_accumulate(left: ptr<Int>, right: ptr<Int>, cells: Int, passes: Int, bias_mod: Int, phase_mod: Int, modulus: Int) -> Int:
+    var acc: Int = 0
+    var phase: Int = 0
+    while phase < passes:
+        let lane_bias: Int = phase % bias_mod
+        let inner: Int = simd_lane_mix_scalar_dot(left, right, cells, lane_bias, modulus)
+        acc = (acc + inner + (phase % phase_mod)) % modulus
+        phase = phase + 1
+    return acc
+
+converge simd_lane_mix_accumulate(left: ptr<Int>, right: ptr<Int>, cells: Int, passes: Int, bias_mod: Int, phase_mod: Int, modulus: Int) -> Int:
+    spec reference:
+        return simd_lane_mix_scalar_accumulate(left, right, cells, passes, bias_mod, phase_mod, modulus)
+    fast avx512_affine_lane when capability("cpu.x86.avx512f"):
+        return runtime_simd_i32_domain_affine_accumulate_avx512_mod(left, right, cells, passes, bias_mod, phase_mod, modulus)
+    fast avx2_affine_lane when capability("cpu.x86.avx2"):
+        return runtime_simd_i32_domain_affine_accumulate_avx2_mod(left, right, cells, passes, bias_mod, phase_mod, modulus)
+
+fn simd_lane_mix_scalar_fill_pair(left: ptr<Int>, right: ptr<Int>, cells: Int, left_mul: Int, left_add: Int, left_mask: Int, right_mul: Int, right_add: Int, right_mask: Int) -> Int:
+    collapse left:
+        var index: Int = 0
+        while index < cells:
+            mem_store(ptr_offset(left, index, "Int"), ((index * left_mul) + left_add) & left_mask, "Int")
+            mem_store(ptr_offset(right, index, "Int"), ((index * right_mul) + right_add) & right_mask, "Int")
+            index = index + 1
+        0
+    return 0
+
+converge simd_lane_mix_fill_accumulate(left: ptr<Int>, right: ptr<Int>, cells: Int, left_mul: Int, left_add: Int, left_mask: Int, right_mul: Int, right_add: Int, right_mask: Int, passes: Int, bias_mod: Int, phase_mod: Int, modulus: Int) -> Int:
+    spec reference:
+        let _fill: Int = simd_lane_mix_scalar_fill_pair(left, right, cells, left_mul, left_add, left_mask, right_mul, right_add, right_mask)
+        return simd_lane_mix_scalar_accumulate(left, right, cells, passes, bias_mod, phase_mod, modulus)
+    fast avx2_affine_fill_lane when capability("cpu.x86.avx2"):
+        return runtime_simd_i32_domain_affine_pow2_fill_pair_accumulate_mod(left, right, cells, left_mul, left_add, left_mask, right_mul, right_add, right_mask, passes, bias_mod, phase_mod, modulus)
+
+fn main() -> Int:
+    let cells: Int = 32768
+    let passes: Int = 8192
+    let modulus: Int = 1000000007
+    let expected: Int = 964251665
+    let mut left: ptr<Int> = alloc_zeroed(cells, "Int")
+    let mut right: ptr<Int> = alloc_zeroed(cells, "Int")
+
+    let acc: Int = observe left:
+        simd_lane_mix_fill_accumulate(left, right, cells, 31, 7, 1023, 17, 3, 511, passes, 13, 29, modulus)
+
+    decay left
+    decay right
+
+    if acc != expected:
+        return 1
+    return 0

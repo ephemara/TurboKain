@@ -1,0 +1,184 @@
+code	severity	message	cause	fix
+KAIN-BORROW-0001	error	A borrow-checking rule has been violated	Ownership system enforces single-writer or multiple-reader semantics on shared state	See specific borrow error codes
+KAIN-BORROW-0002	error	Multiple Mutable Borrows	A mutable reference overlaps with another active mutable/immutable reference	Restructure borrows to not overlap, or use explicit scope to shorten lifetimes
+KAIN-BORROW-0003	error	Borrow And Mutation Conflict	Value is borrowed while a mutation occurs through another path	Complete all borrows before mutating, or clone the value
+KAIN-BORROW-0004	error	Use After Move	A value has been moved and is used afterwards	Clone before the move, or restructure to borrow instead
+KAIN-BORROW-0005	error	Shared State Without Annotation	Cross-actor access without shared/single_writer annotation	Add shared keyword or appropriate synchronization
+KAIN-BORROW-0006	error	Single Writer Violation	single_writer state mutated from multiple locations simultaneously	Serialize writes through a single owner
+KAIN-BORROW-0007	error	Weak Reference Upgraded Unsafely	A weak reference was upgraded but target already dropped	Use ? operator or if let when upgrading weak refs
+KAIN-BORROW-0008	error	Lifetime Mismatch	A reference outlives the value it points to	Keep owned value alive longer, or clone
+KAIN-BORROW-0009	error	Send Constraint Violation	Value sent across actors does not satisfy Send trait	Ensure all fields satisfy Send, or use serialization boundary
+KAIN-BORROW-0010	warning	Implicit Clone On Large Value	Large value being implicitly cloned	Use &value to borrow, or add explicit .clone()
+KAIN-CODEGEN-0001	error	Codegen Error	A code generation or lowering pass failed	See codegen documentation
+KAIN-CODEGEN-0002	error	Unknown Codegen Variable	Backend could not find a value for a symbol	Check frontend rejection or lowering pass dropped binding
+KAIN-CODEGEN-0003	error	Lowering Pass Failed	IR lowering pass could not transform intermediate representation	Simplify construct or add lowering rule for target
+KAIN-CODEGEN-0004	error	Backend Compilation Failed	Native code backend could not compile generated code	Check target compatibility, reduce optimization level
+KAIN-CODEGEN-0005	error	Linking Failed	Linker could not resolve all symbols	Check library paths, symbol names, target architecture
+KAIN-CODEGEN-0006	error	Unsupported Target Architecture	Target is not supported by current backend	Choose supported target or enable required backend feature
+KAIN-CODEGEN-0007	error	Target Capability Missing	Code uses target/capability not provided by compilation target	Guard with if capability(...) or change compilation target
+KAIN-CODEGEN-0008	error	Foreign ABI Mismatch	FFI declaration does not match actual linked symbol	Align Kain FFI declaration with native library ABI
+KAIN-CODEGEN-0009	error	Codegen Intrinsic Not Found	Required compiler intrinsic not available for target platform	Use portable alternative or add platform-specific impl
+KAIN-CODEGEN-0010	warning	Optimization Pass Failed	Optimization pass encountered unexpected IR state	Report issue with reproduction; code is still correct
+KAIN-CODEGEN-0011	error	Codegen Budget Exceeded	Code generation exceeded resource budget	Split compilation unit, reduce inlining, increase budget
+KAIN-ACTOR-0001	error	Component/Actor Error	A component or actor system invariant has been violated	See actor documentation
+KAIN-ACTOR-0002	error	Actor Spawn Failed	spawn could not create the actor or component	Ensure world is alive and actor type is registered
+KAIN-ACTOR-0003	error	Send To Invalid Actor	send targets an actor that does not exist or is destroyed	Check target actor is alive and handles the message type
+KAIN-ACTOR-0004	error	Receive Handler Missing	Actor lacks receive handler for message type sent to it	Add receive block for the unhandled message type
+KAIN-ACTOR-0005	warning	Emit Without Listener	emit sends event but no component/actor observes it	Add observer or remove dead emit
+KAIN-ACTOR-0006	error	Decay Transition Invalid	A decay transition targets an invalid state	Ensure decay target state exists in state machine
+KAIN-ACTOR-0007	error	Component Lifecycle Violation	Operation invalid for component's current lifecycle stage	Check component lifecycle phase before operation
+KAIN-ACTOR-0008	error	On Handler Duplicate	Multiple on handlers for same event on same actor	Consolidate handlers or use different event types
+KAIN-COMPTIME-0001	error	Comptime Error	A compile-time evaluation failed	See comptime documentation
+KAIN-COMPTIME-0002	error	Comptime Evaluation Exceeded Recursion Limit	comptime expression recursed beyond evaluation limit (1000)	Increase recursion depth or restructure comptime logic
+KAIN-COMPTIME-0003	error	Comptime Access To Runtime Value	comptime block attempts to access runtime-only value	Move runtime-dependent logic out of comptime block
+KAIN-COMPTIME-0004	error	Macro Expansion Error	Macro body produced invalid syntax or argument mismatch	Check macro definition and call site consistency
+KAIN-COMPTIME-0005	error	Patch Target Not Found	patch target does not exist or is not patchable	Ensure target exists and is in a patchable context
+KAIN-COMPTIME-0006	error	Law Violation	A law invariant has been violated	Adjust code to satisfy law, or modify law if too restrictive
+KAIN-COMPTIME-0007	error	Axiom Contradiction	An axiom contradicts another axiom or proven law	Remove or weaken one of the conflicting axioms
+KAIN-COMPTIME-0008	error	Orchestrate Dependency Cycle	Pipeline contains a dependency cycle	Break cycle by reordering or splitting pipeline steps
+KAIN-COMPTIME-0009	error	Converge Failed	Code variants are not structurally compatible	Align variants to converge to a consistent interface
+KAIN-COMPTIME-0010	error	Shatter Pattern Incomplete	Specialization does not cover all concrete type combinations	Add missing specialization or provide fallback generic impl
+KAIN-CONFIG-0001	error	Config Error	A configuration or manifest validation error occurred	See config documentation
+KAIN-CONFIG-0002	error	Manifest Parse Error	Kain manifest file could not be parsed	Validate manifest against expected schema
+KAIN-CONFIG-0003	error	Toolchain Not Found	Required external toolchain not installed or on PATH	Install required toolchain and ensure it is on PATH
+KAIN-CONFIG-0004	error	Target Specification Invalid	Build target specification is invalid or contradictory	Provide valid target spec, use kain targets to list
+KAIN-CONFIG-0005	error	Feature Flag Conflict	Enabled feature flags are mutually exclusive	Disable one of the conflicting features
+KAIN-CONFIG-0006	error	Dependency Resolution Failed	Project dependency could not be resolved	Check dependency name, version, and source
+KAIN-CONVERGE-0001	error	Converge Error	A converge block has a well-formedness error	See converge documentation
+KAIN-CONVERGE-0002	error	Converge Missing Spec Lane	converge block has no spec reference lane	Add a spec reference: lane before any fast lanes
+KAIN-CONVERGE-0003	error	Converge Fast Lane Contract Mismatch	Fast lane verifier samples disagree with spec oracle	Align fast lane result with spec for all inputs
+KAIN-CONVERGE-0004	error	Converge Verifier Failed	verify found disagreement between spec and fast lanes	Inspect diverging input and fix fast lane logic
+KAIN-CONVERGE-0005	error	Converge Capability Gap At Target	Fast lane requires hardware capability absent on target	Add fallback fast lane or make spec lane unconditional
+KAIN-CONVERGE-0006	error	Converge Return Type Divergence	Spec and fast lanes return incompatible types	Align return type annotation across all lanes
+KAIN-CONVERGE-0007	error	Converge Effect Set Divergence	Lanes declare different effect sets	Ensure all lanes agree on effect annotations
+KAIN-CONVERGE-0008	error	Converge Ambiguous Lane Selection	Multiple fast lanes match current target simultaneously	Use more specific when guards or prefer annotations
+KAIN-EFFECT-0001	error	Effect Violation	Function performs operation not permitted by its declared effect	Add required effect annotation or move violating operation
+KAIN-EFFECT-0002	error	Missing Effect Capability	Caller lacks effect capability required by callee	Propagate effect annotation to caller or gate behind check
+KAIN-EFFECT-0003	error	Effect Polymorphism Mismatch	Generic effect-polymorphic function instantiated with conflicting effects	Align effect parameters or make function more permissive
+KAIN-EFFECT-0004	error	Pure Function With Side Effect	Pure function contains side effect operation	Remove side effect or change annotation to IO/GPU
+KAIN-EFFECT-0005	error	Capability Gate Failure	capability check guards effect-gated operation but capability absent	Acquire needed capability or restructure code
+KAIN-EFFECT-0006	error	Async In Sync Context	async function or await in non-async context	Mark enclosing function async or use blocking adapter
+KAIN-EFFECT-0007	error	Await Outside Async	await used in function not marked async	Add async annotation to enclosing function
+KAIN-EFFECT-0008	error	GPU Effect In Host Context	GPU function called from host-only context without GPU dispatch	Wrap call in shader/compute block or use dispatch primitive
+KAIN-EFFECT-0009	error	Reactive Cycle Detected	Reactive state dependencies form a cycle	Introduce explicit delay, decay transition, or restructure to DAG
+KAIN-EFFECT-0010	error	Unsafe Block Not Allowed	Unsafe block prohibited by compilation profile or security policy	Remove unsafe block or change compilation target
+KAIN-EFFECT-0011	warning	Effect Leakage Through Public API	pub function exposes effect annotation that may be implementation detail	Make function effect-polymorphic or hide behind trait
+KAIN-EFFECT-0012	error	Conflicting Effect Annotations	Multiple effect annotations on same item conflict	Choose single correct annotation (IO subsumes Pure)
+KAIN-ENTANGLE-0001	error	Entangle Error	An entangle declaration has a well-formedness error	See entangle documentation
+KAIN-ENTANGLE-0002	error	Entangle Cycle Detected	entangle declarations form a directed cycle	Break cycle by making edge directional or add intermediary
+KAIN-ENTANGLE-0003	error	Entangle Single Writer Violation	More than one potential writer on single_writer link	Identify owning world and remove other write site
+KAIN-ENTANGLE-0004	error	Entangle Dangling Reference	One or both worlds in entangle do not exist	Ensure both worlds are declared and state fields exist
+KAIN-ENTANGLE-0005	error	Entangle Cross-World Scope Error	entangle references world not in scope at declaration site	Move entangle to module scope or import worlds
+KAIN-ENTANGLE-0006	error	Entangle Type Mismatch	Coupled state fields have incompatible types	Ensure fields have same type or add conversion function
+KAIN-ENTANGLE-0007	error	Entangle Direction Conflict	Two entangle declarations couple same fields in conflicting directions	Use single bidirectional <-> link
+KAIN-INTERNAL-0001	error	Internal Error	Compiler or runtime hit an internal invariant failure	Capture repro and diagnostic context; report to owning subsystem
+KAIN-IO-0001	error	IO Error	A filesystem or network I/O operation failed	See IO documentation
+KAIN-IO-0002	error	File Not Found	Specified file does not exist or is not accessible	Verify file path and ensure file exists
+KAIN-IO-0003	error	File Read Error	File could not be read (permissions, locked, corruption)	Check file permissions and that file is not locked
+KAIN-IO-0004	error	File Write Error	File could not be written (disk full, permissions, no parent dir)	Check disk space, permissions, parent directory
+KAIN-IO-0005	error	Network Request Failed	Network operation failed (unreachable, timeout, malformed)	Check network connectivity and request configuration
+KAIN-IO-0006	error	Asset Import Failed	Asset could not be imported (unsupported format, corrupt)	Check asset file format and integrity
+KAIN-MEM-0001	error	Memory Lowering Required	Raw memory semantics used but no lowering policy selected	Add lowering policy or select backend with native memory
+KAIN-MEM-0002	error	Memory Semantics Unsupported By Backend	Backend does not support memory operations used	Choose compatible backend or lower memory operations
+KAIN-MEM-0003	error	Illegal Bitfield Address	Taking address of C-compatible bitfield is not allowed	Lower bitfield access into load/store/mask operations
+KAIN-MEM-0004	error	Memory Layout Overflow	Memory layout exceeds max representable size for target address space	Reduce aggregate size or use 64-bit target
+KAIN-MEM-0005	error	Alignment Requirement Not Satisfied	Value requires stricter alignment than allocated memory provides	Increase allocation alignment or use unaligned access primitive
+KAIN-MEM-0006	error	Null Pointer Dereference	Pointer that may be null is dereferenced without null check	Wrap in if ptr != none or use ?. safe-access operator
+KAIN-MEM-0007	error	Out Of Bounds Access	Array/buffer index not provably within bounds	Add bounds check before access or use iterator
+KAIN-MEM-0008	error	Address Space Mismatch	Pointer used in context expecting different address space	Use correct address space qualifier or copy data
+KAIN-PARSE-0001	error	Parse Error	Parser encountered input it cannot understand	See specific parse error codes
+KAIN-PARSE-0002	error	Expected Token	Parser expected a specific token but found something else	Insert missing token or restructure syntax
+KAIN-PARSE-0003	error	Unexpected Token	Token appeared in position where grammar does not allow it	Remove stray token or add missing delimiter
+KAIN-PARSE-0004	error	Reserved Identifier	Identifier collides with word reserved by Kain, HLSL, C++, or host	Rename identifier, append underscore or use synonym
+KAIN-PARSE-0005	error	Missing Delimiter Before Newline	Block header missing : before newline appeared	Insert : at end of header line
+KAIN-PARSE-0007	error	Expected Contextual Keyword	Contextual keyword expected in specific grammar slot	Check nearby identifier or missing delimiter
+KAIN-PARSE-0008	error	Unclosed Delimiter	Bracket/brace/paren opened but never closed	Add matching closing delimiter at appropriate level
+KAIN-PARSE-0009	error	Mismatched Delimiter	Closing delimiter does not match opening counterpart	Align closing delimiter with expected opening pair
+KAIN-PARSE-0010	error	Invalid Numeric Literal	Numeric literal could not be parsed	Ensure literal uses supported format (dec, hex, bin, oct)
+KAIN-PARSE-0011	error	Invalid String Literal	String literal is malformed or improperly escaped	Ensure proper escaping and string termination
+KAIN-PARSE-0012	error	Invalid Character Literal	Character literal must contain exactly one codepoint	Use string literal for multi-character sequences
+KAIN-PARSE-0013	error	Attribute Syntax Error	Kain attribute could not be parsed	Use @identifier or @identifier(arg, ...) syntax
+KAIN-PARSE-0014	error	Effect Annotation Syntax Error	Effect annotation in wrong position	Move effect annotation before return type or on type def
+KAIN-PARSE-0015	error	Module Declaration Error	mod declaration incomplete	Ensure module has valid name and body or path
+KAIN-PARSE-0016	error	Use/Import Syntax Error	Import path could not be parsed	Ensure import uses :: separators and valid identifiers
+KAIN-PARSE-0017	error	Visibility Modifier Error	pub without following declaration	Attach pub to a valid declaration
+KAIN-PARSE-0018	error	Comptime Block Syntax Error	comptime block body not valid Kain expressions	Ensure comptime body contains valid evaluable expressions
+KAIN-PARSE-0019	error	Macro Invocation Syntax Error	Macro definition/invocation could not be parsed	Use macro name(params...): { body } form
+KAIN-PARSE-0020	error	Test Declaration Syntax Error	test block declaration could not be parsed	"Use test ""name"": { body } or test ""name"" { body }"
+KAIN-PATCH-0001	error	Patch Error	A patch or law declaration has a well-formedness error	See patch documentation
+KAIN-PATCH-0002	error	Patch Target Is Not A World	First parameter of patch must be a world type	Change patch target to a declared world
+KAIN-PATCH-0003	error	Patch Law Precondition Failed	Law predicate guarding patch site failed precondition check	Ensure value satisfies all law predicates
+KAIN-PATCH-0004	error	Patch Law Postcondition Failed	After patch, law postcondition is not satisfied by resulting state	Adjust patch body to restore invariant compliance
+KAIN-PATCH-0005	error	Patch Applied Outside World Scope	patch invoked in context where world mutation is not permitted	Invoke patch from world-aware context (pulse, IO fn, actor on)
+KAIN-PATCH-0006	error	Conflicting Patch Mutations	Two+ patches target same world field concurrently without ordering	Serialize patches through single actor or use transactional ordering
+KAIN-PATCH-0007	error	Patch Law Return Type Mismatch	Law predicate must return Bool	Change law body to return Bool
+KAIN-RUNTIME-0001	error	Runtime Error	A runtime invariant has been violated	See runtime documentation
+KAIN-RUNTIME-0002	error	Actor Panic	An actor or component panicked at runtime	Check panic message and trace for root cause
+KAIN-RUNTIME-0003	error	Message Delivery Failed	Message could not be delivered to target actor	Check target actor lifecycle and message handling
+KAIN-RUNTIME-0004	error	Resource Exhausted	Runtime resource has been exhausted	Reduce consumption, increase limits, or add backpressure
+KAIN-RUNTIME-0005	error	Deadlock Detected	Two or more actors waiting on each other in a cycle	Restructure message flow or use timeouts
+KAIN-RUNTIME-0006	error	World Initialization Failed	A world could not be initialized	Check world configuration and surface backend availability
+KAIN-RUNTIME-0007	error	Shader Dispatch Failed	GPU shader dispatch command failed	Check GPU availability, shader validity, dispatch dimensions
+KAIN-RUNTIME-0008	error	Timeout Exceeded	Operation exceeded its time budget	Increase timeout budget or optimize operation
+KAIN-SHADER-0001	error	Unsupported Shader Call	Function/intrinsic not available in current shader stage	Replace with supported intrinsic or move to compatible stage
+KAIN-SHADER-0002	error	Shader Stage Mismatch	Value/operation used in wrong shader stage	Pass data through appropriate stage interface
+KAIN-SHADER-0003	error	Uniform Binding Error	uniform declaration conflicts or type not GPU-compatible	Use unique binding name, ensure GPU-compatible type
+KAIN-SHADER-0004	error	Compute Dispatch Dimension Error	compute block specifies invalid dispatch dimensions	Provide valid thread group counts within platform limits
+KAIN-SHADER-0005	error	Shader Resource Not GPU-Compatible	Resource type/format not supported by GPU backend	Use GPU-compatible format or convert before binding
+KAIN-SHADER-0006	error	Vertex Input Layout Error	Vertex input layout does not match mesh/buffer data	Align vertex input with mesh data layout
+KAIN-SHADER-0007	error	Fragment Output Layout Error	Fragment output does not match render target format	Match fragment output type to render target config
+KAIN-SHADER-0008	error	Collapse Target Invalid	collapse reduction target or operator not valid for shader model	Ensure reduction operator is supported
+KAIN-SHADER-0009	error	Fanout Width Exceeded	fanout width exceeds GPU wavefront/warp size or thread group limit	Reduce fanout width or split across multiple waves
+KAIN-SHADER-0010	error	Shader Compilation Failed	Shader backend could not compile generated shader code	Simplify shader or check for target-specific restrictions
+KAIN-SHADER-0011	error	GPU Memory Budget Exceeded	Shader uses more GPU memory than target hardware allows	Reduce register pressure or split into multiple passes
+KAIN-SHADER-0012	warning	Shared Memory Bank Conflict	share memory access pattern may cause GPU bank conflicts	Pad shared memory arrays or restructure access
+KAIN-STATE-0001	error	State Error	A state machine well-formedness rule has been violated	See state documentation
+KAIN-STATE-0002	error	State Machine Inexhaustive	State machine does not handle all possible transitions	Add missing when clauses or a fallback handler
+KAIN-STATE-0003	error	State Transition Cycle	State transitions form directed cycle without escape path	Add exit condition, guarantee, or decay transition
+KAIN-STATE-0004	error	Invalid State Transition	when clause references target state that does not exist	Ensure target state is declared
+KAIN-STATE-0005	error	Pulse Without State	pulse triggers event but target has no active state machine	Ensure target has a state machine that handles the event
+KAIN-STATE-0006	error	Guarantee Violation	A guarantee clause asserts a property that does not hold	Strengthen precondition or weaken guarantee
+KAIN-STATE-0007	warning	Every Clause Unbounded	An every clause defines periodic behavior without upper bound	Add termination guard or bound on iteration count
+KAIN-STATE-0008	warning	Fallback Handler Unreachable	All events already handled; fallback is dead code	Remove unnecessary fallback
+KAIN-TEST-0001	error	Test Error	A test or specification framework invariant has been violated	See test documentation
+KAIN-TEST-0002	error	Assertion Failed	An assert expression evaluated to false inside test/spec block	Correct code or adjust test expectation
+KAIN-TEST-0003	error	Spec Property Violated	A spec property was falsified by counterexample	Correct implementation or narrow spec
+KAIN-TEST-0004	warning	Fast Test Exceeded Time Budget	A fast test exceeded its time budget	Move to standard suite or optimize test body
+KAIN-TEST-0005	warning	Verify Block Infallible	A verify block can never fail (always true)	Check that verify condition tests something meaningful
+KAIN-TEST-0006	warning	Random Seed Not Reproducible	random testing used without explicit seed	Set a seed value or use --test-seed to capture failing seed
+KAIN-TEST-0007	error	Jitter Range Invalid	jitter specifies invalid timing perturbation range	Adjust jitter range to valid values
+KAIN-TYPE-0001	error	Type Error	A type mismatch or type-inference failure occurred	See specific type error codes
+KAIN-TYPE-0002	error	Unknown Identifier	Name is not visible in current scope	Check spelling, add use statement, or bridge host symbol
+KAIN-TYPE-0003	error	World Requires Surface	world must expose at least one surface projection	Add surface native_ui => MyPanel inside world body
+KAIN-TYPE-0004	error	Duplicate Symbol	Same name defined more than once in same namespace	Rename one declaration or use alias on import
+KAIN-TYPE-0005	warning	Builtin Symbol Shadowed	User-defined name shadows a Kain builtin symbol	Choose distinct local name or import under alias
+KAIN-TYPE-0006	error	Missing Type Annotation	Explicit type annotation required where type cannot be inferred	Add explicit type annotation (: TypeName)
+KAIN-TYPE-0007	error	Trait Not Satisfied	Type does not implement a required trait	Implement missing trait methods or add derive annotation
+KAIN-TYPE-0008	error	Trait Method Missing	impl block missing required trait methods	Add missing method(s) to impl block
+KAIN-TYPE-0009	error	Ambiguous Trait Implementation	Multiple trait implementations satisfy a trait bound	Use fully-qualified path or add type annotation
+KAIN-TYPE-0010	error	Unresolved Import	use statement references unresolvable path	Check module path and visibility of target symbol
+KAIN-TYPE-0011	error	Cyclic Type Definition	Type definition refers to itself creating infinite size	Break cycle with indirection (pointer or boxed type)
+KAIN-TYPE-0012	error	Mutable/Immutable Conflict	let used in position requiring mutation or vice versa	Change let to let mut if mutation required
+KAIN-TYPE-0013	error	Pattern Match Inexhaustive	match does not cover all enum variants	Add missing arms or wildcard catch-all
+KAIN-TYPE-0014	error	Recursive Type Without Indirection	Struct/enum contains itself as direct field	Wrap recursive field in shared or heap-allocated container
+KAIN-TYPE-0015	error	Type Alias Cycle	type alias expands to itself	Break the alias cycle
+KAIN-TYPE-0016	error	Impl On Foreign Type	impl implements trait for type not defined in current crate	Create newtype wrapper or define trait in your crate
+KAIN-TYPE-0017	error	Self Type In Static Context	Self/self used outside trait/impl/method context	Use concrete type name instead of Self
+KAIN-TYPE-0018	error	Invalid Type Parameter Count	Wrong number of type arguments supplied	Provide correct number of type arguments
+KAIN-TYPE-0019	error	Type Argument Kind Mismatch	Type argument does not satisfy kind constraints of generic parameter	Ensure type argument satisfies all bounds
+KAIN-TYPE-0020	error	Return Type Mismatch	Function body produces value not matching declared return type	Correct return type annotation or returned value
+KAIN-TYPE-0021	error	Missing Return In Non-Void Function	Non-void function does not return value on all control-flow paths	Add return statement or ensure tail expression matches type
+KAIN-TYPE-0022	error	Void Value Used In Expression	void/none used in position expecting meaningful value	Remove void expression or wrap in block returning value
+KAIN-TYPE-0023	error	Callable Type Expected	Value used in function-call position but type is not callable	Check name refers to a function
+KAIN-TYPE-0024	error	Field Not Found	Struct/component type does not have field with given name	Use field that exists on type or check for misspelling
+KAIN-TYPE-0025	error	Type Mismatch	Inferred type does not match expected type	Check type annotation or use explicit conversion via as
+KAIN-TYPE-0026	error	Index Not Supported	Type does not support indexing with []	Use supported container type or implement Index trait
+KAIN-VALIDATE-0001	error	Validation Error	A structural validation pass rejected the program	Inspect validation context and repair violated invariant
+KAIN-WORLD-0001	error	World Missing Surface	world block has no surface projection	Add at least one surface projection inside world body
+KAIN-WORLD-0002	error	Duplicate Surface Kind	Multiple surfaces of same kind declared in one world	Merge surface projections or use separate worlds
+KAIN-WORLD-0003	error	Surface Component Type Error	Surface projected type is not a valid component	Ensure projected type is a component
+KAIN-WORLD-0004	error	World Orphan	world declaration not referenced by entry point or spawn site	Spawn world from main function or export for host
+KAIN-WORLD-0005	error	Entanglement Target Invalid	entangle target component does not exist in world	Ensure both components exist and implement Entangle trait
+KAIN-WORLD-0006	error	Teleport Destination Invalid	Teleport destination world does not exist or rejects component type	Ensure destination world is declared and accepts component
+KAIN-WORLD-0007	error	World Cross-Reference Cycle	Worlds reference each other creating dependency cycle	Break cycle with intermediary or make one reference directional
+KAIN-WORLD-0008	error	Surface Kind Platform Mismatch	Surface kind not supported on current compilation target	Change surface kind or compilation target

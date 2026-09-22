@@ -1,0 +1,13 @@
+keyword	syntax	purpose	scope
+comptime	comptime:\n    <statements>	Top-level compile-time code block — runs interpreter at compile time, bakes constants	into AST before typecheck (module level)
+comptime	comptime: <expression>	Expression compile-time evaluation — replaces expression with computed literal (bakes Int, Float, Bool, String, Unit)	Any expression context (fn body, let binding, etc.)
+comptime	comptime:\n    let compute = (<workgroup>, <dispatch>, <tensors>, <streams>, <nodes>)	GPU compute metadata DSL — AST pattern-matched for dispatch manifests (NOT interpreted)	Shader body (compute shaders only)
+comptime	comptime:\n    let compute = (<dispatch>, <tensors>, <nodes>)	GPU compute metadata (legacy 3-tuple form) — dispatch grid, tensor plans, neural node plans	Shader body (compute shaders only)
+comptime	comptime:\n    const <name>: <type> = <value>	Compile-time constant declaration — value available to rest of module	Top-level (inside comptime block)
+comptime	"comptime:\n    let compute = (<wg>, <dispatch>, <tensors>, <streams>, <nodes>, [(""name"",""type"",val,""SPEC""),...])"	GPU compute metadata (6-tuple extended form) — adds spec_constants for SPIR-V specialization	Shader body (compute shaders only)
+const	const <name>: <type> = <expr>	Named compile-time constant expression (not evaluated by interpreter, inline constant folding)	Top-level or inside comptime block
+macro	macro <name>!(<param>: <kind>):\n    // expansion body	Hygienic syntactic code generation — expands before typecheck, generates arbitrary Kain AST	Top-level (declaration)
+macro	macro <name>!(<param>: <kind>) => <expr>	Hygienic macro expression form — expands to expression at usage site	Any expression context
+tensor_plan	"(""binding"", ""element_type"", [""shape""], ""role"", ""contract"")"	5-tuple declaring a GPU tensor binding: uniform name, element type, dimension shape, data role, memory contract	Inside compute metadata tensor plans array
+stream_plan	"(""binding"", ""direction"", ""cadence"", ""contract"")"	4-tuple declaring a GPU stream plan: uniform name, ingress/egress direction, update cadence, memory contract	Inside compute metadata stream plans array
+neural_node_plan	"(""key"", ""op"", [""inputs""], [""outputs""], stateful)"	5-tuple declaring a neural node: unique key, operation type, input/output binding names, stateful flag	Inside compute metadata neural node plans array

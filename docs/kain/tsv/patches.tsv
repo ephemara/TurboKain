@@ -1,0 +1,13 @@
+keyword	syntax	purpose	body_allowed	return_type	related
+patch	patch name(world: W) -> T:	Journaled mutation	Kain code	Optional Int	law, world
+patch	patch name(world: W) -> Int:	Single-field journaled mutation	Assignment + return	Int	law, world
+patch	patch name(world: W) -> Int:	Multi-field journaled mutation	Multiple assignments	Int	law, world
+patch	patch name(world: W) -> Int:	Law-guarded journaled mutation	law_status() guard then assign	Int	law
+patch	patch name(world: W) -> Int:	Epoch-bump pattern	assign + epoch++	Int	resonate, entangle
+patch	patch name(world: W) -> Int:	Orchestrate stage usage	call patch from stage	Int	orchestrate
+patch	patch name(world: W):	Void/unit-returning patch	Assignments only	Unit	world
+patch	patch name(world: W) -> T:	Reset patch (bulk reinit)	Multiple resets	T	world
+patch	patch name(world: W) -> Int:	Chained patch (calls patches)	Calls other patches	Int	patch
+patch	patch name(world: W, shard: S) -> Int:	Shatter struct parameter	Reads shatter fields	Int	shatter
+patch	patch name(world: W, authority: W) -> Int:	Mirror-sync patch	Reads mirror, writes authority	Int	world, entangle
+patch	patch name(world: W, value: T) -> Int:	Hot-loop patch	update + epoch + ledger	Int	pulse

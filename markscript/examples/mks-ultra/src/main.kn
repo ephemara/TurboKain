@@ -1,0 +1,425 @@
+// ============================================================================
+//  MKS-ULTRA PHYSICS ENGINE — Entry Point
+//
+//  Markscript-embedded: loads simulation data from `.md` files via the
+//  Markscript VM pipeline.  Extracts body data tables, initializes the
+//  PhysicsWorld, runs N frames of simulation, and reports final positions.
+//
+//  Pipeline:
+//    scripts/sim.md ──lex──→ token stream ──parse──→ bytecode
+//       ──exec──→ VM data_table ──extract──→ BodyData[]
+//       ──init_world+add_body──→ PhysicsWorld
+//       ──step_world (N frames)──→ final positions ──print──→ stdout
+//
+//  Imports engine modules (physics.kn, collision.kn, integrator.kn) and
+//  embeds the full Markscript VM (lexer.kn, parser.kn, types.kn, vm.kn,
+//  bridge.kn) as a library.
+// ============================================================================
+
+use std::fs               // fs_read_text
+use std::text             // text_from, text_len, text_char_at, text_substring_string
+use physics               // Vec3, RigidBody, PhysicsWorld, vec3, init_world,
+                           // add_body, apply_gravity, step_world
+use collision             // AABB, CollisionInfo, sphere_collision,
+                           // resolve_collision, detect_and_resolve
+use integrator            // euler_integrate, semi_implicit_euler, verlet_integrate
+use lexer                 // create_lexer, next_token, Token, TokenResult, LexerState
+use parser                // compile_source, hash_name
+use types                 // MarkValue, MatrixRecord, MARK_INT, MARK_FLOAT,
+                           // MARK_STRING, mark_int, mark_float, mark_string,
+                           // mark_empty, mark_value_to_string
+use vm                    // MarkScriptVM, ExecResult, HandlerResult, init_vm,
+                           // execute_bytecode, resume_execution
+use bridge                // init_vm_with_builtins, dispatch_handler,
+                           // HANDLER_FS_READ, HANDLER_FS_WRITE,
+                           // HANDLER_PROCESS_RUN, HANDLER_IMPORT_KAIN,
+                           // HANDLER_ASSERT, HANDLER_PRINT
+
+// ===========================================================================
+//  CONSTANTS
+// ===========================================================================
+
+const SIMULATION_FRAMES: Int = 50  // Recursive; stack-safe at this depth
+const DEFAULT_GRAVITY: Float = -9.81
+const DEFAULT_DT: Float = 0.016
+const MAX_HANDLER_ITERATIONS: Int = 100
+
+// ===========================================================================
+//  BODY DATA — intermediate struct for parsed table rows
+// ===========================================================================
+
+struct BodyData:
+    name:   String
+    mass:   Float
+    pos:    Vec3
+    vel:    Vec3
+    radius: Float
+
+// ===========================================================================
+//  MARKVALUE HELPERS — extract numeric values from typed cells
+// ===========================================================================
+
+fn markvalue_to_float(mv: MarkValue) -> Float:
+    if mv.kind == MARK_INT:
+        return mv.int_val
+    elif mv.kind == MARK_FLOAT:
+        return mv.float_val
+    return 0.0
+
+// ===========================================================================
+//  BODY TABLE EXTRACTION — parse MatrixRecord into BodyData array
+//
+//  The sim.md body table layout (9 columns):
+//    0: Body (string)        1: Mass (float/int)
+//    2: Pos_X (float/int)    3: Pos_Y (float/int)
+//    4: Pos_Z (float/int)    5: Vel_X (float/int)
+//    6: Vel_Y (float/int)    7: Vel_Z (float/int)
+//    8: Radius (float/int)
+// ===========================================================================
+
+fn extract_body(table: MatrixRecord) -> Array<BodyData>:
+    var bodies: Array<BodyData> = []
+    let cols = table.cols
+    let rows = table.rows
+    let data = table.data
+    let data_len = len(data)
+
+    if cols < 2 or rows == 0:
+        println("[EXTRACT] Warning: table has " + str(cols) + " cols, " + str(rows) + " rows")
+        return bodies
+
+    var r: Int = 0
+    while r < rows:
+        // Guard against incomplete rows
+        if (r * cols) + 8 >= data_len:
+            r = r + 1
+            continue
+
+        let base = r * cols
+
+        // Body name (column 0)
+        let name_val = data[base]
+        var name: String = ""
+        if name_val.kind == MARK_STRING:
+            name = name_val.str_val
+        else:
+            name = mark_value_to_string(name_val)
+
+        // Numeric fields (columns 1-8)
+        let mass   = markvalue_to_float(data[base + 1])
+        let px     = markvalue_to_float(data[base + 2])
+        let py     = markvalue_to_float(data[base + 3])
+        let pz     = markvalue_to_float(data[base + 4])
+        let vx     = markvalue_to_float(data[base + 5])
+        let vy     = markvalue_to_float(data[base + 6])
+        let vz     = markvalue_to_float(data[base + 7])
+        let radius = markvalue_to_float(data[base + 8])
+
+        let body = BodyData {
+            name: name,
+            mass: mass,
+            pos: vec3(px, py, pz),
+            vel: vec3(vx, vy, vz),
+            radius: radius
+        }
+        push(bodies, body)
+
+        println("[EXTRACT]   Body[" + str(r) + "]: " + name
+            + "  mass=" + str(mass)
+            + "  pos=(" + str(px) + ", " + str(py) + ", " + str(pz) + ")"
+            + "  vel=(" + str(vx) + ", " + str(vy) + ", " + str(vz) + ")"
+            + "  radius=" + str(radius))
+
+        r = r + 1
+
+    return bodies
+
+// ===========================================================================
+//  TABLE DEBUG — dump MatrixRecord contents to stdout
+// ===========================================================================
+
+fn debug_print_table(table: MatrixRecord) -> Int:
+    println("    Handle #" + str(table.handle_id))
+    println("    Dimensions: " + str(table.cols) + " cols x " + str(table.rows) + " rows")
+    println("    Data cells: " + str(len(table.data)))
+
+    let cols_len = len(table.col_types)
+    if cols_len > 0:
+        println("    Column types (" + str(cols_len) + "):")
+        var cti: Int = 0
+        while cti < cols_len:
+            let ct = table.col_types[cti]
+            var type_name: String = "?"
+            if ct == MARK_INT:
+                type_name = "int"
+            elif ct == MARK_FLOAT:
+                type_name = "float"
+            elif ct == MARK_STRING:
+                type_name = "string"
+            println("      col[" + str(cti) + "] = " + type_name)
+            cti = cti + 1
+
+    var di: Int = 0
+    while di < len(table.data):
+        let mv = table.data[di]
+        let val_str = mark_value_to_string(mv)
+        println("      [" + str(di) + "] kind=" + str(mv.kind) + " val=" + val_str)
+        di = di + 1
+
+    return 0
+
+// ===========================================================================
+//  HANDLER DISPATCH LOOP
+//
+//  When execute_bytecode returns handler_id > 0, the VM has paused for
+//  external dispatch.  This loop:
+//    1. Extracts arguments from the VM stack
+//    2. Calls dispatch_handler (from bridge.kn)
+//    3. Resumes VM execution
+//    4. Repeats until no more handlers are pending
+// ===========================================================================
+
+fn run_handler_loop(vm: MarkScriptVM, bc: Array<Int>, er: ExecResult) -> MarkScriptVM:
+    var current_vm = er.vm
+    var current_er = er
+    var iteration: Int = 0
+
+    while current_er.handler_id > 0 and iteration < MAX_HANDLER_ITERATIONS:
+        let handler_id = current_er.handler_id
+
+        // Extract arguments from the VM stack
+        var args: Array<MarkValue> = []
+        let stk_len = len(current_vm.stack)
+        var ai: Int = 0
+        while ai < stk_len:
+            push(args, current_vm.stack[ai])
+            ai = ai + 1
+
+        // Dispatch through the bridge
+        let hr = dispatch_handler(current_vm, handler_id, args)
+
+        if hr.err != "":
+            println("[DISPATCH] Handler error: " + hr.err)
+            return current_vm
+
+        // Resume VM execution with the handler result
+        let next_er = resume_execution(current_vm, bc, hr)
+        current_vm = next_er.vm
+        current_er = next_er
+        iteration = iteration + 1
+
+    return current_vm
+
+// ===========================================================================
+//  SIMULATION RUNNER (recursive — functional chaining over immutable worlds)
+//
+//  Kain's `var x = func(x)` reassignment is restricted to the defining
+//  module.  Cross-module mutations use an explicit `let`-binding chain
+//  or recursive accumulation.  Each call produces a new PhysicsWorld
+//  by applying step_world once, then recursing for the remaining frames.
+// ===========================================================================
+
+fn run_steps(world: PhysicsWorld, remaining: Int) -> PhysicsWorld:
+    if remaining <= 0:
+        return world
+    let stepped = step_world(world)
+    return run_steps(stepped, remaining - 1)
+
+// ===========================================================================
+//  BUILD PHYSICS WORLD — add all parsed bodies using let-binding chaining
+// ===========================================================================
+
+fn build_world(bodies: Array<BodyData>) -> PhysicsWorld:
+    let w0 = init_world(DEFAULT_GRAVITY, DEFAULT_DT)
+    println("[SIM] World: gravity=" + str(DEFAULT_GRAVITY) + "  dt=" + str(DEFAULT_DT))
+
+    var world = w0
+    // Use array-based accumulator to work around cross-module var reassignment
+    var chain: Array<PhysicsWorld> = []
+    push(chain, w0)
+
+    var bi: Int = 0
+    while bi < len(bodies):
+        let b = bodies[bi]
+        let idx = len(chain) - 1
+        let current = chain[idx]
+        let next = add_body(current, b.pos, b.vel, b.mass, b.radius)
+        chain[idx] = next
+
+        let latest = next.bodies[len(next.bodies) - 1]
+        println("[SIM] Added[" + str(len(next.bodies) - 1) + "]: " + b.name
+            + "  pos=(" + str(latest.position.x)
+            + ", " + str(latest.position.y)
+            + ", " + str(latest.position.z) + ")"
+            + "  vel=(" + str(latest.velocity.x)
+            + ", " + str(latest.velocity.y)
+            + ", " + str(latest.velocity.z) + ")")
+        bi = bi + 1
+
+    return chain[len(chain) - 1]
+
+// ===========================================================================
+//  RESULTS OUTPUT
+// ===========================================================================
+
+fn print_final_positions(world: PhysicsWorld) -> Int:
+    println("")
+    println("============================================================")
+    println("  FINAL BODY POSITIONS  (" + str(SIMULATION_FRAMES) + " frames)")
+    println("============================================================")
+    var bi: Int = 0
+    while bi < len(world.bodies):
+        let body = world.bodies[bi]
+        println("  Body[" + str(bi) + "]:")
+        println("    pos: (" + str(body.position.x)
+            + ", " + str(body.position.y)
+            + ", " + str(body.position.z) + ")")
+        println("    vel: (" + str(body.velocity.x)
+            + ", " + str(body.velocity.y)
+            + ", " + str(body.velocity.z) + ")")
+        bi = bi + 1
+    println("============================================================")
+    return 0
+
+// ===========================================================================
+//  FALLBACK MODE — hardcoded bodies when VM returns no data table
+// ===========================================================================
+
+fn run_with_fallback() -> Int:
+    println("")
+    println("[FALLBACK] Using hardcoded test bodies")
+
+    var bodies: Array<BodyData> = []
+    push(bodies, BodyData {
+        name: "Sun", mass: 1000.0,
+        pos: vec3(0.0, 0.0, 0.0),
+        vel: vec3(0.0, 0.0, 0.0),
+        radius: 5.0
+    })
+    push(bodies, BodyData {
+        name: "Earth", mass: 1.0,
+        pos: vec3(100.0, 0.0, 0.0),
+        vel: vec3(0.0, 10.0, 0.0),
+        radius: 1.0
+    })
+
+    let world = build_world(bodies)
+    println("[SIM] Running " + str(SIMULATION_FRAMES) + " frame(s)...")
+    let final_world = run_steps(world, SIMULATION_FRAMES)
+    println("[SIM] Complete")
+    print_final_positions(final_world)
+    return 0
+
+// ===========================================================================
+//  MAIN ENTRY POINT
+//
+//  Pipeline:
+//    1. Read scripts/sim.md via fs_read_text
+//    2. Lex + compile through Markscript pipeline (create_lexer → compile_source)
+//    3. Execute bytecode (init_vm_with_builtins → execute_bytecode)
+//    4. Run handler dispatch loop for intent pauses
+//    5. Extract data tables from VM result
+//    6. Parse body data tables into BodyData array
+//    7. Build PhysicsWorld from parsed body data
+//    8. Run simulation for SIMULATION_FRAMES steps
+//    9. Print final body positions
+// ===========================================================================
+
+fn main() -> Int:
+    println("")
+    println("============================================================")
+    println("  MKS-ULTRA Physics Engine v0.1")
+    println("  Markscript-Embedded Simulation Runtime")
+    println("============================================================")
+    println("")
+
+    // ---- Step 1: Read simulation script -----------------------------------
+    let sim_path: String = "/blades/markscript/projects/mks-ultra/scripts/sim.md"
+    println("[1] Reading script: " + sim_path)
+    let sim_source = fs_read_text(sim_path)
+
+    if len(sim_source) == 0:
+        println("[ERROR] Could not read: " + sim_path)
+        println("[FALLBACK] Using hardcoded bodies")
+        run_with_fallback()
+        println("")
+        println("============================================================")
+        println("  ENGINE EXECUTION COMPLETE  (fallback — no sim.md)")
+        println("============================================================")
+        return 1
+
+    println("[1] Loaded " + str(len(sim_source)) + " chars")
+    println("")
+
+    // ---- Step 2: Lex + compile through Markscript pipeline ----------------
+    println("[2] Markscript: lexer → compiler...")
+    let lex_state = create_lexer(sim_source)
+    let bytecode = compile_source(lex_state)
+    println("[2] Produced " + str(len(bytecode)) + " bytecode ops")
+
+    if len(bytecode) <= 1:
+        println("[ERROR] No executable bytecode produced")
+        println("[FALLBACK] Using hardcoded bodies")
+        run_with_fallback()
+        return 1
+
+    println("")
+
+    // ---- Step 3: Initialize VM with built-in handlers ---------------------
+    println("[3] Initializing VM...")
+    var vm = init_vm_with_builtins()
+    println("[3] Registered " + str(vm.ivt_count) + " handler(s)")
+
+    // ---- Step 4: Execute bytecode ------------------------------------------
+    println("[4] Executing bytecode...")
+    var er = execute_bytecode(vm, bytecode)
+    println("[4] Tables: " + str(len(er.data_table))
+        + "  handler_id=" + str(er.handler_id))
+    println("")
+
+    // ---- Step 5: Handler dispatch loop -------------------------------------
+    if er.handler_id > 0:
+        println("[5] Dispatching handlers...")
+        vm = run_handler_loop(vm, bytecode, er)
+        println("[5] Handler chain complete")
+    else:
+        println("[5] No handler pauses — VM ran to completion")
+        vm = er.vm
+
+    println("")
+
+    // ---- Step 6: Extract data tables from VM result -----------------------
+    let dt = vm.data_table
+    let table_count = len(dt)
+    println("[6] VM data_tables: " + str(table_count))
+
+    // ---- Step 7-9: Parse bodies → simulate → report -----------------------
+    if table_count > 0:
+        let body_table = dt[0]
+        println("[7] Body table: " + str(body_table.cols) + "x" + str(body_table.rows))
+        debug_print_table(body_table)
+        println("")
+
+        let parsed = extract_body(body_table)
+        println("[7] Extracted " + str(len(parsed)) + " bod(ies)")
+
+        if len(parsed) > 0:
+            println("")
+            println("[8] Building world + running " + str(SIMULATION_FRAMES)
+                + " frame(s)...")
+            let world = build_world(parsed)
+            let final_world = run_steps(world, SIMULATION_FRAMES)
+            println("[8] Simulation complete")
+            print_final_positions(final_world)
+        else:
+            println("[ERROR] No bodies parsed — fallback")
+            run_with_fallback()
+    else:
+        println("[ERROR] No data tables — fallback")
+        run_with_fallback()
+
+    println("")
+    println("============================================================")
+    println("  ENGINE EXECUTION COMPLETE")
+    println("============================================================")
+    return 0

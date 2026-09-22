@@ -1,0 +1,48 @@
+attr	vtable_slot	type	purpose
+value	4 (element_set_text)	String	Text content for <text> element
+padding	6 (element_set_attr_f64)	Float	Padding around element
+spacing	6 (element_set_attr_f64)	Float	Gap between children in stacks
+corner_radius	6 (element_set_attr_f64)	Float	Rounded corner radius
+radius	6 (element_set_attr_f64)	Float	Circle radius
+font_size	6 (element_set_attr_f64)	Float	Text font size in points
+opacity	6 (element_set_attr_f64)	Float	Element opacity (0.0-1.0)
+border	6 (element_set_attr_f64)	Float	Border thickness
+border_width	6 (element_set_attr_f64)	Float	Border thickness (alias)
+stroke_width	6 (element_set_attr_f64)	Float	Stroke width (alias for border_width)
+width	6 (element_set_attr_f64)	Float	Element width
+height	6 (element_set_attr_f64)	Float	Element height
+min	6 (element_set_attr_f64)	Float	Minimum value
+max	6 (element_set_attr_f64)	Float	Maximum value
+step	6 (element_set_attr_f64)	Float	Step increment
+background	7 (element_set_attr_string)	String	Background color hex/rgba (style key: fill_color)
+fill	7 (element_set_attr_string)	String	Fill color alias (style key: fill_color)
+border_color	7 (element_set_attr_string)	String	Border color (style key: border_color)
+stroke	7 (element_set_attr_string)	String	Stroke color alias (style key: border_color)
+color	7 (element_set_attr_string)	String	Text/ink color (style key: ink_color)
+ink_color	7 (element_set_attr_string)	String	Text/ink color (style key: ink_color)
+title	7 (element_set_attr_string)	String	Panel or tooltip title
+variant	7 (element_set_attr_string)	String	"Style variant (e.g. ""primary"", ""ghost"")"
+role	7 (element_set_attr_string)	String	Accessibility role
+align	7 (element_set_attr_string)	String	"Text alignment (""left""/""center""/""right"")"
+font_family	7 (element_set_attr_string)	String	Font family name
+distribution	7 (element_set_attr_string)	String	Stack distribution (style key: layout.distribution)
+axis	7 (element_set_attr_string)	String	Scroll axis
+placeholder	7 (element_set_attr_string)	String	Placeholder text
+tooltip	7 (element_set_attr_string)	String	Tooltip text
+direction	5 (element_set_attr_i64)	Int	Stack direction (0=vertical, 1=horizontal) (style key: layout.direction)
+disabled	5 (element_set_attr_i64)	Bool	Disabled state (style key: disabled)
+checked	5 (element_set_attr_i64)	Bool	Checkbox/toggle state (style key: checked)
+selected	5 (element_set_attr_i64)	Bool	Selected state (style key: selected)
+tab_index	5 (element_set_attr_i64)	Int	Tab order index (style key: tab_index)
+weight	5 (element_set_attr_i64)	Int	Font weight (style key: weight)
+on_click	23 (element_set_callback)	() -> Void or (Event) -> Void	"Click event callback (event kind: ""click"")"
+on_change	23 (element_set_callback)	() -> Void or (Event) -> Void	"Change event callback (event kind: ""change"")"
+on_toggle	23 (element_set_callback)	() -> Void	"Toggle event callback (event kind: ""toggle"")"
+on_focus	23 (element_set_callback)	() -> Void	"Focus event callback (event kind: ""focus"")"
+on_blur	23 (element_set_callback)	() -> Void	"Blur event callback (event kind: ""blur"")"
+on_mouseenter	23 (element_set_callback)	() -> Void	"Mouse enter event callback (event kind: ""mouseenter"")"
+on_mouseleave	23 (element_set_callback)	() -> Void	"Mouse leave event callback (event kind: ""mouseleave"")"
+on_submit	23 (element_set_callback)	() -> Void	"Submit event callback (event kind: ""submit"")"
+on_cancel	23 (element_set_callback)	() -> Void	"Cancel event callback (event kind: ""cancel"")"
+src	4 (element_set_text) or 7 (element_set_attr_string)	String	Image source URL or path
+fit	7 (element_set_attr_string)	String	Image fit mode for <image> element

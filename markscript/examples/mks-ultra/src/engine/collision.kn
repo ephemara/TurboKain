@@ -1,0 +1,220 @@
+// ============================================================================
+//  MKS-ULTRA PHYSICS ENGINE — Collision Detection
+//
+//  Sphere-sphere collision detection, impulse-based resolution, and
+//  broad-phase pair testing for the mks-ultra physics simulation.
+//
+//  All functions use Layer 0 (fn + struct) with value semantics:
+//  each function takes a PhysicsWorld and returns a new PhysicsWorld
+//  with updated body velocities and positions.
+//
+//  Collision model: sphere approximation. Each RigidBody carries a
+//  radius field. Two bodies collide when the distance between their
+//  centers is less than the sum of their radii.
+//
+//  Resolution model: impulse-based with default coefficient of
+//  restitution (e = 0.5). Applies both velocity impulse and
+//  positional correction to resolve penetration.
+// ============================================================================
+
+use physics    // Vec3, RigidBody, PhysicsWorld
+
+// ===========================================================================
+//  AABB — Axis-Aligned Bounding Box
+// ===========================================================================
+
+pub struct AABB:
+    min: Vec3
+    max: Vec3
+
+pub fn aabb(min: Vec3, max: Vec3) -> AABB:
+    return AABB { min: min, max: max }
+
+// ===========================================================================
+//  CollisionInfo — Result of a collision test
+// ===========================================================================
+
+pub struct CollisionInfo:
+    hit: Bool
+    point: Vec3
+    normal: Vec3
+    penetration: Float
+
+// ===========================================================================
+//  SPHERE COLLISION TEST
+//
+//  Checks whether two rigid bodies (approximated as spheres centered at
+//  their position with radius) are currently overlapping.
+//
+//  Uses squared distance to avoid an unnecessary sqrt for the broad-phase
+//  distance check. The actual distance is computed during resolution.
+//
+//  Returns true if the bodies are overlapping (distance < sum of radii).
+// ===========================================================================
+
+pub fn sphere_collision(a: RigidBody, b: RigidBody) -> Bool:
+    let dx = a.position.x - b.position.x
+    let dy = a.position.y - b.position.y
+    let dz = a.position.z - b.position.z
+    let dist_sq = dx * dx + dy * dy + dz * dz
+    let radius_sum = a.radius + b.radius
+    return dist_sq < radius_sum * radius_sum
+
+// ===========================================================================
+//  IMPULSE-BASED COLLISION RESOLUTION
+//
+//  Resolves a collision between two bodies at indices i and j.
+//
+//  Algorithm:
+//    1. Compute collision normal: normalized vector from body i to body j
+//    2. Compute relative velocity along the normal: (v_i - v_j) · n
+//    3. If bodies are separating (rel_vel <= 0), return early — no impulse
+//    4. Compute impulse magnitude:
+//         j = -(1 + e) * rel_vel_n / (1/m_i + 1/m_j)
+//       where e = 0.5 (default coefficient of restitution)
+//    5. Apply impulse to both bodies' velocities
+//    6. Apply positional correction to resolve penetration (80% correction)
+//
+//  If either body has zero inverse mass, it is treated as immovable.
+//  Value semantics: returns a new PhysicsWorld with the updated bodies.
+// ===========================================================================
+
+pub fn resolve_collision(world: PhysicsWorld, i: Int, j: Int) -> PhysicsWorld:
+    var w = world
+    let a = w.bodies[i]
+    let b = w.bodies[j]
+
+    // Skip if both bodies are static (infinite mass)
+    if a.mass_inv <= 0.0 and b.mass_inv <= 0.0:
+        return w
+
+    // Vector from body a to body b
+    let dx = b.position.x - a.position.x
+    let dy = b.position.y - a.position.y
+    let dz = b.position.z - a.position.z
+    let dist_sq = dx * dx + dy * dy + dz * dz
+    let radius_sum = a.radius + b.radius
+
+    // Not overlapping — no collision to resolve
+    if dist_sq >= radius_sum * radius_sum:
+        return w
+
+    let dist = sqrt(dist_sq)
+
+    // Degenerate case — bodies are exactly on top of each other
+    if dist <= 0.000001:
+        return w
+
+    // Collision normal: unit vector from a toward b
+    let nx = dx / dist
+    let ny = dy / dist
+    let nz = dz / dist
+
+    // Relative velocity along the collision normal: (v_a - v_b) · n
+    let rel_vel_n = (a.velocity.x - b.velocity.x) * nx + (a.velocity.y - b.velocity.y) * ny + (a.velocity.z - b.velocity.z) * nz
+
+    // If bodies are separating along the normal, no impulse is needed
+    if rel_vel_n <= 0.0:
+        return w
+
+    // Coefficient of restitution (default elastic response)
+    let e = 0.5
+
+    // Total inverse mass
+    let inv_mass_sum = a.mass_inv + b.mass_inv
+
+    // Impulse scalar magnitude: j = -(1 + e) * v_rel_n / (1/m_a + 1/m_b)
+    let impulse = -(1.0 + e) * rel_vel_n / inv_mass_sum
+
+    // Build updated velocities (impulse applied)
+    let new_vel_a_x = a.velocity.x + impulse * nx * a.mass_inv
+    let new_vel_a_y = a.velocity.y + impulse * ny * a.mass_inv
+    let new_vel_a_z = a.velocity.z + impulse * nz * a.mass_inv
+
+    let new_vel_b_x = b.velocity.x - impulse * nx * b.mass_inv
+    let new_vel_b_y = b.velocity.y - impulse * ny * b.mass_inv
+    let new_vel_b_z = b.velocity.z - impulse * nz * b.mass_inv
+
+    // Apply positional correction to resolve penetration
+    let overlap = radius_sum - dist
+    var corr_a_x: Float = 0.0
+    var corr_a_y: Float = 0.0
+    var corr_a_z: Float = 0.0
+    var corr_b_x: Float = 0.0
+    var corr_b_y: Float = 0.0
+    var corr_b_z: Float = 0.0
+
+    if overlap > 0.0:
+        let correction = overlap / inv_mass_sum * 0.8
+        corr_a_x = -correction * nx * a.mass_inv
+        corr_a_y = -correction * ny * a.mass_inv
+        corr_a_z = -correction * nz * a.mass_inv
+        corr_b_x = correction * nx * b.mass_inv
+        corr_b_y = correction * ny * b.mass_inv
+        corr_b_z = correction * nz * b.mass_inv
+
+    // Construct new body a with updated position and velocity
+    let body_a = RigidBody {
+        position: (a.position.x + corr_a_x, a.position.y + corr_a_y, a.position.z + corr_a_z),
+        velocity: (new_vel_a_x, new_vel_a_y, new_vel_a_z),
+        acceleration: a.acceleration,
+        mass: a.mass,
+        mass_inv: a.mass_inv,
+        radius: a.radius
+    }
+
+    // Construct new body b with updated position and velocity
+    let body_b = RigidBody {
+        position: (b.position.x + corr_b_x, b.position.y + corr_b_y, b.position.z + corr_b_z),
+        velocity: (new_vel_b_x, new_vel_b_y, new_vel_b_z),
+        acceleration: b.acceleration,
+        mass: b.mass,
+        mass_inv: b.mass_inv,
+        radius: b.radius
+    }
+
+    // Build updated bodies array by reconstructing with replaced elements
+    var k: Int = 0
+    var new_bodies: Array<RigidBody> = []
+    while k < len(w.bodies):
+        if k == i:
+            push(new_bodies, body_a)
+        elif k == j:
+            push(new_bodies, body_b)
+        else:
+            push(new_bodies, w.bodies[k])
+        k = k + 1
+
+    // Return new world with updated bodies
+    return PhysicsWorld {
+        bodies: new_bodies,
+        gravity: w.gravity,
+        dt: w.dt
+    }
+
+// ===========================================================================
+//  BROAD-PHASE DETECT AND RESOLVE
+//
+//  Checks every pair of bodies in the physics world for sphere-sphere
+//  collisions and resolves all detected overlaps.
+//
+//  Uses O(n²) pair testing — suitable for small to medium simulations.
+//  For simulations with hundreds or thousands of bodies, a spatial
+//  partitioning scheme (grid, octree) should be added.
+//
+//  Value semantics: returns a new PhysicsWorld with all collisions
+//  resolved for the current timestep.
+// ===========================================================================
+
+pub fn detect_and_resolve(world: PhysicsWorld) -> PhysicsWorld:
+    var w = world
+    let count = len(w.bodies)
+    var i: Int = 0
+    while i < count:
+        var j: Int = i + 1
+        while j < count:
+            if sphere_collision(w.bodies[i], w.bodies[j]):
+                w = resolve_collision(w, i, j)
+            j = j + 1
+        i = i + 1
+    return w

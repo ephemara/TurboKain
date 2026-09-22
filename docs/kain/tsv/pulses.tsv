@@ -1,0 +1,11 @@
+keyword	syntax	interval	jitter	body_locals	purpose	effect_permissions
+pulse	pulse name every Nms jitter Nms:	N ms (16ms, 8ms, 1s, 250us)	N ms (optional)	pulse_tick, pulse_dt_ms, pulse_missed	Frame clock / render loop	All (IO, Async, GPU, Reactive, Unsafe, Alloc, Panic)
+pulse	pulse name every Nms:	N ms	none	pulse_tick, pulse_dt_ms, pulse_missed	LFO / modulation generator	All
+pulse	pulse name every Nms jitter Nms:	N ms	N ms	pulse_tick, pulse_dt_ms, pulse_missed	Agent simulation beat	All
+pulse	pulse name every Nms jitter Nms:	N ms	N ms	pulse_tick, pulse_dt_ms, pulse_missed	Fusion chain (teleport + shatter in body)	All
+pulse	pulse name every Ns:	N s	none	pulse_tick, pulse_dt_ms, pulse_missed	Heartbeat / health check	All
+pulse	pulse name every Nus:	N us	none	pulse_tick, pulse_dt_ms, pulse_missed	High-speed microsecond tick	All
+pulse	pulse name every Ntick:	N tick	none	pulse_tick, pulse_dt_ms, pulse_missed	Platform-relative tick	All
+pulse	pulse name every Nms jitter Nms:	N ms	N ms	pulse_tick, pulse_dt_ms, pulse_missed	Beat-division conductor (polyrhythm)	All
+pulse	pulse name every Nms:	N ms	none	pulse_tick, pulse_dt_ms, pulse_missed	CPU-bound work scheduler	All
+pulse	pulse name every Nms jitter Nms:	N ms	N ms	pulse_tick, pulse_dt_ms, pulse_missed	Physics integration step	All

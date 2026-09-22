@@ -1,0 +1,22 @@
+keyword	syntax	from	to	via	purpose
+teleport	teleport <expr> from <source_world> to <target_world> [via <channel>]	world (declared world name)	world (declared world name)	string (optional named channel)	Zero-copy destructive cross-world handoff, provenance tracked
+teleport	teleport shard from Authority to Mirror	Authority	Mirror		Simple handoff — no named channel, minimal routing
+teleport	teleport shard from Authority to Mirror via shard_bus	Authority	Mirror	shard_bus	Named channel for routing and telemetry distinction
+teleport	teleport particle from NativeWorld to GpuWorld via gpu_upload	NativeWorld	GpuWorld	gpu_upload	GPU upload handoff — particle SoA layout preserved across worlds
+teleport	teleport shard from PulseAuthority to PulseMirror via relay_clock_bus	PulseAuthority	PulseMirror	relay_clock_bus	Pulse body teleport — timed handoff every 4ms
+teleport	teleport shard from FusionAuthority to FusionMirror via fusion_shard_bus	FusionAuthority	FusionMirror	fusion_shard_bus	Actor handler teleport — within ShatterAndSend message
+teleport	teleport value from StageA to StageB	StageA	StageB		Chained teleport — first hop in pipeline
+teleport	teleport a from StageB to StageC	StageB	StageC		Chained teleport — second hop in pipeline
+teleport	teleport value from Authority to Mirror via safe_bus	Authority	Mirror	safe_bus	Teleport with axiom capability gating (world.teleport)
+teleport	teleport shard from PulseAuthority to PulseMirror via pulse_hot_bus	PulseAuthority	PulseMirror	pulse_hot_bus	Teleport inside collapse/observe ownership block
+teleport	teleport value from Authority to Mirror via validated_bus	Authority	Mirror	validated_bus	Teleport with law validation of moved value
+teleport	teleport value from Authority to Mirror via fast_bus	Authority	Mirror	fast_bus	Teleport inside converge fast lane
+teleport	teleport value from SourceWorld to DestWorld	SourceWorld	DestWorld		Simple handoff — no channel, non-GPU worlds
+teleport	teleport value from WorkingWorld to ArchiveWorld via archived_bus	WorkingWorld	ArchiveWorld	archived_bus	Zero-copy parameter passing — handoff inside function
+teleport	teleport particle from SimWorld to GpuWorld via hot_migration	SimWorld	GpuWorld	hot_migration	Hot-data migration — teleport as migration primitive
+teleport	teleport obj from BuilderWorld to ClientWorld via delivery	BuilderWorld	ClientWorld	delivery	Builder-pipeline terminator — teleport as composable terminator
+teleport	teleport payload_a from WorldA to MailboxWorld via channel_a	WorldA	MailboxWorld	channel_a	World-to-world mailbox pattern — multiple sources to one target
+teleport	teleport payload_b from WorldB to MailboxWorld via channel_b	WorldB	MailboxWorld	channel_b	World-to-world mailbox pattern — distinct channel per source
+teleport	teleport value from DebugSource to DebugTarget via debug_bus	DebugSource	DebugTarget	debug_bus	Ownership debugging — instrument teleport count and token
+teleport	teleport process from Authority to Mirror	Authority	Mirror		Orchestrate stage teleport — world handoff within pipeline
+teleport	teleport 42 from Authority to Mirror	Authority	Mirror		Non-pointer (scalar) teleport — bookkeeping only, no copy

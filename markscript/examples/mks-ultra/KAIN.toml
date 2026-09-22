@@ -1,0 +1,33 @@
+[package]
+name = "mks-ultra"
+version = "0.1.0"
+description = "Markscript-embedded Kain physics engine — rigid body simulation with collision detection and force integration."
+
+[blade]
+name = "mks-ultra"
+entry = "src/main.kn"
+source_roots = ["src"]
+module_roots = ["src", "src/engine", "../../markscript/src"]
+build_targets = ["llvm"]
+
+[run]
+entry = "src/main.kn"
+target = "llvm"
+
+[build]
+entry = "src/main.kn"
+artifact_root = ".kain/out"
+cache_root = ".kain/cache/build"
+profile = "debug"
+
+[[build.tasks]]
+id = "check-llvm"
+kind = "check"
+entry = "src/main.kn"
+target = "llvm"
+inputs = [
+    "src/main.kn",
+    "src/engine/physics.kn",
+    "src/engine/collision.kn",
+    "src/engine/integrator.kn",
+]

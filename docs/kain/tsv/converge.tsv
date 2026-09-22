@@ -1,0 +1,13 @@
+keyword	syntax	spec	fast	verification	use_case
+converge	converge name(params) -> T:	spec reference: body	fast lane when selector: body	verify random(N)	Performance lane selection (scalar vs SIMD)
+converge	converge name(params) -> T:	spec reference: body	fast lane when selector: body	verify random(N)	Strategy selection (maze solving)
+converge	converge name(params) -> T:	spec reference: body	fast lane when selector: body	none	Quality-of-service dispatch (high vs low quality)
+converge	converge name(params) -> T:	spec reference: body	"fast lane when target(""target""): body"	verify random(N)	Platform-specific dispatch
+converge	converge name(params) -> T:	spec reference: body	"fast lane when capability(""cap""): body"	verify random(N)	Hardware capability dispatch
+converge	converge name(params) -> T:	spec reference: body	fast lane (no selector): body	none	Always-eligible fallback lane
+converge	converge name(params) -> T:	spec reference: body	fast lane when selector: body	verify random(N)	A/B test framework
+converge	converge name(params) -> T:	spec reference: body	fast lane when selector: body	verify random(N)	Adaptive quality-of-service
+converge	converge name(params) -> T:	spec reference: body	fast lane when selector: body	verify random(N)	Model/heuristic selector
+converge	converge name(params) -> T:	spec reference: body	fast lane when selector: body	verify random(N)	Numeric stability checker
+converge	converge name(params) -> T:	spec reference: body	fast lane when selector: body	none	Power management lane
+converge	converge name(params) -> T:	spec reference: body	fast lane when selector: body	verify random(N)	Debug/release dispatch

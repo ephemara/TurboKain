@@ -1,0 +1,71 @@
+keyword	syntax	purpose	kwargs_support
+import	import module as alias	First-class Python module import with alias	Yes — named Kain args lowered to Python kwargs
+import	import module	Python module import without alias	Yes
+import-dotted	import module.submodule as alias	Dotted Python module import	Yes
+from	from module import name as alias	Python member import with alias	Yes
+from	from module import name	Python member import without alias	Yes
+from-multi	from module import name1, name2	Multiple member import from same module	Yes
+py_eval	py_eval(code)	Evaluate Python expression (Kain function)	N/A
+py_eval_raw	py_eval_raw(code)	Evaluate Python expression, return raw handle	N/A
+py_exec	py_exec(code)	Execute Python statements	N/A
+py_import	py_import(name)	Import Python module (stdlib function)	N/A
+py_import_with_context	py_import_with_context(name, file)	Import Python module with source context	N/A
+py_call	py_call(target, args)	Call Python callable with auto-convert	N/A
+py_call_raw	py_call_raw(target, args)	Call Python callable, keep result as HostObject	N/A
+py_getattr	py_getattr(target, name)	Read Python attribute (auto-convert)	N/A
+py_getattr_raw	py_getattr_raw(target, name)	Read Python attribute, raw handle	N/A
+py_setattr	py_setattr(target, name, value)	Set Python attribute	N/A
+py_hasattr	py_hasattr(target, name)	Check Python attribute existence	N/A
+py_buffer_view	python_buffer_view(target)	Create Py_buffer view (zero-copy adoption)	N/A
+py_buffer_view_byte_length	python_buffer_view_byte_length(view)	Read buffer byte length (struct field)	N/A
+py_buffer_view_element_count	python_buffer_view_element_count(view)	Read buffer element count	N/A
+py_buffer_view_element_size	python_buffer_view_element_size(view)	Read buffer element size	N/A
+py_buffer_view_c_contiguous	python_buffer_view_c_contiguous(view)	Check C-contiguity	N/A
+py_buffer_view_writable	python_buffer_view_writable(view)	Check writable flag	N/A
+py_buffer_view_release	python_buffer_view_release(view)	Release buffer view	N/A
+python_region_begin	python_region_begin()	Start a GIL-scoped region (batched operations)	N/A
+python_region_end	python_region_end(region)	End region, auto-release buffer views, release GIL	N/A
+python_region_import	python_region_import(region, name)	Import module within region (cached, 64 entries)	N/A
+python_region_getattr_raw	python_region_getattr_raw(region, target, name)	Get attribute within region (cached, 128 entries)	N/A
+python_region_call_raw_f64_trunc_i64	python_region_call_raw_f64_trunc_i64(region, target, arg)	Fast numeric call lane — f64→i64 truncation (PyObject_Vectorcall)	N/A
+python_region_buffer_view	python_region_buffer_view(region, target)	Open buffer view within region (auto-tracked)	N/A
+python_region_buffer_view_checksum37	python_region_buffer_view_checksum37(region, target, iters, mod)	Fused checksum — O(1) closed-form math, no per-iteration Python calls	N/A
+kain_tensor_from_py	kain_tensor_from_py(target)	Create tensor view from Python (auto: shared then owned)	N/A
+kain_tensor_from_py_shared	kain_tensor_from_py_shared(target)	Shared zero-copy tensor view	N/A
+kain_tensor_from_py_owned	kain_tensor_from_py_owned(target)	Owned tensor (copies .copy())	N/A
+kain_tensor_get	kain_tensor_get(tensor, indices)	Read element via PyObject_GetItem	N/A
+kain_tensor_set	kain_tensor_set(tensor, indices, value)	Write element via PyObject_SetItem	N/A
+kain_tensor_to_py	kain_tensor_to_py(tensor, backend)	Export tensor back to Python (incRef)	N/A
+kain_image_from_py	kain_image_from_py(target)	Create image view from Python	N/A
+kain_image_from_py_shared	kain_image_from_py_shared(target)	Shared zero-copy image view	N/A
+kain_image_from_py_owned	kain_image_from_py_owned(target)	Owned image (copies bytes)	N/A
+kain_image_pixel	kain_image_pixel(image, x, y)	Read pixel value	N/A
+kain_image_set_pixel	kain_image_set_pixel(image, x, y, value)	Write pixel value	N/A
+python_gpu_storage_buffer	python_gpu_storage_buffer(target, name)	Promote tensor to GPU storage buffer	N/A
+python_gpu_buffer	python_gpu_buffer(target, policy)	Promote tensor to GPU buffer with GpuResourcePolicy	N/A
+python_gpu_uniform_buffer	python_gpu_uniform_buffer(target, name)	Promote tensor to GPU uniform buffer	N/A
+python_shared_buffer	python_shared_buffer(target)	Acquire shared buffer via buffer protocol	N/A
+python_shared_image	python_shared_image(target)	Acquire shared image contract	N/A
+py_call_async	python_call_async(target, args)	Async Python call on dedicated thread	N/A
+py_future_state	python_future_state(future)	Check future state (pending/ok/error/cancelled)	N/A
+py_future_done	python_future_done(future)	Check if future is done	N/A
+py_future_await	python_future_await(future)	Await future result (spins up to 8192 iterations)	N/A
+python_actor_callback	python_actor_callback(actor_id, message_name)	Register Python callable as actor message callback	N/A
+python_actor_callback_close	python_actor_callback_close(callback)	Close actor callback	N/A
+python_actor_callback_delivered	python_actor_callback_delivered(callback)	Get delivered message count	N/A
+python_gpu_tensor_interop_info	python_tensor_interop_info(target)	Get full GPU interop metadata (CUDA/DLPack)	N/A
+python_tensor_gpu_residency_flags	python_tensor_gpu_residency_flags(info)	Compute GPU residency flags from tensor info	N/A
+python_region_bind_attr	python_region_bind_attr(region, target, name)	Pre-bind callable reference for fast lane calls	N/A
+cppython-discovery	KAIN_PYTHON_DLL env var	CPython discovery via env var	N/A
+cppython-discovery	KAIN_PYTHON_EXE env var	CPython discovery via exe path	N/A
+cppython-discovery	python.exe / python3.exe on PATH	CPython discovery via PATH	N/A
+orchestrate-stage-python	stage name: python	Orchestrate pipeline stage for Python bridge calls	N/A
+orchestrate-fallback	fallback stage_name	Fallback to another stage if Python fails	N/A
+orchestrate-fallback-degrade	fallback degrade stage_name	Degrade to backup stage on Python failure	N/A
+orchestrate-after	after stage_name	Temporal ordering: run Python after specific stage	N/A
+orchestrate-deps	deps [stage, ...]	Data dependency declaration for Python stage	input values from named stages
+orchestrate-requires	requires law_name	Law gate: only run Python if invariant holds	N/A
+orchestrate-guarded	guarded by axiom_name	Axiom capability guard for Python stage	N/A
+orchestrate-residency	residency host / shared	Data location for Python stage input	host (CPU), shared (zero-copy)
+orchestrate-transfer	transfer none / shared_view	Data movement mode for Python stage view	none, host_to_device, device_to_host, shared_view
+orchestrate-policy	policy telemetry_prefer_cpu	Scheduling hint for Python stage	prefer_cpu, prefer_gpu, balance_latency, static

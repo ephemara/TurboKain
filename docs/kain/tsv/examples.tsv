@@ -1,0 +1,76 @@
+example	construct	code_snippet	file_line	purpose
+fn - Function Declaration	fn	fn add(a: Int, b: Int) -> Int with Pure: return a + b	KAIN_BY_EXAMPLE.md:8	Function declaration with pure effect
+fn - Generic Function	fn	fn generic_sum<T: Numeric>(a: T, b: T) -> T with Pure where T: Default: return a + b	KAIN_BY_EXAMPLE.md:12	Generic function with trait bounds
+fn - Unsafe Snapshot	fn	fn maze_snapshot(maze: ptr<Int>, cell_count: Int) -> [Int] with Unsafe:	KAIN_BY_EXAMPLE.md:17	Function using raw memory with Unsafe effect
+let/mut/var binding	let	let x: Int = 42; let mut counter: Int = 0; var acc: Int = 0	KAIN_BY_EXAMPLE.md:31	Immutable, mutable, and rebindable bindings
+const constant	const	const MODULUS: Int = 1000000007; const CELL_COUNT: Int = 8	KAIN_BY_EXAMPLE.md:39	Compile-time constants
+if/elif/else expression	if	"let mode = if val == 0: ""zero"" elif val == 1: ""one"" else: ""many"""	KAIN_BY_EXAMPLE.md:44	Conditional expression branching
+match enum matching	match	"match s: NativeSubsystem::RuntimeCore => ""runtime-core"" ... _ => ""unknown"""	KAIN_BY_EXAMPLE.md:52	Exhaustive enum variant pattern matching
+for loop iteration	for	for lane in [1, 2, 3, 4]: acc = (acc + lane) % modulus	KAIN_BY_EXAMPLE.md:79	For loop over literal array
+for range iteration	for	for i in 0..10: result = result * i	KAIN_BY_EXAMPLE.md:83	For loop with range syntax
+while loop	while	var i: Int = 0; while i < iterations: acc = (acc + i) % modulus; i = i + 1	KAIN_BY_EXAMPLE.md:91	Conditional loop
+loop with break value	loop	loop: step = step + 1; if step > 5: break; odd_sum = odd_sum + step	KAIN_BY_EXAMPLE.md:99	Infinite loop with break
+loop break value loop	loop	let result: Int = loop: if done: break final_value; step()	KAIN_BY_EXAMPLE.md:105	Loop yielding a break value
+return early exit	return	fn clamp(v: Int, lo: Int, hi: Int) -> Int: if v < lo: return lo; if v > hi: return hi; return v	KAIN_BY_EXAMPLE.md:112	Early return with boundary checks
+defer cleanup	defer	"fn process() -> Int: let buf: ptr<Int> = alloc_zeroed(N, ""Int""); defer decay buf"	KAIN_BY_EXAMPLE.md:119	Block-scoped LIFO cleanup with defer
+struct with impl	struct/impl	struct Packet: id: Int; payload: Int / impl Packet: fn score(_self: Self_) -> Int	KAIN_BY_EXAMPLE.md:133	Product type with method
+enum Option/Result	enum	enum Option<T>: Some(value: T); None / enum Result<T, E>: Ok(value: T); Err(error: E)	KAIN_BY_EXAMPLE.md:143	Sum types for option and result
+trait with default	trait	trait Metric: fn score(_self: Self_) -> Int: return 0	KAIN_BY_EXAMPLE.md:152	Trait with default method implementation
+impl trait for type	impl	impl Metric for Packet: fn score(_self: Self_) -> Int: return ((_self.id * 11) + _self.payload + 17) % 1000000007	KAIN_BY_EXAMPLE.md:156	Trait implementation for struct
+type alias	type	type Checksum = Int; type Distance = Float	KAIN_BY_EXAMPLE.md:162	Type aliases
+pub mod visibility	mod/pub	pub mod util: pub fn clamp(v: Int, lo: Int, hi: Int) -> Int	KAIN_BY_EXAMPLE.md:168	Module with public visibility
+use stdlib imports	use	use std::runtime; use std::actor; use std::intent	KAIN_BY_EXAMPLE.md:175	Standard library imports
+true/false/none literals	true/false/none	let flag: Bool = true; let done: Bool = false; let nullable: Option<Int> = none	KAIN_BY_EXAMPLE.md:180	Built-in literal values
+where generic constraint	where	fn summary<T: Metric>(p: T, salt: Int) -> Int with Pure where T: Stable	KAIN_BY_EXAMPLE.md:187	Generic function with where clause
+as type cast/alias	as	let clamped: Int = val as Int; include <stdio.h> as libc; import json as py_json	KAIN_BY_EXAMPLE.md:194	Type casting and import aliasing
+Effects Chained	Pure/IO/GPU/Reactive/Unsafe	fn pure_effect_score(value: Int) -> Int with Pure: / io/gpu/reactive/unsafe variants	KAIN_BY_EXAMPLE.md:204	All five effects chained in expressions
+async/await future	async/await	async fn fetch(id: Int) -> Int with Async: return id * 2; let fut = fetch(v); return await fut	KAIN_BY_EXAMPLE.md:223	Async function and future resolution
+GPU dispatch	GPU/Unsafe	"fn run_kernel(data: ptr<Float>) -> Int with GPU, Unsafe: dispatch ""shader::Kernel::compute"" [32, 32, 1]"	KAIN_BY_EXAMPLE.md:233	GPU kernel dispatch from host
+Unsafe raw memory	Unsafe	"fn read_raw(cells: ptr<Int>) -> Int with Unsafe: return mem_load(ptr_offset(cells, 0, ""Int""), ""Int"")"	KAIN_BY_EXAMPLE.md:240	Raw memory access with Unsafe
+and/or boolean	and/or	if v >= 0 and v < MODULUS: return true; let flag: Bool = a == none or a == 0	KAIN_BY_EXAMPLE.md:247	Boolean operators
+component with raw memory	component	component MemoryWidget(cell_count: Int) with Unsafe: state buffer: ptr<Int> / collapse/observe/decay	KAIN_BY_EXAMPLE.md:258	Full component with raw memory lifecycle
+JSX composition	component	component Button(label: String, kind: String): render <box><text value={label} /></box>	KAIN_BY_EXAMPLE.md:300	Components calling components in JSX
+JSX recursive component	component	component RecursiveTree(depth: Int, label: String): state expanded: Bool = false / <RecursiveTree />	KAIN_BY_EXAMPLE.md:312	Recursive component composition in JSX
+world surface binding	world/surface	world MyWorld: state signal: Int = 1; surface native_ui => App	KAIN_BY_EXAMPLE.md:334	World with native UI surface
+world full game state	world	world PongAuthority: state left_paddle_y: Int = 228 / 18 fields / surface native_ui => App	KAIN_BY_EXAMPLE.md:343	Full game state world with 18 fields
+entangle couplings	entangle	entangle PongAuthority.left_paddle_y <-> PongMirror.mirrored_left_paddle_y with single_writer	KAIN_BY_EXAMPLE.md:382	Cross-world field entanglement
+patch journaled mutation	patch	patch apply_frame(authority: PongAuthority, ...) -> Int: / 16 field assignments	KAIN_BY_EXAMPLE.md:415	18-field journaled mutation patch
+law compound invariants	law	law cell_in_bounds(index: Int, cell_count: Int) -> Bool: return index >= 0 and index < cell_count	KAIN_BY_EXAMPLE.md:448	Compound invariants with laws calling laws
+converge SIMD dispatch	converge	converge fast_dot(left: ptr<Int>, right: ptr<Int>, ...) -> Int: spec reference: / fast lanes / verify random(8)	KAIN_BY_EXAMPLE.md:470	Hardware capability SIMD dispatch
+orchestrate 7-stage pipeline	orchestrate	orchestrate signal_pipeline(value: Int, epoch: Int) -> Int: stage host_base: cpu / stage gpu_tune / stage patch_step	KAIN_BY_EXAMPLE.md:490	7-stage orchestrate with all runtime kinds
+orchestrate multi-language	orchestrate	orchestrate preflight_pipeline(seed: Int, authority: Authority) -> Int: / c_shadow / py_shadow / gpu_lane	KAIN_BY_EXAMPLE.md:517	Multi-language pipeline (C+Python+GPU)
+pulse with teleport	pulse	pulse clock_driver every 8ms jitter 1ms: let shard = Shard ... / teleport shard from Authority to Mirror via pulse_bus	KAIN_BY_EXAMPLE.md:544	Pulse recurring beat with teleport inside
+resonate calls orchestrate	resonate	resonate Authority.signal dampen 0 ms: Authority.shadow = signal_pipeline(resonate_new_i64 + tick, tick)	KAIN_BY_EXAMPLE.md:554	Resonate calling orchestrate pipeline on state change
+axiom capability	axiom	"axiom machine_truth: when target(""llvm"") / when arch(""x86_64"") / when capability(""memory.shatter"")"	KAIN_BY_EXAMPLE.md:567	Capability assumption with fallback
+shatter struct SoA	shatter struct	shatter struct Particle: position_x: Float; position_y: Float; velocity_x: Float; velocity_y: Float; alive: Bool	KAIN_BY_EXAMPLE.md:576	Structure-of-Arrays layout declaration
+teleport zero-copy	teleport	teleport shard from Authority to Mirror via shard_bus / score_before == score_after	KAIN_BY_EXAMPLE.md:586	Zero-copy cross-world integrity proof
+actor message concurrency	actor	actor CrucibleRelayActor: state bias: Int = 7 / on Compute(reply_to: P, payload: Int) / send child.Verify(...)	KAIN_BY_EXAMPLE.md:607	Message-oriented concurrency with converge + cascade
+spawn/ask multi-actor	spawn/ask	"fn actor_cascade_checksum(iterations: Int, modulus: Int) with Unsafe: let relay = spawn ... / ask(relay, ""Compute"", pack(v, seed))"	KAIN_BY_EXAMPLE.md:625	Multi-actor spawn and ask with async fusion
+actor cascade delegate	actor	actor CrucibleVerifier: state min_val: Int = 0 / on Verify(reply_to: P, val: Int)	KAIN_BY_EXAMPLE.md:640	Actor cascade: spawn, delegate reply, converge inside
+actor telemetry counters	actor	fn actor_telemetry_hot(count: Int) -> Int: actor_scheduler_queue_depth() / 7 counters	KAIN_BY_EXAMPLE.md:663	Hot loop actor telemetry with 7 scheduler counters
+ownership + teleport in actor	collapse/observe/decay	actor CrucibleTeleporter: state done: Int = 0 / collapse cells: / observe cells: / decay cells / teleport shard	KAIN_BY_EXAMPLE.md:678	Ownership lifecycle inside actor with cross-world teleport
+share/fanout contention	share/fanout	fn contention_wall_checksum(iterations: Int) -> Int: share counter: fanout worker in 0..32	KAIN_BY_EXAMPLE.md:714	32-worker parallel contention wall
+include C headers	include	include <stdio.h> as cstdio; include <windows.h> as win; include <vulkan/vulkan.h> as vk	KAIN_BY_EXAMPLE.md:741	C header import (local + system)
+import Python	import	import json as py_json; import numpy as np; from torch import tensor	KAIN_BY_EXAMPLE.md:750	Python host object import
+ABI control attributes	@naked/@callconv	"@naked @section @link_name fn metal_naked_trap() with Unsafe: asm(""ret"") / @callconv(""win64"")"	KAIN_BY_EXAMPLE.md:759	Full ABI control with attributes
+shader compute kernel	shader compute	shader compute OrchestrateGodKernel(id: UVec3) -> Void workgroup(8, 1, 1): / StorageBuffer src/dst	KAIN_BY_EXAMPLE.md:780	UInt compute kernel with workgroup
+shader vertex	fragment/shader	shader vertex CrucibleVertex(position: Vec3, uv: Vec2) -> Vec4: uniform offset: Vec3 @0	KAIN_BY_EXAMPLE.md:799	Vertex shader with uniform binding
+dispatch GPU launch	dispatch	"fn dispatch_pipeline_checksum(iterations: Int) with GPU, Unsafe: dispatch ""shader::Kernel::compute"" [13, 2, 1]"	KAIN_BY_EXAMPLE.md:810	Host-side GPU launch with ABI telemetry
+std::graphics session	graphics	"fn graphics_probe() -> Int: let session = graphics_session_create(""probe"", 320, 240)"	KAIN_BY_EXAMPLE.md:828	Graphics command recording session
+std::gpu resource policy	gpu	fn buffer_contract() -> Int: / gpu_resource_policy(...) / gpu_shared_buffer_zeroed(...)	KAIN_BY_EXAMPLE.md:847	GPU resource policy and buffer creation
+raw memory ptr<T>	ptr/alloc	mem	"fn raw_memory(count: Int) with Unsafe: let cells: ptr<Int> = alloc_zeroed(count, ""Int"")"	KAIN_BY_EXAMPLE.md:862	Raw pointer allocation and access
+volatile MMIO	volatile	"fn mmio_probe(slot: ptr<Int>) with Unsafe: volatile_store(slot, 11, ""Int"") / volatile_load(slot, ""Int"")"	KAIN_BY_EXAMPLE.md:879	MMIO volatile access
+bitcast/ptr cast	bitcast	"fn cast_lane(x: Float) with Unsafe: let bits: Int = bitcast(x, ""I64"") / ptr_to_int / int_to_ptr"	KAIN_BY_EXAMPLE.md:887	Bitcast and pointer arithmetic
+fence barriers	fence	fn fence_barrier_pressure_checksum(iterations: Int) with Unsafe: lfence() / sfence() / mfence() in loop	KAIN_BY_EXAMPLE.md:904	Tight loop fence barrier pressure
+asm inline assembly	asm	"fn pause_loop(iterations: Int) with Unsafe: asm(""pause"") / asm(""nop"")"	KAIN_BY_EXAMPLE.md:924	Inline assembly with no operands
+asm with operand	asm	"fn clflush_hammer(iterations: Int) with Unsafe: asm(""clflush ($0)"", addr, memory = true)"	KAIN_BY_EXAMPLE.md:934	Inline assembly with memory operand
+vm page operations	vm	fn vm_page_torture_checksum(iterations: Int) with Unsafe: vm_reserve / vm_commit / vm_protect / vm_lock	KAIN_BY_EXAMPLE.md:954	Full virtual memory page torture loop
+cpuid intrinsics	cpuid	fn cpu_cpuid_topology_checksum(iterations: Int) with Unsafe: cpuid_eax/ebx/ecx/edx	KAIN_BY_EXAMPLE.md:986	CPUID topology query
+comptime shader metadata	comptime	"comptime: let compute = ([64, 1, 1], [(""src"", ""u32"", ...)], [])"	KAIN_BY_EXAMPLE.md:1010	Comptime shader metadata block
+macro syntactic	macro	macro fold!(x: expr): mod(x, 1000000007); let result = fold!(acc + index)	KAIN_BY_EXAMPLE.md:1024	Syntactic macro definition and usage
+test compiletest	test	test fn test_addition(): assert(add(2, 2) == 4)	KAIN_BY_EXAMPLE.md:1035	Test function with assertion
+runtime lifecycle	runtime	use std::runtime; fn main() -> Int: let init = runtime_init() / runtime_shutdown()	KAIN_BY_EXAMPLE.md:1049	Runtime init/shutdown lifecycle
+semantic telemetry	telemetry	fn verify_semantics_fired() -> Int: resonate_delta / entangle_delta / teleport_delta / patch_delta / orchestrate_delta	KAIN_BY_EXAMPLE.md:1064	All-layer semantic telemetry with delta guards
+std::machine helpers	machine	fn machine_probe(ptr: ptr<Int>) with Unsafe: load_fence() / store_fence() / cache_flush()	KAIN_BY_EXAMPLE.md:1092	Machine helpers: fences, cache flush, page size
+full fusion - all 7 layers	fusion	fn fusion_full_causal_chain_checksum(...) with Unsafe: / patch -> resonate -> orchestrate -> converge -> actor -> teleport -> world	KAIN_BY_EXAMPLE.md:1110	Complete 7-layer causal chain in one loop
+decision ladder quick ref	ladder	"Am I crossing into C/OS? -> include / ""GPU kernel?"" -> shader / ""Global named state?"" -> world / ""None of above?"" -> fn, let, etc."	KAIN_BY_EXAMPLE.md:1193	Quick reference decision ladder

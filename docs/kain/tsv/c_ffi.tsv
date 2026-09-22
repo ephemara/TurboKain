@@ -1,0 +1,26 @@
+keyword	syntax	purpose	example	restrictions
+include	include <header.h> as alias	System header import (angle brackets)	include <windows.h> as win	libclang-powered; requires clang-sys; SAL annotations may block some CRT
+include	"include ""path/header.h"" as alias"	Quoted local header import	"include ""sqlite3.h"" as sql"	Local filesystem search; companion .c required for linking
+include	include bare_name as alias	Bare import name (auto-resolved)	include native/nuklear as nk	Equivalent to quoted; .h appended during resolution
+include-versioned	include <header.h> version as alias	Version-constrained C header import	include <sqlite3.h> 3.45.0 as sql	Requires vcpkg; KAIN_C_FFI_AUTO_FETCH env var; version schemes: dotted decimal, ISO date, quoted string
+extern	@extern fn signature	Mark function as foreign C ABI	@extern fn puts(s: &u8) -> Int	No Kain body; C ABI; can combine with @link_name
+link_name	"@link_name(""symbol"")"	Specify raw C symbol name	"@link_name(""MessageBoxA"")"	Used with @extern; validated during typechecking
+callconv	"@callconv(""stdcall"")"	Select calling convention	"@callconv(""stdcall"") @extern fn foo() -> Int"	Supported: C, stdcall, fastcall, thiscall, vectorcall
+use-c	use c::module	Legacy C import syntax (deprecated)	use c::windows	No alias support; basic name lookup; deprecated in favor of include...as
+prelude	{name}_prelude.kn	Auto-generated type aliases + constants	win_INVALID_HANDLE_VALUE: Int = -1	Emitted by c-ffi generator; contains #define constants + typedefs
+bridge-dynamic	Dynamic tier	Live bridge DLL loaded at runtime via libloading	System headers default	Generates Rust bridge crate compiled to DLL
+bridge-static	Static tier	Native link (static library)	Runtime-owned shim headers	No runtime DLL loading; used for runtime-owned headers
+bridge-inline	Inline tier	LLVM bitcode embedding	Local companion .c	Companion .c compiled to bitcode; zero bridge overhead
+companion-c	include header.h + sibling .c	Companion .c discovery and compilation	include sqlite3.h as sql + sqlite3.c	Must have sibling .c; requires at least one source; compiled with Inline tier
+platform-import	kain import platform <pkg>	Import native platform SDK	include <vulkan/vulkan.h> as vk	Via libclang; SDK discovery via env vars (VULKAN_SDK, etc.)
+alloc-for-c	"alloc_zeroed(N, ""Type"") + mem_store"	Allocate memory for C function structs	"alloc_zeroed(4, ""Int"") for RECT struct"	Kain-owned; pass ptr_to_int(ptr) to C; must decay after use
+c-string-return	@c_string_return	Auto-materialize C const char* to Kain String	On generated thunks	LLVM lane materializes raw i8* into owned Kain string storage
+asm	"asm(""instruction"", args, constraints, clobbers)"	Inline assembly expression	"asm(""rep stosd"", ptr, cnt, val, constraints=""{rdi},{rcx},{rax}"")"	x86_64 only for MVP; Intel syntax default; memory=true for memory ops
+interop-tier-dynamic	Dynamic	Default for system headers	include <windows.h> as win	Live bridge DLL loaded at runtime
+interop-tier-static	Static	Default for runtime-owned headers	include <math.h> as cmath	Native link, no DLL loading
+interop-tier-inline	Inline	Default for local includes with companion .c	include sqlite3.h as sql	LLVM bitcode embedding
+abi-policy	LP64 vs LLP64	Per-platform integer width policy	Linux LP64 (long=64), Windows LLP64 (long=32)	Controlled by KAIN_C_ABI_FLAVOR env var; inferred from CompileTarget
+pointer-imported	PointerProvenance::ImportedC	C-imported pointer tracking	Returned from C FFI calls	decay uses LifetimeEnd not FreeHeap; C owns allocation
+c-ffi-config	KAIN.toml [c_ffi]	Explicit C FFI library configuration	include_paths, link_libs, libraries[]	For multi-library bridges (FFmpeg, etc.); tier override
+vcpkg-auto-fetch	include <header.h> version as alias	On-demand vcpkg library fetching	include <sqlite3.h> 3.45.0 as sql	Controlled by KAIN_C_FFI_AUTO_FETCH; vcpkg binary discovery chain
+cache-location	.kain/cache/c_ffi/{sha256}/	C FFI extraction cache directory	.kain/cache/c_ffi/a1b2c3d4/windows.kn	SHA256 of import_name + header_path + config; 8 files checked for hit

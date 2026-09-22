@@ -1,0 +1,157 @@
+// ============================================================================
+// cadence_pair.kn — SETIYETI Kain example 02
+//
+// The ON/OFF cadence gate as compiler-owned semantics:
+//
+//   * ON pointing  = authority world,  OFF pointing = authority world
+//   * each authority entangles into its own record mirror (the hits.csv row,
+//     still append-only downstream — Kain feeds the record, never rewrites it)
+//   * resonate tripwires fire on every hot_mask mutation (earth/sky tripwire)
+//   * pulse clock paces integration epochs (observation cadence as semantics)
+//   * law predicates ARE the WATCH gate (dispositions as theorems)
+//
+// Deterministic receipt: ON sees lane 2 alone (sky-leaning) + lane 5 in
+// common with OFF (terrestrial-leaning thicket-style common mode). Expected:
+// lane 2 -> WATCH, lane 5 -> TERRESTRIAL, rest CLEAN, and every semantic
+// layer proves it fired via telemetry deltas (resonate/entangle/patch/pulse).
+//
+// Exit codes: 0 proven pass, 1 verdict mismatch, 2 telemetry guard failure
+// (the guard prints WHICH layer never engaged, fusion-chain style).
+// ============================================================================
+
+use std::runtime
+use std::intent
+use std::os
+
+component CadencePanel():
+    render <panel title="cadence-pair" />
+
+// ── Authority worlds: the two pointings ──────────────────────────────────
+world OnScan:
+    state hot_mask: Int = 0
+    state epoch: Int = 0
+    state trips: Int = 0
+    state ticks: Int = 0
+    surface web => CadencePanel
+
+world OffScan:
+    state hot_mask: Int = 0
+    state epoch: Int = 0
+    state trips: Int = 0
+    surface web => CadencePanel
+
+// ── Record mirrors: compiler-propagated copies (the citable row) ──────────
+world OnRecord:
+    state hot_mask_copy: Int = 0
+    state epoch_copy: Int = 0
+    surface web => CadencePanel
+
+world OffRecord:
+    state hot_mask_copy: Int = 0
+    state epoch_copy: Int = 0
+    surface web => CadencePanel
+
+entangle OnScan.hot_mask <-> OnRecord.hot_mask_copy with single_writer
+entangle OnScan.epoch <-> OnRecord.epoch_copy with single_writer
+entangle OffScan.hot_mask <-> OffRecord.hot_mask_copy with single_writer
+entangle OffScan.epoch <-> OffRecord.epoch_copy with single_writer
+
+// ── Laws: the WATCH gate as theorems ──────────────────────────────────────
+law cadence_watch_lane(on_hot: Int, off_hot: Int) -> Bool:
+    return on_hot == 1 and off_hot == 0
+
+law cadence_terrestrial_lane(on_hot: Int, off_hot: Int) -> Bool:
+    return on_hot == 1 and off_hot == 1
+
+// ── Patches: journaled integrations ───────────────────────────────────────
+patch on_integrate(scan: OnScan, mask: Int) -> Int:
+    scan.hot_mask = scan.hot_mask | mask
+    scan.epoch = scan.epoch + 1
+    return scan.epoch
+
+patch off_integrate(scan: OffScan, mask: Int) -> Int:
+    scan.hot_mask = scan.hot_mask | mask
+    scan.epoch = scan.epoch + 1
+    return scan.epoch
+
+// ── Resonate: tripwire on every hot_mask mutation ─────────────────────────
+resonate OnScan.hot_mask dampen 0 ms:
+    OnScan.trips = OnScan.trips + 1
+
+resonate OffScan.hot_mask dampen 0 ms:
+    OffScan.trips = OffScan.trips + 1
+
+// ── Pulse: the observation clock ──────────────────────────────────────────
+pulse clock_driver every 8 ms jitter 1 ms:
+    OnScan.ticks = OnScan.ticks + 1
+
+// ── Classification: worst class wins, per-lane spot checks ────────────────
+fn lane_class(on_mask: Int, off_mask: Int, bit: Int) -> Int:
+    let on_hot: Int = (on_mask >> bit) & 1
+    let off_hot: Int = (off_mask >> bit) & 1
+    if cadence_terrestrial_lane(on_hot, off_hot):
+        return 2
+    if cadence_watch_lane(on_hot, off_hot):
+        return 1
+    return 0
+
+fn main() -> Int:
+    let res_before: Int = resonate_fire_count()
+    let ent_before: Int = entangle_propagation_count()
+    let pat_before: Int = patch_journal_count()
+    let pulse_before: Int = runtime_machine_pulse_total_fire_count()
+
+    // ON sees lane 2 alone (sky candidate) + lane 5; OFF sees lane 5
+    // (common-mode — scores terrestrial, never auto-blocks, per repo rule).
+    let e1: Int = on_integrate(OnScan, 4)
+    let e2: Int = on_integrate(OnScan, 32)
+    let e3: Int = off_integrate(OffScan, 32)
+    // Room for the pulse clock to tick (8 ms lane, 200 ms window).
+    os_sleep_millis(200)
+
+    let on_mask: Int = OnScan.hot_mask
+    let off_mask: Int = OffScan.hot_mask
+    println("cadence: on_mask=" + str(on_mask) + " off_mask=" + str(off_mask) + " epochs=" + str(e2) + "," + str(e3))
+
+    // ── Verdict receipt: spot-check the three interesting lanes ──
+    if lane_class(on_mask, off_mask, 2) != 1:
+        println("receipt=FAIL lane2 expected WATCH(1)")
+        return 1
+    if lane_class(on_mask, off_mask, 5) != 2:
+        println("receipt=FAIL lane5 expected TERRESTRIAL(2)")
+        return 1
+    if lane_class(on_mask, off_mask, 0) != 0:
+        println("receipt=FAIL lane0 expected CLEAN(0)")
+        return 1
+    println("verdicts: lane2=WATCH lane5=TERRESTRIAL rest=CLEAN")
+
+    // ── Mirror receipt: the record copies propagated ──
+    if OnRecord.hot_mask_copy != on_mask:
+        println("receipt=FAIL on-mirror stale")
+        return 1
+    if OffRecord.hot_mask_copy != off_mask:
+        println("receipt=FAIL off-mirror stale")
+        return 1
+    println("mirrors: on=" + str(OnRecord.hot_mask_copy) + " off=" + str(OffRecord.hot_mask_copy))
+
+    // ── Telemetry delta guards: prove every layer engaged ──
+    let res_delta: Int = resonate_fire_count() - res_before
+    let ent_delta: Int = entangle_propagation_count() - ent_before
+    let pat_delta: Int = patch_journal_count() - pat_before
+    let pulse_delta: Int = runtime_machine_pulse_total_fire_count() - pulse_before
+    println("telemetry: resonate+" + str(res_delta) + " entangle+" + str(ent_delta) + " patch+" + str(pat_delta) + " pulse+" + str(pulse_delta) + " trips=" + str(OnScan.trips) + "," + str(OffScan.trips) + " ticks=" + str(OnScan.ticks))
+    if res_delta < 3:
+        println("receipt=FAIL resonate never fired")
+        return 2
+    if ent_delta < 1:
+        println("receipt=FAIL entangle never propagated")
+        return 2
+    if pat_delta < 3:
+        println("receipt=FAIL patch journal empty")
+        return 2
+    if pulse_delta < 1:
+        println("receipt=FAIL pulse clock never ticked")
+        return 2
+
+    println("cadence: receipt=PASS watch=lane2 terrestrial=lane5")
+    return 0

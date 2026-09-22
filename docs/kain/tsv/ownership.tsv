@@ -1,0 +1,6 @@
+keyword	syntax	scope	purpose	restrictions	region_support
+collapse	collapse ptr: body	Exclusive mutation block	Write raw memory via mem_store	No return/break/continue inside block; single writer	HeapAllocation, LocalAlloca, RcObject, WorldState, EntangledAuthority, ImportedPointer
+observe	observe ptr: body	Read-only inspection block	Read raw memory via mem_load	No mutation (mem_store disallowed); no return/break/continue	HeapAllocation, LocalAlloca, RcObject, WorldState, EntangledAuthority, EntangledMirror, ImportedPointer
+decay	decay ptr	Terminal statement	Free/destroy memory region	After decay: no further collapse/observe/decay allowed	HeapAllocation (FreeHeap), LocalAlloca (LifetimeEnd), RcObject (ReleaseStrong), ImportedPointer (LifetimeEnd)
+share	share ptr: body	Shared atomic parallel region	Parallel write via fanout + atomic_store	No collapse/observe/decay inside; no fanout nesting	HeapAllocation, ImportedPointer
+fanout	fanout name in range: body	Parallel write lane (inside share)	Write disjoint pointer regions atomically	Must be inside share; no return/break/continue	HeapAllocation, ImportedPointer

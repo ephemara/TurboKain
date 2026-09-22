@@ -1,0 +1,10 @@
+event	callback_sig	vtable_slot
+click	() -> Void or (Event) -> Void	23 (element_set_callback)
+change	() -> Void or (Event) -> Void	23 (element_set_callback)
+toggle	() -> Void	23 (element_set_callback)
+focus	() -> Void	23 (element_set_callback)
+blur	() -> Void	23 (element_set_callback)
+mouseenter	() -> Void	23 (element_set_callback)
+mouseleave	() -> Void	23 (element_set_callback)
+submit	() -> Void	23 (element_set_callback)
+cancel	() -> Void	23 (element_set_callback)

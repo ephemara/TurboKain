@@ -1,0 +1,8 @@
+keyword	syntax	stage_kinds	clauses	purpose	style
+orchestrate	orchestrate name(params) -> T: stage name: kind fn(args)	cpu, gpu, dispatch, converge, law, patch, world, c, python, rust, node, kain	when capability(...)	Selector-only linear pipeline	Style 1: Selector-only
+orchestrate	orchestrate name(params) -> T: stage name: kind fn(args)	cpu, gpu, law, patch, world	when, if legal == false guard	Law-guarded GPU pipeline with inline failure handling	Style 2: Minimal guard
+orchestrate	orchestrate name(params) -> T: stage name: kind fn(args)	cpu, c, python, converge, gpu, law, patch, dispatch, world, kain	when, after, deps, residency, transfer, guarded by, fallback, requires, policy	Full graph metadata (residency + transfer + guards + fallback)	Style 3: God mode
+orchestrate	orchestrate name(params) -> T: stage name: kind fn(args)	cpu, converge, law, patch, dispatch	when, after, deps, requires	Effects engine pipeline (audio DSP)	Style 4: Effects
+orchestrate	orchestrate name(params) -> T: stage name: kind fn(args)	cpu, converge	when, deps, residency, policy	Resonate join point (pipeline triggered by state change)	Style 5: Resonate join
+orchestrate	orchestrate name(params) -> T: stage name: kind fn(args)	gpu, cpu, law, world, patch, dispatch	when, after, deps, residency, transfer, guarded by, fallback abort, requires, policy	Reconcile pipeline (GPU→CPU→validation→commit)	Style 3 extended
+orchestrate	orchestrate name(params) -> T: stage name: kind fn(args)	cpu, gpu, law, world, patch, kain	when, after, deps, residency, transfer, guarded by, requires, policy	Shard pipeline (CPU→GPU→law→world→patch→kain)	Style 3 extended

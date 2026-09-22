@@ -1,0 +1,25 @@
+slot	function	syntax	purpose	example
+0	session_create	session_create(name, width, height) -> session_id	Create rendering session	"session_create(""App"", 1280, 720)"
+1	session_destroy	session_destroy(session_id)	Destroy rendering session	session_destroy(sid)
+2	element_begin	element_begin(sid, parent_id, kind, stable_key) -> element_id	Start a UI element (box, text, panel, etc.)	"element_begin(sid, parent, ""box"", ""key"")"
+3	element_end	element_end(sid, element_id)	End a UI element	element_end(sid, elem_id)
+4	element_set_text	element_set_text(sid, elem_id, text)	Set element text content	"element_set_text(sid, elem, ""Hello"")"
+5	element_set_attr_i64	element_set_attr_i64(sid, elem_id, key, value)	Set integer attribute (direction, disabled, checked, selected, tab_index, weight)	"element_set_attr_i64(sid, elem, ""disabled"", 1)"
+6	element_set_attr_f64	element_set_attr_f64(sid, elem_id, key, value)	Set float attribute (padding, spacing, corner_radius, radius, font_size, opacity, border_width, width, height, min, max, step)	"element_set_attr_f64(sid, elem, ""opacity"", 0.5)"
+7	element_set_attr_string	element_set_attr_string(sid, elem_id, key, value)	Set string attribute (fill_color, border_color, ink_color, title, variant, role, align, font_family, placeholder, tooltip, distribution, axis)	"element_set_attr_string(sid, elem, ""fill_color"", ""#FF0000"")"
+8	state_get_i64	state_get_i64(sid, key) -> int64_t	Read i64 state value (Int, Bool, ptr<T> persistence)	"state_get_i64(sid, ""count"")"
+9	state_set_i64	state_set_i64(sid, key, value)	Write i64 state value	"state_set_i64(sid, ""count"", 42)"
+10	begin_frame	begin_frame(sid, delta_ms)	Start rendering frame	begin_frame(sid, 16.0)
+11	end_frame	end_frame(sid)	Finish rendering frame	end_frame(sid)
+12	present	present(sid)	Display frame (flip swapchain or blit GDI surface)	present(sid)
+13	poll_event	poll_event(sid, out_event, max_size) -> event_count	Poll input events from platform	poll_event(sid, event_buf, 64)
+14	should_close	should_close(sid) -> 0|1	Check whether window should close	should_close(sid)
+15	window_open	window_open(sid, title, width, height) -> status	Create OS window	"window_open(sid, ""Kain"", 1280, 720)"
+16	host_pump	host_pump(sid) -> status	Process OS message pump (PeekMessageA)	host_pump(sid)
+17	session_attach_platform	session_attach_platform(sid, platform_handle)	Attach native window handle to session	session_attach_platform(sid, hwnd)
+18	get_gpu_extension	get_gpu_extension(sid) -> KainGpuSurfaceExtension*|NULL	Get GPU backend extension (load_shader, set_uniform)	get_gpu_extension(sid)
+19	state_get_f64	state_get_f64(sid, key) -> double	Read f64 state value (Float persistence; NaN sentinel for not-found)	"state_get_f64(sid, ""opacity"")"
+20	state_set_f64	state_set_f64(sid, key, value)	Write f64 state value	"state_set_f64(sid, ""opacity"", 0.8)"
+21	state_get_string	state_get_string(sid, key) -> const char*	"Read String state value ("""" sentinel for not-found)"	"state_get_string(sid, ""label"")"
+22	state_set_string	state_set_string(sid, key, value)	Write String state value	"state_set_string(sid, ""label"", ""hello"")"
+23	element_set_callback	element_set_callback(sid, elem_id, event_name, callback_fn)	Bind event callback to element (on_click, on_change, etc.)	"element_set_callback(sid, elem, ""click"", fn_ptr)"

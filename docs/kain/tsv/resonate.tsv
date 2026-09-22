@@ -1,0 +1,13 @@
+keyword	syntax	target	dampen	body_locals	purpose	effect_permissions
+resonate	World.field dampen Nms:	World state field	ms (dampen window)	resonate_new_i64, resonate_old_i64, resonate_fired	Simple fire-on-change (no dampening)	All (IO, Async, GPU, Reactive, Unsafe, Alloc, Panic)
+resonate	World.field dampen Nms:	World state field	ms	resonate_new_i64, resonate_old_i64, resonate_fired	Dampened watch (debounced)	All
+resonate	World.field dampen Nms:	World state field	ms	resonate_new_i64, resonate_old_i64, resonate_fired	Multi-resonate across multiple fields of same world	All
+resonate	World.field dampen Nms:	World state field	ms	resonate_new_i64, resonate_old_i64, resonate_fired	Patch + resonate (journaled change + reactive handler)	All
+resonate	World.field dampen Nms:	World state field	ms	resonate_new_i64, resonate_old_i64, resonate_fired	Resonate + orchestrate (pipeline execution in handler)	All
+resonate	World.field dampen Nms:	World state field	ms	resonate_new_i64, resonate_old_i64, resonate_fired	Resonate + entangle (cascaded reactivity)	All
+resonate	World.field dampen Nms:	World state field	ms	resonate_new_i64, resonate_old_i64, resonate_fired	State-machine guard (invariant enforcement)	All
+resonate	World.field dampen Nms:	World state field	ms	resonate_new_i64, resonate_old_i64, resonate_fired	Audit trail trigger (write journal)	All
+resonate	World.field dampen Nms:	World state field	ms	resonate_new_i64, resonate_old_i64, resonate_fired	Cross-world notifier (no entangle needed)	All
+resonate	World.field dampen Nms:	World state field	ms	resonate_new_i64, resonate_old_i64, resonate_fired	Reactive actor spawning	All
+resonate	World.field dampen Nms:	World state field	ms	resonate_new_i64, resonate_old_i64, resonate_fired	Health check escalation	All
+resonate	World.field dampen Nms:	World state field	ms	resonate_new_i64, resonate_old_i64, resonate_fired	Adaptive quality scaling	All

@@ -1,0 +1,7 @@
+type	vtable_slot_read	vtable_slot_write	LLVM type	use_case
+Int	8 (state_get_i64)	9 (state_set_i64)	i64	Counters, booleans, flags, pointer handles
+Bool	8 (state_get_i64)	9 (state_set_i64)	i64	Booleans (stored as i64: 0 or 1)
+ptr<T>	8 (state_get_i64)	9 (state_set_i64)	i64	Pointer handles (stored as i64)
+Float	19 (state_get_f64)	20 (state_set_f64)	double	Slider values, opacity, animation progress
+String	21 (state_get_string)	22 (state_set_string)	i8*	Text input content, labels, formatted text
+Char	21 (state_get_string)	22 (state_set_string)	i8*	Character (stored as String)

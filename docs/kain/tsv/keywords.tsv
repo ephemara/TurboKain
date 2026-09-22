@@ -1,0 +1,110 @@
+keyword	kind	layer	syntax	brief	file_line	related	effects
+actor	Contextual	L7	actor Name: state field: Type = init / on Msg(reply_to: P, params)	Message-oriented stateful concurrency unit with typed handlers	KEYWORDS.MD:1799	state, spawn, send, on, ACTOR.MD	none
+after	Contextual	L4	stage name: runtime expr after stage_name	Linear dependency clause for orchestrate stages	KEYWORDS.MD:1386	orchestrate, stage, deps, ORCHESTRATE.MD	none
+and	Operator Alias	L0	a and b	Boolean AND operator (alias for &&), short-circuits	KEYWORDS.MD:2450	if, or	none
+as	Contextual	L0	value as Type / include ... as alias / import ... as alias	Type cast and import/include alias introducer	KEYWORDS.MD:596	include, import, type	none
+async	Contextual	L0	async fn name(params) -> Type with Async	Asynchronous function modifier returning a future	KEYWORDS.MD:453	Async, await, EFFECTS.MD	Async
+Async	Hard Lexer	L0	with Async	Async effect annotation for async execution context	KEYWORDS.MD:465	async, await, EFFECTS.MD	Async
+await	Contextual	L0	let result = await future	Await a future value, blocking until completion	KEYWORDS.MD:543	async, Async, EFFECTS.MD	Async
+axiom	Contextual	L6	"axiom Name: when pred / guarantee ""str"" / fallback fn"	Capability assumption declaration with fallback	KEYWORDS.MD:1700	when, target, capability, guarantee, fallback, AXIOM.MD	none
+break	Hard Lexer	L0	break / break value	Loop exit with optional value; exits innermost loop	KEYWORDS.MD:461	break, continue	none
+by	Contextual	L4	guarded by axiom_name	Axiom reference in a guarded by clause	KEYWORDS.MD:1424	orchestrate, guarded, axiom, ORCHESTRATE.MD	none
+capability	Contextual	L3	"when capability(""cpu.x86.avx2"")"	Hardware/runtime capability selector for gates	KEYWORDS.MD:1612	converge, when, target, axiom, CONVERGE.MD	none
+collapse	Contextual	L7	collapse ptr: body	Exclusive ownership mutation scope on ptr<T>	KEYWORDS.MD:1875	observe, decay, share, OWNERSHIP.MD	Unsafe
+component	Contextual	UI	component Name(props): state x: T / render <jsx />	React-like UI widget with props, state, methods, JSX	KEYWORDS.MD:2331	state, render, surface, COMPONENT.MD	none
+comptime	Contextual	L0	comptime: body	Compile-time code execution block (shader metadata, etc.)	KEYWORDS.MD:2260	shader, compute, macro	none
+compute	Contextual	L0	shader compute Name(id: UVec3) -> Void workgroup(W,H,D)	Compute shader variant: GPU kernel declaration	KEYWORDS.MD:2200	shader, vertex, fragment, workgroup, SHADER_GPU.MD	GPU
+const	Hard Lexer	L0	const NAME: Type = value	Compile-time constant declaration, inlined at use sites	KEYWORDS.MD:344	let, comptime	none
+continue	Hard Lexer	L0	continue	Skip to next loop iteration; defers still run before jump	KEYWORDS.MD:480	break, loop, while, for, defer	none
+converge	Contextual	L3	converge name(params) -> Type: spec reference: / fast name when guard: / verify random(N)	Spec-plus-fast-lanes dispatch with verification	KEYWORDS.MD:1508	spec, fast, verify, random, when, target, capability, CONVERGE.MD	none
+dampen	Contextual	L5	resonate field dampen Nms	Absorption window for resonate handlers	KEYWORDS.MD:1686	resonate, pulse, RESONATE.MD	none
+decay	Contextual	L7	decay ptr	Deterministic ownership teardown; ptr is dead after this	KEYWORDS.MD:1906	collapse, observe, defer, OWNERSHIP.MD	Unsafe
+defer	Contextual	L0	defer expr	Block-scoped LIFO cleanup; defers run on block exit	KEYWORDS.MD:525	collapse, decay, return, break, continue	none
+deps	Contextual	L4	stage name: ... deps [stage_a, stage_b]	Explicit dependency list for orchestrate stages	KEYWORDS.MD:1397	orchestrate, stage, after, ORCHESTRATE.MD	none
+dispatch	Contextual	L0	"dispatch ""shader::Kernel::compute"" [x, y, z]"	Host-side GPU kernel launch with workgroup counts	KEYWORDS.MD:2248	shader, compute, GPU, Unsafe, SHADER_GPU.MD	GPU, Unsafe
+else	Hard Lexer	L0	if cond: / else:	Fallback branch for if and elif chains	KEYWORDS.MD:379	if, elif	none
+elif	Hard Lexer	L0	if cond: / elif cond: / else:	Else-if conditional: chains additional condition after if	KEYWORDS.MD:389	if, else	none
+emit	Hard Lexer	N/A	(reserved)	Reserved keyword with TokenKind but no parser rule yet	KEYWORDS.MD:2480	receive	none
+entangle	Contextual	L1	entangle World1.field <-> World2.field with single_writer	Compiler-owned state coupling between world fields	KEYWORDS.MD:1240	world, single_writer, ENTANGLE.MD	none
+enum	Hard Lexer	L0	enum Name: Variant1 Variant2(param: Type)	Sum type (tagged union) with named variants	KEYWORDS.MD:668	struct, match, type	none
+every	Contextual	L5	pulse name every Nms jitter Nms	Schedule interval introducer for pulse declarations	KEYWORDS.MD:1663	pulse, jitter, PULSE.MD	none
+fallback	Contextual	L4	stage ... fallback abort / fallback degrade fn	Failure behavior for orchestrate stages	KEYWORDS.MD:1450	orchestrate, stage, guarded, ORCHESTRATE.MD	none
+false	Hard Lexer	L0	false	Boolean false literal	KEYWORDS.MD:418	true, none	none
+fanout	Contextual	L7	share ptr: fanout var in range: body	Parallel write lane within a share block (disjoint regions)	KEYWORDS.MD:1982	share, collapse, OWNERSHIP.MD	Unsafe
+fast	Contextual	L3	fast name when guard: body	Fast lane in a converge block with target/capability guard	KEYWORDS.MD:1530	converge, spec, when, CONVERGE.MD	none
+fn	Hard Lexer	L0	fn name(params) -> Type with Effect: body	Function declaration; universal callable unit	KEYWORDS.MD:302	fn, patch, converge	none
+for	Hard Lexer	L0	for var in iterable: body	Iteration over a sequence; also used in JSX for lists	KEYWORDS.MD:430	in, while, loop, component	none
+fragment	Contextual	L0	shader fragment Name(uv: Vec2) -> Vec4	Fragment (pixel) shader variant of shader	KEYWORDS.MD:2184	shader, vertex, compute, SHADER_GPU.MD	GPU
+from	Contextual	L6	teleport ... from WorldA / from module import name	Source introducer for teleport and import	KEYWORDS.MD:1784	teleport, to, import, TELEPORT.MD, PYTHON.MD	none
+GPU	Hard Lexer	L0	with GPU	GPU compute effect annotation	KEYWORDS.MD:473	dispatch, shader, compute, Unsafe, EFFECTS.MD	GPU
+guarantee	Contextual	L6	"guarantee ""human-readable assertion"""	Guarantee string in an axiom declaration	KEYWORDS.MD:1718	axiom, AXIOM.MD	none
+guarded	Contextual	L4	stage ... guarded by axiom_name	Capability gate introducer for orchestrate stages	KEYWORDS.MD:1413	orchestrate, stage, by, axiom, ORCHESTRATE.MD	none
+if	Hard Lexer	L0	if cond: body elif cond: body else: body	Conditional branching expression; returns a value	KEYWORDS.MD:355	elif, else, match	none
+impl	Hard Lexer	L0	impl Type: / impl Trait for Type:	Implementation block adding methods to a struct or trait impl	KEYWORDS.MD:710	trait, struct, Self	none
+import	Contextual	L0	import module as alias / from module import name	Python host-object import; named args become Python kwargs	KEYWORDS.MD:2315	from, as, include, PYTHON.MD	none
+in	Hard Lexer	L0	for var in iterable	Iteration introducer for for loops; also in JSX	KEYWORDS.MD:555	for, component	none
+include	Contextual	L0	"include <header.h> as alias / include ""path/header.h"" as alias"	C header import via libclang; local and system forms	KEYWORDS.MD:2300	import, as, C.MD	none
+IO	Hard Lexer	L0	with IO	Input/Output effect annotation	KEYWORDS.MD:442	Pure, Unsafe, EFFECTS.MD	IO
+jitter	Contextual	L5	pulse ... jitter Nms	Random offset window around pulse interval	KEYWORDS.MD:1675	pulse, every, PULSE.MD	none
+law	Contextual	L2	law name(params) -> Bool: body	Invariant predicate returning Bool; compiler-witnessable	KEYWORDS.MD:1496	patch, orchestrate, guarded, LAW.MD	none
+let	Hard Lexer	L0	let name: Type = value	Immutable variable binding; read-only for its scope	KEYWORDS.MD:314	mut, var, const	none
+loop	Hard Lexer	L0	loop: body / break value	Infinite loop with optional break value	KEYWORDS.MD:450	while, break, continue, defer	none
+macro	Contextual	L0	macro name!(param: kind): body	Syntactic macro definition; ! after name is mandatory	KEYWORDS.MD:2280	comptime	none
+match	Hard Lexer	L0	match value: Pattern => expr / _ => expr	Pattern matching expression; exhaustive on enum variants	KEYWORDS.MD:405	if, enum	none
+mod	Hard Lexer	L0	mod name: / mod name { body }	Module declaration; defines a named namespace	KEYWORDS.MD:734	pub, use, self	none
+mut	Hard Lexer	L0	let mut name: Type = value	Mutable variable qualifier; allows in-place mutation	KEYWORDS.MD:326	let, var, const	none
+native_ui	Contextual	L1	surface native_ui => Component	Native desktop UI surface target (Vulkan/winit backend)	KEYWORDS.MD:1295	surface, world, web, COMPONENT.MD	none
+none	Hard Lexer	L0	none	Null/nil literal for Option<T> and optional types	KEYWORDS.MD:430	true, false, Option	none
+observe	Contextual	L7	observe ptr: body	Read-only ownership observation scope on ptr<T>	KEYWORDS.MD:1890	collapse, decay, share, OWNERSHIP.MD	none
+on	Hard Lexer	L7	on MessageName(reply_to: P, params): body	Actor message handler declaration	KEYWORDS.MD:1860	actor, spawn, send, ACTOR.MD	none
+or	Operator Alias	L0	a or b	Boolean OR operator (alias for ||), short-circuits	KEYWORDS.MD:2459	and	none
+orchestrate	Contextual	L4	orchestrate name(params) -> Type: stage ... / return expr	Typed multi-runtime pipeline with stage graph	KEYWORDS.MD:1350	stage, after, deps, residency, transfer, policy, ORCHESTRATE.MD	none
+patch	Contextual	L2	patch name(target: World, params) -> Type: / target.field = value	Journaled tracked mutation on world state	KEYWORDS.MD:1485	world, law, orchestrate, PATCH.MD	none
+policy	Contextual	L4	stage ... policy telemetry_prefer_cpu	Scheduling policy hint for orchestrate stages	KEYWORDS.MD:1438	orchestrate, stage, ORCHESTRATE.MD	none
+pub	Hard Lexer	L0	pub fn / pub mod / pub struct	Visibility modifier; makes item publicly accessible	KEYWORDS.MD:722	mod, use	none
+pulse	Contextual	L5	pulse name every Nms jitter Nms: body	Temporal beat with jitter tolerance and missed-beat tracking	KEYWORDS.MD:1650	every, jitter, resonate, PULSE.MD	none
+Pure	Hard Lexer	L0	with Pure	Pure effect annotation: no side effects, no IO, no memory	KEYWORDS.MD:436	IO, Unsafe, EFFECTS.MD	Pure
+random	Contextual	L3	verify random(N)	Random-input generator for converge verify clauses	KEYWORDS.MD:1555	converge, verify, CONVERGE.MD	none
+Reactive	Hard Lexer	L0	with Reactive	Reactive effect annotation for state change / UI events	KEYWORDS.MD:489	resonate, component, EFFECTS.MD	Reactive
+receive	Hard Lexer	N/A	(reserved)	Reserved keyword with TokenKind but no parser rule yet	KEYWORDS.MD:2500	emit	none
+render	Contextual	UI	render <jsx-tree>	Component JSX render body introducer	KEYWORDS.MD:2352	component, COMPONENT.MD	none
+requires	Contextual	L4	stage ... requires law_stage_name	Law-invariant requirement for orchestrate stages	KEYWORDS.MD:1429	orchestrate, stage, law, ORCHESTRATE.MD	none
+residency	Contextual	L4	stage ... residency host / shared / device	Data residency declaration for orchestrate stages	KEYWORDS.MD:1404	orchestrate, stage, transfer, ORCHESTRATE.MD	none
+resonate	Contextual	L5	resonate World.field dampen Nms: handler body	Reactive state-change tripwire on world field mutations	KEYWORDS.MD:1680	dampen, pulse, patch, RESONATE.MD	none
+return	Hard Lexer	L0	return value / return	Early exit from a function with optional value	KEYWORDS.MD:497	defer, fn	none
+self	Hard Lexer	L0	self / _self: Self_	Current module reference and receiver parameter convention	KEYWORDS.MD:750	Self, use, impl	none
+Self	Hard Lexer	L0	_self: Self_	Receiver type alias inside impl blocks (Self_ with _)	KEYWORDS.MD:758	self, impl, trait	none
+send	Hard Lexer	L7	send target.Message(field = value)	Message delivery to an actor with named fields	KEYWORDS.MD:1848	actor, spawn, on, ACTOR.MD	none
+shader	Contextual	L0	shader vertex / fragment / compute Name(params) -> Type:	GPU shader/kernel declaration; compiles to SPIR-V/PTX/HLSL	KEYWORDS.MD:2140	vertex, fragment, compute, uniform, workgroup, SHADER_GPU.MD	GPU
+share	Contextual	L7	share ptr: fanout var in range: body	Shared pointer region for parallel write lanes	KEYWORDS.MD:1945	fanout, collapse, observe, OWNERSHIP.MD	Unsafe
+shatter	Contextual	L6	shatter struct Name: field: Type	Structure-of-Arrays layout intent declaration	KEYWORDS.MD:1730	struct, teleport, SHATTER.MD	none
+single_writer	Contextual	L1	entangle ... with single_writer	Entanglement policy: only authority writes, mirror reads	KEYWORDS.MD:1252	entangle, world, ENTANGLE.MD	none
+spec	Contextual	L3	spec reference: body	Reference truth lane in a converge block	KEYWORDS.MD:1522	converge, fast, verify, CONVERGE.MD	none
+spawn	Hard Lexer	L7	let handle = spawn Actor(field = value)	Actor instantiation with named init arguments	KEYWORDS.MD:1836	actor, send, on, ACTOR.MD	none
+stage	Contextual	L4	stage name: runtime expr clauses	Individual pipeline stage within orchestrate blocks	KEYWORDS.MD:1368	orchestrate, after, deps, residency, ORCHESTRATE.MD	none
+state	Contextual	L7	state field: Type = initial	Persistent state field in actors and components	KEYWORDS.MD:1820	actor, component, world, ACTOR.MD, COMPONENT.MD	none
+struct	Hard Lexer	L0	struct Name: field: Type	Product type declaration with typed fields	KEYWORDS.MD:650	enum, impl, trait, shatter	none
+surface	Contextual	L1	surface native_ui => Component / surface web => Component	World-to-UI binding: projects world to a render backend	KEYWORDS.MD:1275	world, component, native_ui, web, COMPONENT.MD	none
+teleport	Contextual	L6	teleport value from WorldA to WorldB via channel	Zero-copy cross-world value transfer (source marked moved)	KEYWORDS.MD:1748	from, to, via, world, TELEPORT.MD	none
+test	Contextual	L0	test fn name(): body	Test case declaration; compiled during kain test	KEYWORDS.MD:2430	fn	none
+to	Contextual	L6	teleport ... to WorldB	Target world introducer for teleport	KEYWORDS.MD:1772	teleport, from, via, TELEPORT.MD	none
+trait	Hard Lexer	L0	trait Name: fn name(_self: Self_) -> Type: default	Trait/interface declaration with optional default methods	KEYWORDS.MD:696	impl, struct, where	none
+transfer	Contextual	L4	stage ... transfer none / host_to_device / device_to_host / shared_view	Data transfer policy for orchestrate stages	KEYWORDS.MD:1408	orchestrate, stage, residency, ORCHESTRATE.MD	none
+true	Hard Lexer	L0	true	Boolean true literal	KEYWORDS.MD:412	false, none	none
+type	Hard Lexer	L0	type Alias = ExistingType	Type alias declaration; creates a synonym for a type	KEYWORDS.MD:640	struct, enum	none
+uniform	Contextual	L0	uniform Name: Type @binding_slot	Shader resource binding declaration at specific slot	KEYWORDS.MD:2210	shader, compute, vertex, fragment, SHADER_GPU.MD	GPU
+Unsafe	Hard Lexer	L0	with Unsafe	Unsafe effect: raw pointers, asm, ABI, atomics	KEYWORDS.MD:497	collapse, observe, decay, asm, GPU, EFFECTS.MD	Unsafe
+use	Hard Lexer	L0	use std::module / use crate::path	Import path declaration; brings symbols into scope	KEYWORDS.MD:744	mod, include, import, C.MD	none
+var	Hard Lexer	L0	var name: Type = value	Rebindable variable declaration (older style)	KEYWORDS.MD:335	let, mut, const	none
+verify	Contextual	L3	verify random(N)	Verification clause testing fast lanes against spec	KEYWORDS.MD:1542	converge, spec, fast, random, CONVERGE.MD	none
+vertex	Contextual	L0	shader vertex Name(position: Vec3, uv: Vec2) -> Vec4	Vertex shader variant of shader	KEYWORDS.MD:2170	shader, fragment, compute, SHADER_GPU.MD	GPU
+via	Contextual	L6	teleport ... via channel_name	Channel specification for teleport	KEYWORDS.MD:1760	teleport, from, to, TELEPORT.MD	none
+viewport3d	Contextual	L1	surface viewport3d => Component	3D viewport surface target for world projection	KEYWORDS.MD:1307	surface, world, native_ui	none
+web	Contextual	L1	surface web => Component	Web surface target for world projection (HTML backend)	KEYWORDS.MD:1315	surface, world, native_ui	none
+weak	Contextual	L7	weak ptr_alias = ptr	Non-owning pointer annotation; must not be decayed	KEYWORDS.MD:2370	collapse, observe, decay, ptr, OWNERSHIP.MD	Unsafe
+when	Contextual	L3/L6	"when target(""llvm"") / when capability(""cpu.x86.avx2"")"	Guard introducer for converge fast lanes and axiom predicates	KEYWORDS.MD:1564	converge, fast, axiom, target, capability, CONVERGE.MD, AXIOM.MD	none
+where	Contextual	L0	fn name<T>(t: T) -> R with Pure where T: Trait	Generic constraint clause for trait bounds	KEYWORDS.MD:2320	trait, fn, type	none
+while	Hard Lexer	L0	while cond: body	Conditional loop; executes body while Bool condition is true	KEYWORDS.MD:444	for, loop, break, continue	none
+with	Hard Lexer	L0	fn name() -> Type with Effect	Effect annotation introducer on fn declarations	KEYWORDS.MD:565	Pure, IO, Unsafe, Async, GPU, Reactive, EFFECTS.MD	none
+workgroup	Contextual	L0	shader compute ... -> Void workgroup(W, H, D)	Compute shader workgroup size declaration (threads per group)	KEYWORDS.MD:2228	shader, compute, SHADER_GPU.MD	GPU
+world	Contextual	L1	world Name: state field: Type = init / surface ... => Component	Named compiler-owned state container with surfaces	KEYWORDS.MD:1220	entangle, surface, state, patch, WORLD.MD	none

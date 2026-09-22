@@ -1,0 +1,17 @@
+keyword	syntax	layout_intent	purpose	related
+shatter struct	shatter struct <Name>:\n    <field>: <Type>\n    <field>: <Type>\n    ...	SoA (Structure-of-Arrays) — each field is its own contiguous lane	SIMD-friendly, cache-line-optimized hot loops	teleport, axiom, pulse
+shatter struct	shatter struct Particle:\n    x: Float\n    y: Float\n    vx: Float\n    vy: Float\n    alive: Bool	SoA: [x0,x1,...] [y0,y1,...] [vx0,vx1,...] [vy0,vy1,...] [alive0,alive1,...]	Canonical particle system for SIMD loops	teleport, pulse, collapse/observe
+shatter struct	shatter struct Shard:\n    bias: Int\n    phase: Int\n    salt: Int\n    alive: Bool	SoA per-field lanes	Minimal shatter struct example	pulse-actor-shatter fusion
+shatter struct	shatter struct Vertex:\n    position_x: Float\n    position_y: Float\n    position_z: Float\n    normal_x: Float\n    normal_y: Float\n    normal_z: Float\n    u: Float\n    v: Float	SoA per-field lanes	Mesh vertex data for graphics pipeline	teleport
+shatter struct	shatter struct SemanticShard:\n    x: Int\n    y: Int\n    drift: Int\n    alive: Bool	SoA per-field lanes	Semantic benchmark shard for singularity testing	ownership, raw memory
+shatter struct	shatter struct PulseShard:\n    bias: Int\n    phase: Int\n    salt: Int\n    hot: Bool	SoA per-field lanes	Pulse-actor-shatter fusion chain element	teleport, pulse, actor
+shatter struct	shatter struct AgentParticle:\n    x: Float\n    y: Float\n    vx: Float\n    vy: Float\n    alive: Bool	SoA per-field lanes	Teleport-friendly particle for world handoff	teleport, world
+shatter struct	shatter struct GPUParticle:\n    pos_x: Float\n    pos_y: Float\n    vel_x: Float\n    vel_y: Float\n    mass: Float\n    charge: Float	SoA per-field lanes	GPU compute kernel particle (coalesced access)	shader compute, StorageBuffer
+shatter struct	shatter struct DynamicGrid:\n    cells: Float	SoA per-field lanes	Resizeable lanes with dynamic push/append	(research concept)
+shatter struct	shatter struct HashEntry:\n    key: Int\n    value: Int\n    occupied: Bool	SoA: key lane, value lane, occupied lane	Hash table / lookup structure with linear probe	law, converge
+shatter struct	shatter struct Transform:\n    position: Float[3]\n    rotation: Float[4]\n    scale: Float[3]	SoA per-field lanes	Nested shatter (hierarchical SoA layout)	(research concept)
+shatter struct	shatter struct SceneNode:\n    transform: Transform\n    parent: Int\n    child_count: Int	SoA per-field lanes	Recursive/hierarchical SoA with sub-lanes	(research concept)
+shatter struct	shatter struct Config:\n    gamma: Float\n    brightness: Float\n    contrast: Float	SoA per-field lanes	Reactive per-field updates via resonate	resonate, world
+shatter struct	shatter struct ShatterParticle:\n    x: Int\n    y: Int\n    vx: Int\n    vy: Int\n    alive: Bool	SoA per-field lanes	8-particle SIMD-style 500K iteration benchmark	converge, pulse
+shatter struct	shatter struct SmokeShard:\n    bias: Int\n    phase: Int\n    salt: Int\n    alive: Bool	SoA per-field lanes	Smoketest shatter struct with cross-file scoring	teleport, test
+shatter struct	shatter struct CrucibleShard:\n    bias: Int\n    phase: Int\n    salt: Int\n    hot: Bool	SoA per-field lanes	Keyword crucible stress test (108 keywords)	typecheck, codegen

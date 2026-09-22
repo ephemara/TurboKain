@@ -1,0 +1,9 @@
+effect	allowed_on	restrictions	purpose	enforced_on
+Pure	fn, component, trait method	Cannot call any non-pure function; no IO, Async, GPU, Unsafe	Deterministic computation — no side effects	can_call() rule: Pure=bottom, anyone can call Pure, Pure cannot call non-pure
+IO	fn, component, trait method	None beyond effect lattice (subset check); cannot call GPU or Async without declaring them	File/network/console operations: println, filesystem read/write, HTTP, stdio	can_call() rule: caller must superset callee's effects
+Async	fn (auto-added by async fn), component, trait method	None beyond subset	Can await futures; async call chains	async fn auto-adds Async; await requires Async in scope
+GPU	fn, component, trait method	None beyond subset; practically requires Unsafe for buffer ops	Graphics hardware: dispatch statement, GPU kernel calls, shader invocations	dispatch not gated by GPU (known gap — unenforced)
+Reactive	fn, component, trait method	None beyond subset	Triggers UI updates; component state changes that trigger re-renders	emit statements
+Unsafe	fn, component, trait method	Can call anything (top of lattice); required by @naked and @interrupt (and no other effect allowed)	Breaks safety guarantees: asm(), bitcast(), lfence/sfence/mfence, clflush, atomic ops, C FFI	asm(), bitcast(), fences, clflush, atomics (enforced); mem_load/store, ptr_offset, alloc NOT gated (known gaps)
+Alloc	internal-only (not parseable)	Auto-emitted for pulse and resonate bodies; no enforcement logic	Memory allocation (vestigial — dead effect code)	None (dead effect)
+Panic	internal-only (not parseable)	Auto-emitted for pulse and resonate bodies; no enforcement logic	Can abort (vestigial — dead effect code)	None (dead effect)
