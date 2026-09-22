@@ -1,0 +1,719 @@
+// ============================================================================
+//  JIT FULL TEST SUITE — Comprehensive test of MarkScript JIT x86-64 compiler
+//
+//  Tests:   basic compilation, arithmetic, stack ops, variables, jumps,
+//           skip opcodes, cache subsystem, edge cases
+//  Run:     kain check blades/markscript/src/test/jit_full_test.kn
+//  Return:  0 = all pass, non-zero = first failure
+// ============================================================================
+
+use jit       // jit_compile_block, call_jit, jit_execute, cache subsystem
+use parser    // OP_HALT, OP_PUSH_STACK, ... OP_JN (all 21 opcode constants)
+
+// ===========================================================================
+//  HELPERS
+// ===========================================================================
+
+// Check execution: compile bytecode, call JIT, verify result matches expected.
+// Returns 0 on pass, 1 on fail.
+fn check(name: String, bc: Array<Int>, expect: Int) -> Int with Unsafe:
+    let jr = jit_compile_block(bc, 0, len(bc))
+    if jr.error != "":
+        println("[FAIL] " + name + ": compile error='" + jr.error + "'")
+        return 1
+    let result = call_jit(jr.code_ptr)
+    if result != expect:
+        println("[FAIL] " + name + ": expected " + str(expect) + " got " + str(result))
+        return 1
+    println("[PASS] " + name)
+    return 0
+
+// Check compile-only: compile succeeds with code_size > 0 and no error.
+fn check_compile(name: String, bc: Array<Int>) -> Int with Unsafe:
+    let jr = jit_compile_block(bc, 0, len(bc))
+    if jr.code_size <= 0:
+        println("[FAIL] " + name + ": code_size=" + str(jr.code_size))
+        return 1
+    if jr.error != "":
+        println("[FAIL] " + name + ": error='" + jr.error + "'")
+        return 1
+    println("[PASS] " + name + " (size=" + str(jr.code_size) + " bytes)")
+    return 0
+
+// ===========================================================================
+//  A. BASIC COMPILATION
+// ===========================================================================
+
+fn test_a1_halt_only() -> Int with Unsafe:
+    let bc: Array<Int> = [OP_HALT]
+    let jr = jit_compile_block(bc, 0, len(bc))
+    if jr.code_size <= 0:
+        println("[FAIL] A1 halt-only: code_size=" + str(jr.code_size))
+        return 1
+    if jr.error != "":
+        println("[FAIL] A1 halt-only: error='" + jr.error + "'")
+        return 1
+    let result = call_jit(jr.code_ptr)
+    if result != 0:
+        println("[FAIL] A1 halt-only: expected 0 got " + str(result))
+        return 1
+    println("[PASS] A1 halt-only (size=" + str(jr.code_size) + " bytes)")
+    return 0
+
+fn test_a2_push_halt() -> Int with Unsafe:
+    let bc: Array<Int> = [OP_PUSH_STACK, 42, OP_HALT]
+    let jr = jit_compile_block(bc, 0, len(bc))
+    if jr.code_size <= 0:
+        println("[FAIL] A2 push-halt: code_size=" + str(jr.code_size))
+        return 1
+    if jr.error != "":
+        println("[FAIL] A2 push-halt: error='" + jr.error + "'")
+        return 1
+    let result = call_jit(jr.code_ptr)
+    if result != 42:
+        println("[FAIL] A2 push-halt: expected 42 got " + str(result))
+        return 1
+    println("[PASS] A2 push-halt (size=" + str(jr.code_size) + " bytes)")
+    return 0
+
+fn test_a3_empty_bytecode() -> Int with Unsafe:
+    // Empty bytecode (empty array, start=end=0) → should error "empty bytecode"
+    let bc: Array<Int> = []
+    let jr = jit_compile_block(bc, 0, len(bc))
+    if jr.error == "":
+        println("[FAIL] A3 empty-bytecode: expected error but compiled OK")
+        return 1
+    if jr.error != "empty bytecode":
+        println("[FAIL] A3 empty-bytecode: expected 'empty bytecode' got '" + jr.error + "'")
+        return 1
+    println("[PASS] A3 empty-bytecode (error='" + jr.error + "')")
+    return 0
+
+fn test_a4_no_halt() -> Int with Unsafe:
+    // Single push without HALT → epilogue auto-emitted, result=0 (xor rax)
+    let bc: Array<Int> = [OP_PUSH_STACK, 42]
+    let jr = jit_compile_block(bc, 0, len(bc))
+    if jr.code_size <= 0:
+        println("[FAIL] A4 no-halt: code_size=" + str(jr.code_size))
+        return 1
+    if jr.error != "":
+        println("[FAIL] A4 no-halt: error='" + jr.error + "'")
+        return 1
+    // Auto-epilogue emits xor rax,rax → result is 0 (not 42)
+    let result = call_jit(jr.code_ptr)
+    if result != 0:
+        println("[FAIL] A4 no-halt: expected 0 (auto-epilogue) got " + str(result))
+        return 1
+    println("[PASS] A4 no-halt (size=" + str(jr.code_size) + " bytes)")
+    return 0
+
+fn test_a5_unknown_opcode() -> Int with Unsafe:
+    // Unknown opcode 255 is silently skipped → push 42 still works
+    let bc: Array<Int> = [255, OP_PUSH_STACK, 42, OP_HALT]
+    let jr = jit_compile_block(bc, 0, len(bc))
+    if jr.code_size <= 0:
+        println("[FAIL] A5 unknown-opcode: code_size=" + str(jr.code_size))
+        return 1
+    if jr.error != "":
+        println("[FAIL] A5 unknown-opcode: error='" + jr.error + "'")
+        return 1
+    let result = call_jit(jr.code_ptr)
+    if result != 42:
+        println("[FAIL] A5 unknown-opcode: expected 42 got " + str(result))
+        return 1
+    println("[PASS] A5 unknown-opcode (size=" + str(jr.code_size) + " bytes)")
+    return 0
+
+// ===========================================================================
+//  B. ARITHMETIC CORRECTNESS
+// ===========================================================================
+
+fn test_b1_add() -> Int with Unsafe:
+    return check("B1 ADD 3+4=7",
+        [OP_PUSH_STACK, 3, OP_PUSH_STACK, 4, OP_ADD, OP_HALT], 7)
+
+fn test_b2_sub() -> Int with Unsafe:
+    return check("B2 SUB 100-30=70",
+        [OP_PUSH_STACK, 100, OP_PUSH_STACK, 30, OP_SUB, OP_HALT], 70)
+
+fn test_b3_mul() -> Int with Unsafe:
+    return check("B3 MUL 7*6=42",
+        [OP_PUSH_STACK, 7, OP_PUSH_STACK, 6, OP_MUL, OP_HALT], 42)
+
+fn test_b4_div() -> Int with Unsafe:
+    return check("B4 DIV 100/5=20",
+        [OP_PUSH_STACK, 100, OP_PUSH_STACK, 5, OP_DIV, OP_HALT], 20)
+
+fn test_b5_chained_add() -> Int with Unsafe:
+    // 1 + 2 + 3 = 6
+    return check("B5 chained ADD 1+2+3=6",
+        [OP_PUSH_STACK, 1, OP_PUSH_STACK, 2, OP_PUSH_STACK, 3,
+         OP_ADD, OP_ADD, OP_HALT], 6)
+
+fn test_b6_mul_then_add() -> Int with Unsafe:
+    // 10 + 3*2 = 10 + 6 = 16
+    return check("B6 MUL+ADD 10+3*2=16",
+        [OP_PUSH_STACK, 10, OP_PUSH_STACK, 3, OP_PUSH_STACK, 2,
+         OP_MUL, OP_ADD, OP_HALT], 16)
+
+fn test_b7_div_then_mul() -> Int with Unsafe:
+    // (100/5) * 3 = 20 * 3 = 60
+    return check("B7 DIV+MUL (100/5)*3=60",
+        [OP_PUSH_STACK, 100, OP_PUSH_STACK, 5, OP_DIV,
+         OP_PUSH_STACK, 3, OP_MUL, OP_HALT], 60)
+
+fn test_b8_mul_then_sub() -> Int with Unsafe:
+    // 50 - 3*2 = 50 - 6 = 44
+    return check("B8 MUL+SUB 50-3*2=44",
+        [OP_PUSH_STACK, 50, OP_PUSH_STACK, 3, OP_PUSH_STACK, 2,
+         OP_MUL, OP_SUB, OP_HALT], 44)
+
+// ===========================================================================
+//  C. STACK OPERATIONS
+// ===========================================================================
+
+fn test_c1_dup_pop() -> Int with Unsafe:
+    // Push 42, DUP, POP → 42
+    return check("C1 DUP+POP 42",
+        [OP_PUSH_STACK, 42, OP_DUP, OP_POP_STACK, OP_HALT], 42)
+
+fn test_c2_pop_discard() -> Int with Unsafe:
+    // Push 1, push 2, POP (discard 2), push 3, ADD → 1+3=4
+    return check("C2 POP-discard then ADD 1+3=4",
+        [OP_PUSH_STACK, 1, OP_PUSH_STACK, 2, OP_POP_STACK,
+         OP_PUSH_STACK, 3, OP_ADD, OP_HALT], 4)
+
+fn test_c3_dup_twice() -> Int with Unsafe:
+    // Push 99, DUP, DUP → stack = [99, 99, 99], POP → 99
+    return check("C3 DUP twice 99",
+        [OP_PUSH_STACK, 99, OP_DUP, OP_DUP, OP_HALT], 99)
+
+fn test_c4_pop_then_push() -> Int with Unsafe:
+    // Push 77, POP (discard 77), push 88 → 88
+    return check("C4 POP+PUSH 88",
+        [OP_PUSH_STACK, 77, OP_POP_STACK, OP_PUSH_STACK, 88, OP_HALT], 88)
+
+// ===========================================================================
+//  D. VARIABLE STORE/LOAD
+// ===========================================================================
+
+fn test_d1_store_load_var0() -> Int with Unsafe:
+    // var[0] = 123, load var[0] → 123
+    return check("D1 store+load var[0]=123",
+        [OP_PUSH_STACK, 123, OP_STORE_VAR, 0, OP_LOAD_VAR, 0, OP_HALT], 123)
+
+fn test_d2_two_vars() -> Int with Unsafe:
+    // var[0]=10, var[1]=20, load var[0]+30=40, load var[1]+40=60
+    return check("D2 two vars 10+20+30=60",
+        [OP_PUSH_STACK, 10, OP_STORE_VAR, 0,
+         OP_PUSH_STACK, 20, OP_STORE_VAR, 1,
+         OP_LOAD_VAR, 0, OP_PUSH_STACK, 30, OP_ADD,
+         OP_LOAD_VAR, 1, OP_ADD, OP_HALT], 60)
+
+fn test_d3_reassign_var() -> Int with Unsafe:
+    // var[0]=5, var[1]=3, load var[0]+var[1]=8
+    return check("D3 reassign vars 5+3=8",
+        [OP_PUSH_STACK, 5, OP_STORE_VAR, 0,
+         OP_PUSH_STACK, 3, OP_STORE_VAR, 1,
+         OP_LOAD_VAR, 0, OP_LOAD_VAR, 1, OP_ADD, OP_HALT], 8)
+
+fn test_d4_nonzero_index() -> Int with Unsafe:
+    // var[3] = 5, load var[3] → 5 (non-zero variable index)
+    return check("D4 non-zero index var[3]=5",
+        [OP_PUSH_STACK, 5, OP_STORE_VAR, 3, OP_LOAD_VAR, 3, OP_HALT], 5)
+
+// ===========================================================================
+//  E. JUMP OPERATIONS  (all targets are opcode-start positions)
+//
+//  Key: forward JMP/JZ/JN targets must be bytecode IPs that the compile
+//  loop visits (opcode starts, not data bytes) so the fixup resolver
+//  finds a valid native_offsets entry.
+// ===========================================================================
+
+fn test_e1_jmp_forward() -> Int with Unsafe:
+    // Push 42, JMP to HALT (ip=6), skip PUSH 99 → result=42
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, 42,
+        OP_JMP, 6,        // JMP forward to ip=6 (HALT)
+        OP_PUSH_STACK, 99, // ^ skipped
+        OP_HALT            // ip=6
+    ]
+    return check("E1 JMP forward skip", bc, 42)
+
+fn test_e2_jz_no_jump() -> Int with Unsafe:
+    // Push 5 (non-zero), JZ condition false → fall through, push 88 → 88
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, 5,
+        OP_JZ, 6,          // JZ to ip=6 (HALT) — does NOT jump (5 ≠ 0)
+        OP_PUSH_STACK, 88,  // executed
+        OP_HALT             // ip=6
+    ]
+    return check("E2 JZ non-zero no-jump", bc, 88)
+
+fn test_e3_jz_yes_jump() -> Int with Unsafe:
+    // Push 0 (zero), JZ condition true → jump to ip=6 (HALT) → result=0
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, 0,
+        OP_JZ, 6,          // JZ to ip=6 (HALT) — jumps (0 == 0)
+        OP_PUSH_STACK, 88,  // skipped
+        OP_HALT             // ip=6
+    ]
+    return check("E3 JZ zero jumps-to-halt", bc, 0)
+
+fn test_e4_jn_no_jump() -> Int with Unsafe:
+    // Push 5 (positive), JN condition false → fall through, push 77 → 77
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, 5,
+        OP_JN, 6,          // JN to ip=6 (HALT) — does NOT jump (5 ≥ 0)
+        OP_PUSH_STACK, 77,  // executed
+        OP_HALT
+    ]
+    return check("E4 JN positive no-jump", bc, 77)
+
+fn test_e5_jn_yes_jump() -> Int with Unsafe:
+    // Push -1 (negative), JN condition true → jump to ip=6 (HALT) → result=0
+    // (HALT with empty stack → xor rax = 0)
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, -1,
+        OP_JN, 6,          // JN to ip=6 (HALT) — jumps (-1 < 0)
+        OP_PUSH_STACK, 77,  // skipped
+        OP_HALT
+    ]
+    return check("E5 JN negative jumps-to-halt", bc, 0)
+
+// ===========================================================================
+//  F. SKIP OPCODES  (non-executable opcodes that advance IP silently)
+// ===========================================================================
+
+fn test_f1_domain_header_skip() -> Int with Unsafe:
+    // ENTER_DOMAIN(1) + ROUTINE_HEADER(2) skipped, push 33 → 33
+    return check("F1 ENTER_DOMAIN+ROUTINE_HEADER skip",
+        [OP_ENTER_DOMAIN, 7777, OP_ROUTINE_HEADER, 8888,
+         OP_PUSH_STACK, 33, OP_HALT], 33)
+
+fn test_f2_param_call_skip() -> Int with Unsafe:
+    // PUSH_PARAM(3) + EXECUTE_CALL(4) skipped, push 42 → 42
+    return check("F2 PUSH_PARAM+EXECUTE_CALL skip",
+        [OP_PUSH_PARAM, 12345, OP_EXECUTE_CALL,
+         OP_PUSH_STACK, 42, OP_HALT], 42)
+
+fn test_f3_fenced_code_skip() -> Int with Unsafe:
+    // FENCED_CODE(6) skipped, push 77 → 77
+    return check("F3 FENCED_CODE skip",
+        [OP_FENCED_CODE, 100, 200,
+         OP_PUSH_STACK, 77, OP_HALT], 77)
+
+fn test_f4_push_matrix_skip() -> Int with Unsafe:
+    // PUSH_MATRIX(5) complex encoding skipped, push 42 → 42
+    return check("F4 PUSH_MATRIX skip",
+        [OP_PUSH_MATRIX, 0, 2, 2, 4, 1, 0, 0, 0, 1, 0,
+         OP_PUSH_STACK, 42, OP_HALT], 42)
+
+fn test_f5_call_skip() -> Int with Unsafe:
+    // Push 77, OP_CALL(10) pops 77 (discards), push 99 → 99
+    return check("F5 OP_CALL skip (pops hash)",
+        [OP_PUSH_STACK, 77, OP_CALL,
+         OP_PUSH_STACK, 99, OP_HALT], 99)
+
+// ===========================================================================
+//  G. CACHE SUBSYSTEM
+// ===========================================================================
+
+fn test_g1_init_cache() -> Int:
+    let c = init_cache()
+    if c.count != 0:
+        println("[FAIL] G1 init-cache: count=" + str(c.count) + " expected 0")
+        return 1
+    if c.hits != 0:
+        println("[FAIL] G1 init-cache: hits=" + str(c.hits) + " expected 0")
+        return 1
+    if c.misses != 0:
+        println("[FAIL] G1 init-cache: misses=" + str(c.misses) + " expected 0")
+        return 1
+    if c.bytes != 0:
+        println("[FAIL] G1 init-cache: bytes=" + str(c.bytes) + " expected 0")
+        return 1
+    if c.compiles != 0:
+        println("[FAIL] G1 init-cache: compiles=" + str(c.compiles) + " expected 0")
+        return 1
+    println("[PASS] G1 init-cache (count=" + str(c.count) + ")")
+    return 0
+
+fn test_g2_cache_lookup_empty() -> Int:
+    let c = init_cache()
+    let lr = cache_lookup(c, 42)
+    if lr.found != false:
+        println("[FAIL] G2 cache-lookup empty: found=true expected false")
+        return 1
+    println("[PASS] G2 cache-lookup empty (found=false)")
+    return 0
+
+fn test_g3_cache_register_lookup() -> Int with Unsafe:
+    let mut c = init_cache()
+    // Register a code block
+    let bc: Array<Int> = [OP_PUSH_STACK, 42, OP_HALT]
+    let jr = jit_compile_block(bc, 0, len(bc))
+    if jr.error != "":
+        println("[FAIL] G3 cache-register: compile error='" + jr.error + "'")
+        return 1
+    let hash: Int = 12345
+    c = cache_register(c, hash, jr.code_ptr, jr.code_size)
+
+    if c.count != 1:
+        println("[FAIL] G3 cache-register: count=" + str(c.count) + " expected 1")
+        return 1
+    if c.bytes != jr.code_size:
+        println("[FAIL] G3 cache-register: bytes=" + str(c.bytes) + " expected " + str(jr.code_size))
+        return 1
+    if c.compiles != 1:
+        println("[FAIL] G3 cache-register: compiles=" + str(c.compiles) + " expected 1")
+        return 1
+
+    // Look it up
+    let lr = cache_lookup(c, hash)
+    if lr.found != true:
+        println("[FAIL] G3 cache-lookup: found=false expected true")
+        return 1
+
+    println("[PASS] G3 cache-register+lookup (hash=" + str(hash) + ")")
+    return 0
+
+fn test_g4_cache_multi_register() -> Int with Unsafe:
+    let mut c = init_cache()
+    // Register 3 distinct JIT blocks
+    let bc0: Array<Int> = [OP_HALT]
+    let bc1: Array<Int> = [OP_PUSH_STACK, 1, OP_HALT]
+    let bc2: Array<Int> = [OP_PUSH_STACK, 2, OP_HALT]
+
+    let jr0 = jit_compile_block(bc0, 0, len(bc0))
+    let jr1 = jit_compile_block(bc1, 0, len(bc1))
+    let jr2 = jit_compile_block(bc2, 0, len(bc2))
+
+    if jr0.error != "" or jr1.error != "" or jr2.error != "":
+        println("[FAIL] G4 multi-register: compile error")
+        return 1
+
+    c = cache_register(c, 100, jr0.code_ptr, jr0.code_size)
+    c = cache_register(c, 200, jr1.code_ptr, jr1.code_size)
+    c = cache_register(c, 300, jr2.code_ptr, jr2.code_size)
+
+    if c.count != 3:
+        println("[FAIL] G4 multi-register: count=" + str(c.count) + " expected 3")
+        return 1
+
+    // Verify all three lookups succeed
+    let lr0 = cache_lookup(c, 100)
+    if lr0.found != true:
+        println("[FAIL] G4 multi-register: lookup 100 failed")
+        return 1
+
+    let lr1 = cache_lookup(c, 200)
+    if lr1.found != true:
+        println("[FAIL] G4 multi-register: lookup 200 failed")
+        return 1
+
+    let lr2 = cache_lookup(c, 300)
+    if lr2.found != true:
+        println("[FAIL] G4 multi-register: lookup 300 failed")
+        return 1
+
+    // Missing hash should not be found
+    let lr_miss = cache_lookup(c, 999)
+    if lr_miss.found != false:
+        println("[FAIL] G4 multi-register: lookup 999 should be missing")
+        return 1
+
+    if c.bytes != jr0.code_size + jr1.code_size + jr2.code_size:
+        println("[FAIL] G4 multi-register: bytes=" + str(c.bytes) + " expected sum")
+        return 1
+    if c.compiles != 3:
+        println("[FAIL] G4 multi-register: compiles=" + str(c.compiles) + " expected 3")
+        return 1
+
+    println("[PASS] G4 multi-register+lookup (3 blocks)")
+    return 0
+
+fn test_g5_cache_hit_miss() -> Int with Unsafe:
+    let mut c = init_cache()
+    c = cache_record_hit(c)
+    c = cache_record_hit(c)
+    c = cache_record_miss(c)
+
+    if c.hits != 2:
+        println("[FAIL] G5 cache-hits: hits=" + str(c.hits) + " expected 2")
+        return 1
+    if c.misses != 1:
+        println("[FAIL] G5 cache-hits: misses=" + str(c.misses) + " expected 1")
+        return 1
+
+    println("[PASS] G5 cache-hit+miss (hits=" + str(c.hits) + " misses=" + str(c.misses) + ")")
+    return 0
+
+// ===========================================================================
+//  H. EDGE CASES
+// ===========================================================================
+
+fn test_h1_large_immediate() -> Int with Unsafe:
+    return check("H1 large immediate 999999",
+        [OP_PUSH_STACK, 999999, OP_HALT], 999999)
+
+fn test_h2_negative_immediate() -> Int with Unsafe:
+    return check("H2 negative immediate -1",
+        [OP_PUSH_STACK, -1, OP_HALT], -1)
+
+fn test_h3_zero_immediate() -> Int with Unsafe:
+    return check("H3 zero immediate 0",
+        [OP_PUSH_STACK, 0, OP_HALT], 0)
+
+fn test_h4_max_optimization_depth() -> Int with Unsafe:
+    // Deep expression: ((1+2)+(3+4))+((5+6)+(7+8)) = 36
+    return check("H4 deep expression = 36",
+        [OP_PUSH_STACK, 1, OP_PUSH_STACK, 2, OP_ADD,
+         OP_PUSH_STACK, 3, OP_PUSH_STACK, 4, OP_ADD, OP_ADD,
+         OP_PUSH_STACK, 5, OP_PUSH_STACK, 6, OP_ADD,
+         OP_PUSH_STACK, 7, OP_PUSH_STACK, 8, OP_ADD, OP_ADD,
+         OP_ADD, OP_HALT], 36)
+
+fn test_h5_many_pushes() -> Int with Unsafe:
+    // Push 20 values, then ADD them all to test stack depth
+    // 1+2+3+...+20 = 210
+    let bc: Array<Int> = []
+    push(bc, OP_PUSH_STACK)
+    push(bc, 1)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 2)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 3)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 4)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 5)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 6)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 7)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 8)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 9)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 10)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 11)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 12)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 13)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 14)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 15)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 16)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 17)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 18)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 19)
+    push(bc, OP_PUSH_STACK)
+    push(bc, 20)
+    // 19 ADDs to sum 20 values
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_ADD)
+    push(bc, OP_HALT)
+    return check("H5 many pushes 1..20=210", bc, 210)
+
+// ===========================================================================
+//  MAIN — runs all tests
+// ===========================================================================
+
+pub fn main() -> Int with Unsafe:
+    var passed: Int = 0
+
+    println("")
+    println("╔═══════════════════════════════════════════════╗")
+    println("║   MARKSCRIPT JIT FULL TEST SUITE             ║")
+    println("╚═══════════════════════════════════════════════╝")
+    println("")
+
+    // ── A. Basic Compilation ──
+    println("── A. Basic Compilation ──")
+    var r: Int = 0
+    r = test_a1_halt_only()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_a2_push_halt()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_a3_empty_bytecode()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_a4_no_halt()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_a5_unknown_opcode()
+    if r != 0: return r
+    passed = passed + 1
+    println("")
+
+    // ── B. Arithmetic ──
+    println("── B. Arithmetic ──")
+    r = test_b1_add()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_b2_sub()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_b3_mul()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_b4_div()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_b5_chained_add()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_b6_mul_then_add()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_b7_div_then_mul()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_b8_mul_then_sub()
+    if r != 0: return r
+    passed = passed + 1
+    println("")
+
+    // ── C. Stack Operations ──
+    println("── C. Stack Operations ──")
+    r = test_c1_dup_pop()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_c2_pop_discard()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_c3_dup_twice()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_c4_pop_then_push()
+    if r != 0: return r
+    passed = passed + 1
+    println("")
+
+    // ── D. Variable Store/Load ──
+    println("── D. Variable Store/Load ──")
+    r = test_d1_store_load_var0()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_d2_two_vars()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_d3_reassign_var()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_d4_nonzero_index()
+    if r != 0: return r
+    passed = passed + 1
+    println("")
+
+    // ── E. Jump Operations ──
+    println("── E. Jump Operations ──")
+    r = test_e1_jmp_forward()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_e2_jz_no_jump()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_e3_jz_yes_jump()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_e4_jn_no_jump()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_e5_jn_yes_jump()
+    if r != 0: return r
+    passed = passed + 1
+    println("")
+
+    // ── F. Skip Opcodes ──
+    println("── F. Skip Opcodes ──")
+    r = test_f1_domain_header_skip()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_f2_param_call_skip()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_f3_fenced_code_skip()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_f4_push_matrix_skip()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_f5_call_skip()
+    if r != 0: return r
+    passed = passed + 1
+    println("")
+
+    // ── G. Cache Subsystem ──
+    println("── G. Cache Subsystem ──")
+    r = test_g1_init_cache()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_g2_cache_lookup_empty()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_g3_cache_register_lookup()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_g4_cache_multi_register()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_g5_cache_hit_miss()
+    if r != 0: return r
+    passed = passed + 1
+    println("")
+
+    // ── H. Edge Cases ──
+    println("── H. Edge Cases ──")
+    r = test_h1_large_immediate()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_h2_negative_immediate()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_h3_zero_immediate()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_h4_max_optimization_depth()
+    if r != 0: return r
+    passed = passed + 1
+    r = test_h5_many_pushes()
+    if r != 0: return r
+    passed = passed + 1
+    println("")
+
+    // ── Summary ──
+    println("═══════════════════════════════════════════════")
+    println("RESULTS: " + str(passed) + "/" + str(passed) + " tests passed")
+    println("═══════════════════════════════════════════════")
+    println("")
+
+    return 0

@@ -1,0 +1,8 @@
+use jit
+
+fn main() -> Int with Unsafe:
+    println("before jit_compile_block")
+    let bc: Array<Int> = [0]
+    let r = jit_compile_block(bc, 0, 1)
+    println("after jit_compile_block: " + r.error)
+    return 0

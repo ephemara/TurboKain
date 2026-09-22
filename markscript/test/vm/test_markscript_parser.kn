@@ -1,0 +1,257 @@
+// ============================================================================
+//  MARKSCRIPT MINI-LANGUAGE PARSER TEST
+//  Verifies that ```markscript fenced code blocks compile to VM opcodes 7-20.
+// ============================================================================
+
+use std::text
+use lexer
+use parser
+
+// --- Opcode name lookup ---------------------------------------------------
+
+fn opcode_name(op: Int) -> String:
+    if op == OP_HALT:           return "HALT"
+    elif op == OP_ENTER_DOMAIN: return "ENTER_DOMAIN"
+    elif op == OP_ROUTINE_HEADER: return "ROUTINE_HEADER"
+    elif op == OP_PUSH_PARAM:   return "PUSH_PARAM"
+    elif op == OP_EXECUTE_CALL: return "EXECUTE_CALL"
+    elif op == OP_PUSH_MATRIX:  return "PUSH_MATRIX"
+    elif op == OP_FENCED_CODE:  return "FENCED_CODE"
+    elif op == OP_PUSH_STACK:   return "PUSH_STACK"
+    elif op == OP_POP_STACK:    return "POP_STACK"
+    elif op == OP_DUP:          return "DUP"
+    elif op == OP_CALL:         return "CALL"
+    elif op == OP_RET:          return "RET"
+    elif op == OP_JMP:          return "JMP"
+    elif op == OP_JZ:           return "JZ"
+    elif op == OP_ADD:          return "ADD"
+    elif op == OP_SUB:          return "SUB"
+    elif op == OP_MUL:          return "MUL"
+    elif op == OP_DIV:          return "DIV"
+    elif op == OP_LOAD_VAR:     return "LOAD_VAR"
+    elif op == OP_STORE_VAR:    return "STORE_VAR"
+    elif op == OP_JN:           return "JN"
+    else:                       return "UNKNOWN(" + str(op) + ")"
+
+// --- Bytecode disassembler ------------------------------------------------
+
+fn disasm_bytecode(bc: Array<Int>):
+    var ip: Int = 0
+    let bclen = len(bc)
+    while ip < bclen:
+        let op = bc[ip]
+        let name = opcode_name(op)
+
+        if op == OP_HALT or op == OP_EXECUTE_CALL or op == OP_POP_STACK or op == OP_DUP or op == OP_CALL or op == OP_RET or op == OP_ADD or op == OP_SUB or op == OP_MUL or op == OP_DIV:
+            println(str(ip) + ": " + name)
+            ip = ip + 1
+
+        elif op == OP_ENTER_DOMAIN or op == OP_ROUTINE_HEADER or op == OP_PUSH_PARAM or op == OP_PUSH_STACK or op == OP_LOAD_VAR or op == OP_STORE_VAR:
+            if ip + 1 < bclen:
+                println(str(ip) + ": " + name + " " + str(bc[ip + 1]))
+                ip = ip + 2
+            else:
+                println(str(ip) + ": " + name + " <truncated>")
+                ip = bclen
+
+        elif op == OP_FENCED_CODE:
+            if ip + 2 < bclen:
+                println(str(ip) + ": " + name + " lang_hash=" + str(bc[ip + 1]) + " content_hash=" + str(bc[ip + 2]))
+                ip = ip + 3
+            else:
+                println(str(ip) + ": " + name + " <truncated>")
+                ip = bclen
+
+        elif op == OP_JMP or op == OP_JZ or op == OP_JN:
+            if ip + 1 < bclen:
+                println(str(ip) + ": " + name + " → " + str(bc[ip + 1]))
+                ip = ip + 2
+            else:
+                println(str(ip) + ": " + name + " <truncated>")
+                ip = bclen
+
+        elif op == OP_PUSH_MATRIX:
+            if ip + 4 < bclen:
+                let handle = bc[ip + 1]
+                let cols = bc[ip + 2]
+                let rows = bc[ip + 3]
+                let data_count = bc[ip + 4]
+                println(str(ip) + ": " + name + " handle=" + str(handle) + " cols=" + str(cols) + " rows=" + str(rows) + " cells=" + str(data_count / 2))
+                ip = ip + 5
+                // Skip col_types
+                if ip < bclen:
+                    let col_count = bc[ip]
+                    ip = ip + 1 + col_count
+                // Skip cell data
+                ip = ip + data_count
+            else:
+                println(str(ip) + ": " + name + " <truncated>")
+                ip = bclen
+
+        else:
+            println(str(ip) + ": UNKNOWN opcode " + str(op))
+            ip = ip + 1
+
+// --- Test: compile markdown source and disassemble ------------------------
+
+fn test_compile_and_show(source: String):
+    let lex = create_lexer(source)
+    let bc = compile_source(lex)
+    println("--- Bytecode (" + str(len(bc)) + " ints) ---")
+    disasm_bytecode(bc)
+    println("")
+
+// --- Count opcodes structurally (skip operands) --------------------------
+
+fn is_no_operand(op: Int) -> Bool:
+    if op == OP_HALT: return true
+    if op == OP_EXECUTE_CALL: return true
+    if op == OP_POP_STACK: return true
+    if op == OP_DUP: return true
+    if op == OP_CALL: return true
+    if op == OP_RET: return true
+    if op == OP_ADD: return true
+    if op == OP_SUB: return true
+    if op == OP_MUL: return true
+    if op == OP_DIV: return true
+    return false
+
+fn count_opcode(bc: Array<Int>, opcode: Int) -> Int:
+    var count: Int = 0
+    var ip: Int = 0
+    let bclen = len(bc)
+    while ip < bclen:
+        let op = bc[ip]
+        if op == opcode:
+            count = count + 1
+        // Advance past opcode + operands
+        if is_no_operand(op):
+            ip = ip + 1
+        elif op == OP_FENCED_CODE:
+            ip = ip + 3
+        elif op == OP_PUSH_MATRIX:
+            ip = ip + 5  // op + handle + cols + rows + data_count
+            if ip < bclen:
+                let data_count = bc[ip - 1]
+                let col_count = bc[ip]
+                ip = ip + 1 + col_count + data_count
+        else:
+            // All other opcodes take 1 operand
+            ip = ip + 2
+    return count
+
+// --- Assert helper --------------------------------------------------------
+
+fn assert_eq(actual: Int, expected: Int, msg: String):
+    if actual != expected:
+        println("FAIL: " + msg + " — expected " + str(expected) + " got " + str(actual))
+    else:
+        println("PASS: " + msg)
+
+// ==========================================================================
+//  TEST CASES
+// ==========================================================================
+
+fn test_simple_let():
+    println("=== Test: Simple let ===")
+    let source = "```markscript\nlet x = 5\n```\n"
+    let lex = create_lexer(source)
+    let bc = compile_source(lex)
+    // Expected: PUSH_STACK 5, STORE_VAR hash("x"), HALT
+    disasm_bytecode(bc)
+    assert_eq(count_opcode(bc, OP_PUSH_STACK), 1, "PUSH_STACK count")
+    assert_eq(count_opcode(bc, OP_STORE_VAR), 1, "STORE_VAR count")
+    println("")
+
+fn test_arithmetic():
+    println("=== Test: Arithmetic ===")
+    let source = "```markscript\nlet y = x + 3\n```\n"
+    let lex = create_lexer(source)
+    let bc = compile_source(lex)
+    // Expected: LOAD_VAR x, PUSH_STACK 3, ADD, STORE_VAR y, HALT
+    disasm_bytecode(bc)
+    assert_eq(count_opcode(bc, OP_LOAD_VAR), 1, "LOAD_VAR count")
+    assert_eq(count_opcode(bc, OP_ADD), 1, "ADD count")
+    assert_eq(count_opcode(bc, OP_STORE_VAR), 1, "STORE_VAR count")
+    println("")
+
+fn test_while_loop():
+    println("=== Test: While loop with comparison ===")
+    let source = "```markscript\nwhile y > 0:\n    y = y - 1\n```\n"
+    let lex = create_lexer(source)
+    let bc = compile_source(lex)
+    // Expected: LOAD_VAR y, PUSH_STACK 0, SUB, PUSH_STACK 1, SUB, JN, ...
+    //           LOAD_VAR y, PUSH_STACK 1, SUB, STORE_VAR y, JMP back
+    disasm_bytecode(bc)
+    assert_eq(count_opcode(bc, OP_JN), 1, "JN count (comparison exit)")
+    assert_eq(count_opcode(bc, OP_JMP), 1, "JMP count (loop back)")
+    assert_eq(count_opcode(bc, OP_STORE_VAR), 1, "STORE_VAR count")
+    println("")
+
+fn test_if_else():
+    println("=== Test: If/else ===")
+    let source = "```markscript\nif x > 0:\n    y = 1\nelse:\n    y = 2\n```\n"
+    let lex = create_lexer(source)
+    let bc = compile_source(lex)
+    disasm_bytecode(bc)
+    assert_eq(count_opcode(bc, OP_JN), 1, "JN count (comparison)")
+    assert_eq(count_opcode(bc, OP_JMP), 1, "JMP count (skip else)")
+    // Two STORE_VARs: one in if-body, one in else-body
+    assert_eq(count_opcode(bc, OP_STORE_VAR), 2, "STORE_VAR count (both branches)")
+    println("")
+
+fn test_function_call():
+    println("=== Test: Function call ===")
+    let source = "```markscript\nfoo(\"hello\", 42)\n```\n"
+    let lex = create_lexer(source)
+    let bc = compile_source(lex)
+    disasm_bytecode(bc)
+    assert_eq(count_opcode(bc, OP_PUSH_STACK), 2, "PUSH_STACK count (2 args)")
+    assert_eq(count_opcode(bc, OP_PUSH_PARAM), 1, "PUSH_PARAM count")
+    assert_eq(count_opcode(bc, OP_EXECUTE_CALL), 1, "EXECUTE_CALL count")
+    println("")
+
+fn test_assignment():
+    println("=== Test: Assignment ===")
+    let source = "```markscript\nx = 10\n```\n"
+    let lex = create_lexer(source)
+    let bc = compile_source(lex)
+    disasm_bytecode(bc)
+    assert_eq(count_opcode(bc, OP_PUSH_STACK), 1, "PUSH_STACK count")
+    assert_eq(count_opcode(bc, OP_STORE_VAR), 1, "STORE_VAR count")
+    println("")
+
+fn test_comments():
+    println("=== Test: Comments ===")
+    let source = "```markscript\n# this is a comment\nlet x = 5\n```\n"
+    let lex = create_lexer(source)
+    let bc = compile_source(lex)
+    disasm_bytecode(bc)
+    assert_eq(count_opcode(bc, OP_STORE_VAR), 1, "STORE_VAR count (comment skipped)")
+    println("")
+
+fn test_non_markscript_block():
+    println("=== Test: Non-markscript block (kain) ===")
+    let source = "```kain\nlet x = 5\n```\n"
+    let lex = create_lexer(source)
+    let bc = compile_source(lex)
+    disasm_bytecode(bc)
+    assert_eq(count_opcode(bc, OP_FENCED_CODE), 1, "FENCED_CODE count (not markscript)")
+    assert_eq(count_opcode(bc, OP_PUSH_STACK), 0, "PUSH_STACK should be 0")
+    println("")
+
+// ==========================================================================
+//  MAIN
+// ==========================================================================
+
+pub fn run_tests():
+    println("=== MARKSCRIPT MINI-LANGUAGE PARSER TESTS ===\n")
+    test_simple_let()
+    test_arithmetic()
+    test_while_loop()
+    test_if_else()
+    test_function_call()
+    test_assignment()
+    test_comments()
+    test_non_markscript_block()
+    println("All tests completed.")

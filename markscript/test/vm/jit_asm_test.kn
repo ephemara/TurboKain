@@ -1,0 +1,55 @@
+// Minimal JIT test — verify asm call + RWX memory work
+use std::machine
+
+fn emit_rax_42() -> Array<Int>:
+    let code: Array<Int> = []
+    push(code, 0x48)
+    push(code, 0xB8)  // mov rax, imm64
+    push(code, 42)    // 8 bytes LE
+    push(code, 0)
+    push(code, 0)
+    push(code, 0)
+    push(code, 0)
+    push(code, 0)
+    push(code, 0)
+    push(code, 0)
+    push(code, 0xC3)  // ret
+    return code
+
+fn test_asm_call() -> Int with Unsafe:
+    let code = emit_rax_42()
+    let cs = len(code)
+    let ps = vm_page_size()
+    let alloc = if cs % ps > 0: (cs / ps + 1) * ps else: cs
+    let buf = vm_map(alloc)
+    if ptr_to_int(buf) == 0:
+        return 1
+    let _ = vm_protect_execute_read_write(buf, alloc)
+    collapse buf:
+        var i: Int = 0
+        while i < cs:
+            let bv: Byte = code[i] as Byte
+            mem_store(ptr_offset(buf, i, "Byte"), bv, "Byte")
+            i = i + 1
+        0
+    let scratch: ptr<Int> = alloc_zeroed(2, "Int")
+    mem_store(scratch, ptr_to_int(buf), "Int")
+    let sc = ptr_to_int(scratch)
+    asm("mov rax, [rdi]\ncall rax\nmov [rdi+8], rax",
+        sc,
+        constraints = "{rdi}",
+        clobbers = "rax,rcx,rdx",
+        memory = true, intel = true)
+    let result = mem_load(ptr_offset(scratch, 1, "Int"), "Int")
+    decay scratch
+    let _ = vm_release(buf, alloc)
+    return result
+
+fn main() -> Int with Unsafe:
+    let r = test_asm_call()
+    println("ASM test: " + str(r))
+    if r != 42:
+        println("FAIL: expected 42")
+        return 1
+    println("PASS")
+    return 0

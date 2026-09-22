@@ -1,0 +1,3 @@
+fn main() -> Int:
+    println("hello")
+    return 0

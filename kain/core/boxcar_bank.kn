@@ -45,6 +45,7 @@ use std::process
 use std::runtime
 use std::text
 use std::bytes
+use std::intent
 
 // ── kernel32 file API (pure Kain FFI, no C, no headers — slice.kn pattern) ──
 @extern @link_name("CreateFileA")
@@ -100,6 +101,36 @@ const NW: Int = 8
 
 law shot_ok(sig_x100: Int, thresh_x100: Int) -> Bool:
     return sig_x100 >= thresh_x100
+
+component BankPanel():
+    render <panel title="boxcar-bank" />
+
+// ── Trip authority: gate crossings as compiler-tracked events ───────────────
+// A trip IS the shot_ok() decision, announced: patch writes the crossing
+// (sig/dm/width/t, all already in scope at the call site), resonate serves
+// it. Event schema every tool copies: {tool, sig_x100, dm_x100, width, t}.
+// Fields hold the LAST trip; the table is the full history; trip_count is
+// the queue-depth signal downstream listeners (cadence, journal) read.
+// Tables/stdout/exit codes otherwise byte-identical to v1.0.
+world BankAuthority:
+    state trip_sig_x100: Int = 0
+    state trip_dm_x100: Int = 0
+    state trip_w: Int = 0
+    state trip_t: Int = 0
+    state trip_count: Int = 0
+    state served: Int = 0
+    surface web => BankPanel
+
+patch bank_trip(auth: BankAuthority, sig: Int, dm: Int, w: Int, t: Int) -> Int:
+    auth.trip_sig_x100 = sig
+    auth.trip_dm_x100 = dm
+    auth.trip_w = w
+    auth.trip_t = t
+    auth.trip_count = auth.trip_count + 1
+    return auth.trip_count
+
+resonate BankAuthority.trip_count dampen 0 ms:
+    BankAuthority.served = BankAuthority.served + 1
 
 // Display clamp: sigma_x100 beyond +-999999999 prints as the clamp.
 // Detection itself uses unclamped Floats; only table/ledger ints clamp.
@@ -662,7 +693,7 @@ fn write_text_file(path: String, s: String) -> Int with Unsafe:
     return 0
 
 fn usage() -> String:
-    var t: String = "boxcar_bank 0.1.0 — TurboKain single-pulse + DM sweep (transient_dm parity)\n"
+    var t: String = "boxcar_bank 0.1.1 — TurboKain single-pulse + DM sweep (transient_dm parity)\n"
     t = t + ".f32 in -> pulse.md + pulse.csv out (DM x width grid, MarkScript tables).\n"
     t = t + "Filterbank FFT rides std::audio::dsp (converge fast lane); bulk IO rides\n"
     t = t + "kernel32 handles + Byte arenas (no fs bridge). Tables carry scaled ints.\n"
@@ -875,13 +906,26 @@ fn main() -> Int with Unsafe:
             println("  [FAIL] INJECT staggered sweep fires  sig_x100=" + str(s2) + " < " + str(thresh_x100))
         decay gsig2
         decay gtt2
+        // Tripwire self-check: detector asserts above are untouched; here we
+        // prove the event layer engages (one patch -> one trip -> one serve).
+        let pj0: Int = patch_journal_count()
+        let rf0: Int = resonate_fire_count()
+        let _pt: Int = bank_trip(BankAuthority, s1, 0, b1w, b1t)
+        let pjd: Int = patch_journal_count() - pj0
+        let rfd: Int = resonate_fire_count() - rf0
+        total = total + 1
+        if pjd >= 1 and rfd >= 1:
+            npass = npass + 1
+            println("  [PASS] TRIP event served  patch+" + str(pjd) + " resonate+" + str(rfd) + " served=" + str(BankAuthority.served))
+        else:
+            println("  [FAIL] TRIP event served  patch+" + str(pjd) + " resonate+" + str(rfd))
         decay gsig
         decay gtt
         decay best
         decay px
         println("[prove] " + str(npass) + "/" + str(total) + " in " + str(t1 - t0) + "ms + sweep")
         if npass == total:
-            println("receipt=PASS prove=3/3 b0w=" + str(b0w))
+            println("receipt=PASS prove=4/4 b0w=" + str(b0w))
             return EXIT_OK
         println("receipt=FAIL prove=" + str(npass) + "/" + str(total))
         return EXIT_HELP
@@ -980,6 +1024,7 @@ fn main() -> Int with Unsafe:
         var rv: String = "-"
         if shot_ok(sv, thresh_x100):
             rv = "SHOT"
+            let _tr: Int = bank_trip(BankAuthority, sv, dm100, wv, tv)
         md = md + "| " + str(dm100) + " | " + str(wv) + " | " + str(sv) + " | " + str(tv) + " | " + rv + " |\n"
         csv = csv + str(dm100) + "," + str(wv) + "," + str(sv) + "," + str(tv) + "," + rv + "\n"
         gi2 = gi2 + 1
@@ -987,6 +1032,13 @@ fn main() -> Int with Unsafe:
     decay fgtt
     decay fbest
     decay nslot
+    let ntrips: Int = BankAuthority.trip_count
+    let nserved: Int = BankAuthority.served
+    let rfires: Int = resonate_fire_count()
+    println("bank-trips: trips=" + str(ntrips) + " served=" + str(nserved) + " rfires=" + str(rfires))
+    if nserved != ntrips:
+        println("boxcar_bank: trip telemetry mismatch served=" + str(nserved) + " trips=" + str(ntrips))
+        return EXIT_ERROR
     var want_md: Int = 0
     var want_csv: Int = 0
     if format == "md":
@@ -1007,6 +1059,6 @@ fn main() -> Int with Unsafe:
             return EXIT_ERROR
         println("bank: wrote " + outn + ".csv rows=" + str(fcells))
     if json == 1:
-        println("{\"tool\": \"boxcar_bank\", \"version\": \"0.1.0\", \"best_sigma_x100\": " + str(best100) + ", \"best_dm_x100\": " + str(bdm) + ", \"best_width\": " + str(bw) + ", \"best_t\": " + str(bt) + ", \"verdict\": \"" + verdict + "\"}")
+        println("{\"tool\": \"boxcar_bank\", \"version\": \"0.1.1\", \"best_sigma_x100\": " + str(best100) + ", \"best_dm_x100\": " + str(bdm) + ", \"best_width\": " + str(bw) + ", \"best_t\": " + str(bt) + ", \"verdict\": \"" + verdict + "\"}")
     println("receipt=PASS best_x100=" + str(best100) + " verdict=" + verdict)
     return EXIT_OK

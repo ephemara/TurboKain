@@ -1,0 +1,5 @@
+use jit
+
+fn main() -> Int:
+    println("hello from jit")
+    return 0

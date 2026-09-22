@@ -1,0 +1,122 @@
+use jit
+
+pub fn jit_test_suite() -> Int with Unsafe:
+    // Test 0: halt
+    let test0: Array<Int> = [0]
+    let r0 = jit_compile_block(test0, 0, 1)
+    let res0 = call_jit(r0.code_ptr)
+    println("[JIT] halt: " + str(res0) + " (" + str(r0.code_size) + " bytes) (expect 0)")
+    if res0 != 0:
+        println("[JIT] FAIL: halt")
+        return 1
+
+    // Test 1: 1+2=3
+    let test1: Array<Int> = [7, 1, 7, 2, 14, 0]
+    let r1 = jit_compile_block(test1, 0, 6)
+    let res1 = call_jit(r1.code_ptr)
+    println("[JIT] 1+2: " + str(res1) + " (" + str(r1.code_size) + " bytes) (expect 3)")
+    if res1 != 3:
+        println("[JIT] FAIL: 1+2")
+        return 1
+
+    // Test 2: 100-30=70
+    let test2: Array<Int> = [7, 100, 7, 30, 15, 0]
+    let r2 = jit_compile_block(test2, 0, 6)
+    let res2 = call_jit(r2.code_ptr)
+    println("[JIT] 100-30: " + str(res2) + " (" + str(r2.code_size) + " bytes) (expect 70)")
+    if res2 != 70:
+        println("[JIT] FAIL: 100-30")
+        return 1
+
+    // Test 3: 7*6=42
+    let test3: Array<Int> = [7, 7, 7, 6, 16, 0]
+    let r3 = jit_compile_block(test3, 0, 6)
+    let res3 = call_jit(r3.code_ptr)
+    println("[JIT] 7*6: " + str(res3) + " (" + str(r3.code_size) + " bytes) (expect 42)")
+    if res3 != 42:
+        println("[JIT] FAIL: 7*6")
+        return 1
+
+    // Test 4: 100/5=20
+    let test4: Array<Int> = [7, 100, 7, 5, 17, 0]
+    let r4 = jit_compile_block(test4, 0, 6)
+    let res4 = call_jit(r4.code_ptr)
+    println("[JIT] 100/5: " + str(res4) + " (" + str(r4.code_size) + " bytes) (expect 20)")
+    if res4 != 20:
+        println("[JIT] FAIL: 100/5")
+        return 1
+
+    // Test 5: dup + pop
+    let test5: Array<Int> = [7, 42, 9, 8, 0]
+    let r5 = jit_compile_block(test5, 0, 5)
+    let res5 = call_jit(r5.code_ptr)
+    println("[JIT] dup+pop: " + str(res5) + " (" + str(r5.code_size) + " bytes) (expect 42)")
+    if res5 != 42:
+        println("[JIT] FAIL: dup")
+        return 1
+
+    // Test 6: LOAD_VAR + STORE_VAR
+    let test6: Array<Int> = [7, 100, 18, 1, 19, 2, 0]
+    let r6 = jit_compile_block(test6, 0, 7)
+    let res6 = call_jit(r6.code_ptr)
+    println("[JIT] load/store var: " + str(res6) + " (" + str(r6.code_size) + " bytes) (expect 100)")
+    if res6 != 100:
+        println("[JIT] FAIL: var")
+        return 1
+
+    // Test 7: EXECUTE_CALL skip
+    let test7: Array<Int> = [7, 42, 3, 12345, 4, 0]
+    let r7 = jit_compile_block(test7, 0, 6)
+    let res7 = call_jit(r7.code_ptr)
+    println("[JIT] exec_call skip: " + str(res7) + " (" + str(r7.code_size) + " bytes) (expect 42)")
+    if res7 != 42:
+        println("[JIT] FAIL: exec_call")
+        return 1
+
+    // Test 8: OP_CALL skip
+    let test8: Array<Int> = [7, 77, 10, 0]
+    let r8 = jit_compile_block(test8, 0, 4)
+    let res8 = call_jit(r8.code_ptr)
+    println("[JIT] op_call skip: " + str(res8) + " (" + str(r8.code_size) + " bytes) (expect 77)")
+    if res8 != 77:
+        println("[JIT] FAIL: op_call")
+        return 1
+
+    // Test 9: OP_RET skip
+    let test9: Array<Int> = [7, 55, 11, 0]
+    let r9 = jit_compile_block(test9, 0, 4)
+    let res9 = call_jit(r9.code_ptr)
+    println("[JIT] ret skip: " + str(res9) + " (" + str(r9.code_size) + " bytes) (expect 55)")
+    if res9 != 55:
+        println("[JIT] FAIL: ret")
+        return 1
+
+    // Test 10: ENTER_DOMAIN + ROUTINE_HEADER skip
+    let test10: Array<Int> = [1, 7777, 2, 8888, 7, 33, 0]
+    let r10 = jit_compile_block(test10, 0, 7)
+    let res10 = call_jit(r10.code_ptr)
+    println("[JIT] domain+header: " + str(res10) + " (" + str(r10.code_size) + " bytes) (expect 33)")
+    if res10 != 33:
+        println("[JIT] FAIL: domain")
+        return 1
+
+    // Test 11: FENCED_CODE skip
+    let test11: Array<Int> = [6, 100, 200, 0]
+    let r11 = jit_compile_block(test11, 0, 4)
+    let res11 = call_jit(r11.code_ptr)
+    println("[JIT] fenced code: " + str(res11) + " (" + str(r11.code_size) + " bytes) (expect 0)")
+
+    // Test 12: PUSH_MATRIX skip + push 42
+    let test12: Array<Int> = [5, 0, 2, 2, 4, 1, 0, 0, 0, 1, 0, 7, 42, 0]
+    let r12 = jit_compile_block(test12, 0, 14)
+    let res12 = call_jit(r12.code_ptr)
+    println("[JIT] matrix skip+push: " + str(res12) + " (" + str(r12.code_size) + " bytes) (expect 42)")
+    if res12 != 42:
+        println("[JIT] FAIL: PUSH_MATRIX")
+        return 1
+
+    println("[JIT] All self-tests passed!")
+    return 0
+
+fn main() -> Int with Unsafe:
+    return jit_test_suite()

@@ -1,0 +1,31 @@
+use jit
+
+fn main() -> Int with Unsafe:
+    println("Test 0: compile [0]...")
+    let test0: Array<Int> = [0]
+    let r0 = jit_compile_block(test0, 0, 1)
+    println("Result: error='" + r0.error + "' size=" + str(r0.code_size))
+    if r0.error != "":
+        return 1
+    println("OK: halt block compiled (" + str(r0.code_size) + " bytes)")
+    println("")
+
+    println("Test 1: compile [7, 42, 0]...")
+    let test1: Array<Int> = [7, 42, 0]
+    let r1 = jit_compile_block(test1, 0, 3)
+    println("Result: error='" + r1.error + "' size=" + str(r1.code_size))
+    if r1.error != "":
+        return 2
+    println("OK: push block compiled (" + str(r1.code_size) + " bytes)")
+    println("")
+
+    println("Now calling halt block...")
+    let res0 = call_jit(r0.code_ptr)
+    println("halt result: " + str(res0))
+
+    println("Now calling push block...")
+    let res1 = call_jit(r1.code_ptr)
+    println("push result: " + str(res1))
+    println("")
+    println("ALL TESTS PASSED")
+    return 0

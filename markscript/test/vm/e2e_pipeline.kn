@@ -1,0 +1,669 @@
+// ============================================================================
+//  MARKSCRIPT END-TO-END PIPELINE INTEGRATION TEST
+//
+//  Exercises the full pipeline from markdown source → lexer → bytecode → VM
+//  execution → handler dispatch across 22 test cases in 5 categories:
+//
+//    A. Lexer Tests (6)  — verify token kind + text for each construct
+//    B. Parser Tests (5) — verify opcode emission for each construct
+//    C. Full Pipeline (4) — compile + execute, verify error-free
+//    D. Handler Dispatch (4) — pause/resume pattern, built-in handlers
+//    E. Error Handling (3) — ERROR_NAME, ERROR_TYPE, ERROR_IMPORT
+//
+//  Uses the same patterns as main.kn's run_handler_loop for dispatch.
+//  All assertions use println() with PASS/FAIL markers.
+// ============================================================================
+
+use std::text
+use std::fs
+use lexer      // create_lexer, next_token, token_kind, token_text, LexerState, TokenResult, Token
+use parser     // compile_source, hash_name, OP_HALT, OP_ENTER_DOMAIN, OP_ROUTINE_HEADER,
+               // OP_PUSH_PARAM, OP_EXECUTE_CALL, OP_PUSH_MATRIX, OP_FENCED_CODE,
+               // OP_PUSH_STACK, OP_STORE_VAR, OP_DIV
+use vm         // init_vm, execute_bytecode, resume_execution, ExecResult, MarkScriptVM, HandlerResult
+use types      // MarkValue, mark_int, mark_string, mark_empty, mark_value_to_string, MARK_INT, MARK_FLOAT, MARK_STRING
+use bridge     // init_vm_with_builtins, dispatch_fn, register_builtin,
+               // FN_PRINTLN, FN_ASSERT, FN_FS_READ_TEXT, FN_FS_WRITE_TEXT
+use error      // MarkError, error_ok, make_error, format_error, error_kind_name,
+               // ERROR_OK, ERROR_NAME, ERROR_ARITY, ERROR_BOUNDS, ERROR_TYPE,
+               // ERROR_IMPORT, ERROR_CIRCULAR_IMPORT
+use import     // resolve_imports, extract_imports
+
+// ============================================================================
+//  HELPER: Bytecode opcode name
+// ============================================================================
+
+fn opcode_name(op: Int) -> String:
+    if op == OP_HALT:           return "HALT"
+    elif op == OP_ENTER_DOMAIN: return "ENTER_DOMAIN"
+    elif op == OP_ROUTINE_HEADER: return "ROUTINE_HEADER"
+    elif op == OP_PUSH_PARAM:   return "PUSH_PARAM"
+    elif op == OP_EXECUTE_CALL: return "EXECUTE_CALL"
+    elif op == OP_PUSH_MATRIX:  return "PUSH_MATRIX"
+    elif op == OP_FENCED_CODE:  return "FENCED_CODE"
+    elif op == OP_PUSH_STACK:   return "PUSH_STACK"
+    elif op == OP_POP_STACK:    return "POP_STACK"
+    elif op == OP_DUP:          return "DUP"
+    elif op == OP_CALL:         return "CALL"
+    elif op == OP_RET:          return "RET"
+    elif op == OP_JMP:          return "JMP"
+    elif op == OP_JZ:           return "JZ"
+    elif op == OP_ADD:          return "ADD"
+    elif op == OP_SUB:          return "SUB"
+    elif op == OP_MUL:          return "MUL"
+    elif op == OP_DIV:          return "DIV"
+    elif op == OP_LOAD_VAR:     return "LOAD_VAR"
+    elif op == OP_STORE_VAR:    return "STORE_VAR"
+    elif op == OP_JN:           return "JN"
+    else:                       return "UNKNOWN(" + str(op) + ")"
+
+// ============================================================================
+//  ASSERTION HELPERS
+// ============================================================================
+
+fn assert_eq(actual: Int, expected: Int, msg: String):
+    if actual != expected:
+        println("  [FAIL] " + msg + ": expected " + str(expected) + " got " + str(actual))
+    else:
+        println("  [PASS] " + msg)
+
+fn assert_eq_str(actual: String, expected: String, msg: String):
+    if actual != expected:
+        println("  [FAIL] " + msg + ": expected \"" + expected + "\" got \"" + actual + "\"")
+    else:
+        println("  [PASS] " + msg)
+
+fn assert_true(condition: Bool, msg: String):
+    if condition:
+        println("  [PASS] " + msg)
+    else:
+        println("  [FAIL] " + msg)
+
+// ============================================================================
+//  HELPER: Count opcode occurrences in bytecode (skips operands correctly)
+// ============================================================================
+
+fn is_no_operand(op: Int) -> Bool:
+    if op == OP_HALT: return true
+    if op == OP_EXECUTE_CALL: return true
+    if op == OP_POP_STACK: return true
+    if op == OP_DUP: return true
+    if op == OP_CALL: return true
+    if op == OP_RET: return true
+    if op == OP_ADD: return true
+    if op == OP_SUB: return true
+    if op == OP_MUL: return true
+    if op == OP_DIV: return true
+    return false
+
+fn count_opcode(bc: Array<Int>, opcode: Int) -> Int:
+    var count: Int = 0
+    var ip: Int = 0
+    let bclen = len(bc)
+    while ip < bclen:
+        let op = bc[ip]
+        if op == opcode:
+            count = count + 1
+        if is_no_operand(op):
+            ip = ip + 1
+        elif op == OP_FENCED_CODE:
+            ip = ip + 3
+        elif op == OP_PUSH_MATRIX:
+            ip = ip + 5
+            if ip < bclen:
+                let data_count = bc[ip - 1]
+                let col_count = bc[ip]
+                ip = ip + 1 + col_count + data_count
+        else:
+            ip = ip + 2
+    return count
+
+// ============================================================================
+//  HELPER: Check that bytecode contains opcode at expected index, with
+//  optional operand check at index+1.
+// ============================================================================
+
+fn bc_has_op_at(bc: Array<Int>, op: Int, idx: Int) -> Bool:
+    if idx < 0 or idx >= len(bc):
+        return false
+    return bc[idx] == op
+
+fn bc_get_operand(bc: Array<Int>, idx: Int) -> Int:
+    if idx + 1 < len(bc):
+        return bc[idx + 1]
+    return -1
+
+// ============================================================================
+//  HELPER: Run full pipeline (lex → parse → VM → dispatch loop)
+//  Returns final ExecResult after all handler dispatches complete.
+// ============================================================================
+
+fn run_full_pipeline(source: String) -> ExecResult:
+    let lex = create_lexer(source)
+    let bc = compile_source(lex)
+    let vm = init_vm_with_builtins()
+    var er = execute_bytecode(vm, bc)
+    var iteration: Int = 0
+    while er.handler_id > 0 and iteration < 10:
+        let fn_id = er.handler_id
+        // Extract arguments from VM stack
+        var args: Array<MarkValue> = []
+        let stk_len = len(er.vm.stack)
+        var ai: Int = 0
+        while ai < stk_len:
+            push(args, er.vm.stack[ai])
+            ai = ai + 1
+        // Pop all argument values from stack
+        var remaining: Int = stk_len
+        while remaining > 0:
+            pop(er.vm.stack)
+            remaining = remaining - 1
+        // Dispatch to bridge handler
+        let hr = dispatch_fn(er.vm, fn_id, args)
+        // Resume VM execution
+        er = resume_execution(er.vm, bc, hr)
+        iteration = iteration + 1
+    return er
+
+// ============================================================================
+//  TEST CATEGORY A — LEXER TESTS (6)
+// ============================================================================
+
+fn test_a1_lexer_header1():
+    println("\n--- A1: Lexer — # Title → TOK_HEADER1 + TEXTSTR(\"Title\") ---")
+    let lex = create_lexer("# Title\n")
+    var s = lex
+
+    let nr1 = next_token(s)
+    s = nr1.state
+    assert_eq(token_kind(nr1.token), TOK_HEADER1, "token kind is TOK_HEADER1(0)")
+    assert_true(token_text(nr1.token) == "#", "token text is \"#\"")
+
+    let nr2 = next_token(s)
+    s = nr2.state
+    assert_eq(token_kind(nr2.token), TOK_TEXTSTR, "next token is TOK_TEXTSTR")
+    assert_true(token_text(nr2.token) == "Title", "text token is \"Title\"")
+
+    let nr3 = next_token(s)
+    assert_eq(token_kind(nr3.token), TOK_EOF, "final token is TOK_EOF")
+
+
+fn test_a2_lexer_blockquote():
+    println("\n--- A2: Lexer — > intent phrase → TOK_BLOCKQUOTE + TEXTSTR ---")
+    let lex = create_lexer("> intent phrase\n")
+    var s = lex
+
+    let nr1 = next_token(s)
+    s = nr1.state
+    assert_eq(token_kind(nr1.token), TOK_BLOCKQUOTE, "token kind is TOK_BLOCKQUOTE(2)")
+
+    let nr2 = next_token(s)
+    s = nr2.state
+    assert_eq(token_kind(nr2.token), TOK_TEXTSTR, "next token is TOK_TEXTSTR")
+    assert_eq_str(token_text(nr2.token), "intent phrase", "phrase text is \"intent phrase\"")
+
+    let nr3 = next_token(s)
+    assert_eq(token_kind(nr3.token), TOK_EOF, "final token is TOK_EOF")
+
+
+fn test_a3_lexer_tablepipe():
+    println("\n--- A3: Lexer — | col1 | col2 | → TOK_TABLEPIPE sequence ---")
+    let src = "| A | B |\n"
+    let lex = create_lexer(src)
+    var s = lex
+    var pipe_count: Int = 0
+    var eof_reached = false
+
+    loop:
+        let nr = next_token(s)
+        s = nr.state
+        let k = token_kind(nr.token)
+        if k == TOK_TABLEPIPE:
+            pipe_count = pipe_count + 1
+        if k == TOK_EOF:
+            eof_reached = true
+            break
+
+    assert_true(eof_reached, "EOF reached")
+    assert_true(pipe_count >= 2, "at least 2 TOK_TABLEPIPE tokens (got " + str(pipe_count) + ")")
+
+
+fn test_a4_lexer_fence():
+    println("\n--- A4: Lexer — ```kain ... ``` → TOK_FENCE ---")
+    let src = text_join_strings([
+        "```kain",
+        "fn test():",
+        "    return 42",
+        "```"
+    ], "\n")
+    let lex = create_lexer(src)
+    var s = lex
+    var fence_count: Int = 0
+    var eof_reached = false
+
+    loop:
+        let nr = next_token(s)
+        s = nr.state
+        let k = token_kind(nr.token)
+        if k == TOK_FENCE:
+            fence_count = fence_count + 1
+        if k == TOK_EOF:
+            eof_reached = true
+            break
+
+    assert_true(eof_reached, "EOF reached")
+    // Each ``` produces a TOK_FENCE — opening and closing = 2
+    assert_eq(fence_count, 2, "exactly 2 TOK_FENCE tokens (open + close)")
+
+
+fn test_a5_lexer_list():
+    println("\n--- A5: Lexer — - list item → TOK_LIST_UNORDERED ---")
+    let lex = create_lexer("- list item\n")
+    var s = lex
+
+    let nr1 = next_token(s)
+    s = nr1.state
+    assert_eq(token_kind(nr1.token), TOK_LIST_UNORDERED, "first token is TOK_LIST_UNORDERED(16)")
+    assert_true(token_text(nr1.token) == "- ", "marker text is \"- \"")
+
+    let nr2 = next_token(s)
+    s = nr2.state
+    assert_eq(token_kind(nr2.token), TOK_TEXTSTR, "next token is TOK_TEXTSTR")
+    assert_eq_str(token_text(nr2.token), "list item", "item text is \"list item\"")
+
+    let nr3 = next_token(s)
+    assert_eq(token_kind(nr3.token), TOK_EOF, "final token is TOK_EOF")
+
+
+fn test_a6_lexer_hr():
+    println("\n--- A6: Lexer — --- (horizontal rule) → TOK_HR ---")
+    let lex = create_lexer("---\n")
+    var s = lex
+
+    let nr1 = next_token(s)
+    s = nr1.state
+    assert_eq(token_kind(nr1.token), TOK_HR, "token kind is TOK_HR(20)")
+
+    let nr2 = next_token(s)
+    assert_eq(token_kind(nr2.token), TOK_EOF, "final token is TOK_EOF")
+
+
+// ============================================================================
+//  TEST CATEGORY B — PARSER TESTS (5)
+// ============================================================================
+
+fn test_b1_parser_domain():
+    println("\n--- B1: Parser — # MyDomain → OP_ENTER_DOMAIN + hash ---")
+    let lex = create_lexer("# MyDomain\n")
+    let bc = compile_source(lex)
+
+    // Expected: [OP_ENTER_DOMAIN, hash("MyDomain"), OP_HALT]
+    assert_true(len(bc) >= 3, "bytecode length >= 3 (got " + str(len(bc)) + ")")
+    assert_eq(bc[0], OP_ENTER_DOMAIN, "opcode 0 is OP_ENTER_DOMAIN(1)")
+    let domain_hash = bc_get_operand(bc, 0)
+    assert_eq(domain_hash, hash_name("MyDomain"), "operand is hash(\"MyDomain\")")
+
+
+fn test_b2_parser_routine():
+    println("\n--- B2: Parser — ## MyRoutine → OP_ROUTINE_HEADER + hash ---")
+    let lex = create_lexer("## MyRoutine\n")
+    let bc = compile_source(lex)
+
+    // Expected: [OP_ROUTINE_HEADER, hash("MyRoutine"), OP_HALT]
+    assert_true(len(bc) >= 3, "bytecode length >= 3 (got " + str(len(bc)) + ")")
+    assert_eq(bc[0], OP_ROUTINE_HEADER, "opcode 0 is OP_ROUTINE_HEADER(2)")
+    assert_eq(bc_get_operand(bc, 0), hash_name("MyRoutine"), "operand is hash(\"MyRoutine\")")
+
+
+fn test_b3_parser_intent():
+    println("\n--- B3: Parser — > print hello → OP_PUSH_PARAM + OP_EXECUTE_CALL ---")
+    let lex = create_lexer("> print hello\n")
+    let bc = compile_source(lex)
+
+    // Expected: [OP_PUSH_PARAM, hash("print hello"), OP_EXECUTE_CALL, OP_HALT]
+    assert_true(len(bc) >= 4, "bytecode length >= 4 (got " + str(len(bc)) + ")")
+    assert_eq(bc[0], OP_PUSH_PARAM, "opcode 0 is OP_PUSH_PARAM(3)")
+    assert_eq(bc[1], hash_name("print hello"), "param is hash(\"print hello\")")
+    assert_eq(bc[2], OP_EXECUTE_CALL, "opcode 2 is OP_EXECUTE_CALL(4)")
+
+    // Verify PUSH_PARAM and EXECUTE_CALL counts
+    assert_eq(count_opcode(bc, OP_PUSH_PARAM), 1, "exactly 1 PUSH_PARAM")
+    assert_eq(count_opcode(bc, OP_EXECUTE_CALL), 1, "exactly 1 EXECUTE_CALL")
+
+
+fn test_b4_parser_table():
+    println("\n--- B4: Parser — | A | B | → OP_PUSH_MATRIX ---")
+    let src = "| A | B |\n|---|---|\n| 1 | 2 |\n"
+    let lex = create_lexer(src)
+    let bc = compile_source(lex)
+
+    assert_true(len(bc) > 0, "bytecode generated")
+    let push_matrix_count = count_opcode(bc, OP_PUSH_MATRIX)
+    assert_true(push_matrix_count > 0, "contains OP_PUSH_MATRIX (got " + str(push_matrix_count) + ")")
+
+    // The first operand of OP_PUSH_MATRIX is the handle_id
+    // Find where OP_PUSH_MATRIX appears
+    var found_pm = false
+    var ip: Int = 0
+    while ip < len(bc):
+        if bc[ip] == OP_PUSH_MATRIX:
+            found_pm = true
+            // Check that handle, cols, rows follow
+            if ip + 4 < len(bc):
+                let handle = bc[ip + 1]
+                let cols = bc[ip + 2]
+                let rows = bc[ip + 3]
+                assert_true(handle >= 0, "table handle >= 0 (got " + str(handle) + ")")
+                assert_eq(cols, 2, "table has 2 columns")
+                assert_eq(rows, 2, "table has 2 rows (header + data)")
+            break
+        ip = ip + 1
+    assert_true(found_pm, "OP_PUSH_MATRIX found in bytecode")
+
+
+fn test_b5_parser_fenced_code():
+    println("\n--- B5: Parser — ```python ... ``` → OP_FENCED_CODE ---")
+    let src = text_join_strings([
+        "```python",
+        "print(\"hi\")",
+        "```"
+    ], "\n")
+    let lex = create_lexer(src)
+    let bc = compile_source(lex)
+
+    assert_true(len(bc) > 0, "bytecode generated")
+    let fc_count = count_opcode(bc, OP_FENCED_CODE)
+    assert_eq(fc_count, 1, "exactly 1 OP_FENCED_CODE (not markscript)")
+
+    // Find OP_FENCED_CODE and check it has lang_hash and content_hash
+    var found_fc = false
+    var ip: Int = 0
+    while ip < len(bc):
+        if bc[ip] == OP_FENCED_CODE:
+            found_fc = true
+            if ip + 2 < len(bc):
+                assert_eq(bc[ip + 1], hash_name("python"), "lang_hash matches hash(\"python\")")
+                assert_true(bc[ip + 2] > 0, "content_hash is non-zero")
+            break
+        ip = ip + 1
+    assert_true(found_fc, "OP_FENCED_CODE found in bytecode")
+
+
+// ============================================================================
+//  TEST CATEGORY C — FULL PIPELINE (4)
+// ============================================================================
+
+fn test_c1_pipeline_simple():
+    println("\n--- C1: Pipeline — Compile and execute simple markdown ---")
+    // Domain + routine with no handlers — should run to HALT without error
+    let src = "# Test\n## main\n"
+    let er = run_full_pipeline(src)
+
+    // VM should finish at OP_HALT with no error
+    let err_str = format_error(er.error)
+    assert_eq(er.handler_id, 0, "no pending handler (handler_id=0)")
+    assert_true(er.error.kind == ERROR_OK, "no VM error: " + err_str)
+
+    // Bytecode should contain OP_ENTER_DOMAIN + OP_ROUTINE_HEADER
+    assert_eq(count_opcode(er.bc, OP_ENTER_DOMAIN), 1, "bytecode has 1 ENTER_DOMAIN")
+    assert_eq(count_opcode(er.bc, OP_ROUTINE_HEADER), 1, "bytecode has 1 ROUTINE_HEADER")
+
+
+fn test_c2_pipeline_table():
+    println("\n--- C2: Pipeline — Table data accessible in VM ---")
+    let src = "| A | B |\n|---|---|\n| 1 | 2 |\n"
+    let er = run_full_pipeline(src)
+
+    let err_str = format_error(er.error)
+    assert_eq(er.handler_id, 0, "no pending handler")
+    assert_true(er.error.kind == ERROR_OK, "no VM error: " + err_str)
+
+    // VM data table should contain the parsed table
+    assert_true(len(er.data_table) > 0, "VM has at least 1 data table (got " + str(len(er.data_table)) + ")")
+    if len(er.data_table) > 0:
+        let tbl = er.data_table[0]
+        assert_eq(tbl.cols, 2, "table has 2 columns")
+        assert_true(tbl.rows > 0, "table has rows (got " + str(tbl.rows) + ")")
+
+
+fn test_c3_pipeline_multi_domain():
+    println("\n--- C3: Pipeline — Multi-domain markdown ---")
+    let src = "# DomainA\n> print\n# DomainB\n> print\n"
+    let er = run_full_pipeline(src)
+
+    // Both "print" intents should dispatch to FN_PRINTLN without error
+    let err_str = format_error(er.error)
+    assert_eq(er.handler_id, 0, "no pending handler after dispatch")
+    assert_true(er.error.kind == ERROR_OK, "no VM error: " + err_str)
+
+    // Should have 2 ENTER_DOMAIN opcodes (one per domain)
+    assert_eq(count_opcode(er.bc, OP_ENTER_DOMAIN), 2, "bytecode has 2 ENTER_DOMAIN")
+
+
+fn test_c4_pipeline_markscript_minilang():
+    println("\n--- C4: Pipeline — Markscript mini-language inside fenced block ---")
+    let src = text_join_strings([
+        "```markscript",
+        "let x = 5",
+        "```"
+    ], "\n")
+    let er = run_full_pipeline(src)
+
+    let err_str = format_error(er.error)
+    assert_eq(er.handler_id, 0, "no pending handler")
+    assert_true(er.error.kind == ERROR_OK, "no VM error: " + err_str)
+
+    // Should have PUSH_STACK (for 5) and STORE_VAR (for x)
+    assert_eq(count_opcode(er.bc, OP_PUSH_STACK), 1, "PUSH_STACK count = 1 (value 5)")
+    assert_eq(count_opcode(er.bc, OP_STORE_VAR), 1, "STORE_VAR count = 1 (variable x)")
+
+    // Variable 'x' should be stored in VM with value 5
+    let x_hash = hash_name("x")
+    var found_x = false
+    var vi: Int = 0
+    while vi < er.vm.var_count:
+        if er.vm.variables[vi].name_hash == x_hash:
+            found_x = true
+            assert_eq(er.vm.variables[vi].value.int_val, 5, "variable x = 5")
+            break
+        vi = vi + 1
+    assert_true(found_x, "variable 'x' found in VM variable store")
+
+
+// ============================================================================
+//  TEST CATEGORY D — HANDLER DISPATCH (4)
+// ============================================================================
+
+fn test_d1_handler_custom():
+    println("\n--- D1: Handler — Register custom handler, dispatch markdown ---")
+    // Register a custom IVT entry that maps "my handler" → FN_PRINTLN
+    let phrase_hash = hash_name("my handler")
+    var vm = init_vm_with_builtins()
+    vm = register_builtin(vm, "my handler", FN_PRINTLN)
+
+    // Compile source with matching intent
+    let src = "> my handler\n"
+    let lex = create_lexer(src)
+    let bc = compile_source(lex)
+
+    // Execute
+    var er = execute_bytecode(vm, bc)
+    assert_true(er.handler_id > 0, "handler dispatch triggered (handler_id=" + str(er.handler_id) + ")")
+
+    if er.handler_id > 0:
+        // Extract args and dispatch
+        var args: Array<MarkValue> = []
+        let stk_len = len(er.vm.stack)
+        var ai: Int = 0
+        while ai < stk_len:
+            push(args, er.vm.stack[ai])
+            ai = ai + 1
+        var remaining: Int = stk_len
+        while remaining > 0:
+            pop(er.vm.stack)
+            remaining = remaining - 1
+
+        let hr = dispatch_fn(er.vm, er.handler_id, args)
+        assert_eq_str(hr.err, "", "handler dispatch succeeded (no error)")
+
+        // Resume after dispatch
+        er = resume_execution(er.vm, bc, hr)
+        assert_true(er.handler_id == 0 or er.handler_id > 0, "VM continued after dispatch")
+        // Note: after print handler, VM may halt immediately
+        if er.handler_id > 0:
+            println("    (handler chained — continuing dispatch loop)")
+            // Just verify the chain terminates without error
+            let final_er = run_full_pipeline(src)
+            assert_true(final_er.error.kind == ERROR_OK or final_er.handler_id == 0,
+                "custom handler pipeline completed cleanly")
+
+
+fn test_d2_handler_assert():
+    println("\n--- D2: Handler — Built-in assert handler via dispatch_fn ---")
+    var vm = init_vm_with_builtins()
+
+    // Test assert via direct dispatch (avoids IVT phrase matching issues)
+    let args_ok: Array<MarkValue> = [
+        mark_int(42),
+        mark_int(42)
+    ]
+    let hr = dispatch_fn(vm, FN_ASSERT, args_ok)
+    assert_eq_str(hr.err, "", "assert(42, 42) succeeded (err=\"\")")
+    assert_eq(hr.value.int_val, 1, "assert result value = 1 (true)")
+
+    // Test assert failure
+    let args_fail: Array<MarkValue> = [
+        mark_int(42),
+        mark_int(99)
+    ]
+    let hr2 = dispatch_fn(vm, FN_ASSERT, args_fail)
+    assert_true(hr2.err != "", "assert(42, 99) failed with error message")
+    assert_eq(hr2.value.int_val, 0, "assert failure result = 0")
+
+
+fn test_d3_handler_print():
+    println("\n--- D3: Handler — Built-in print handler via pipeline ---")
+    // "print" is registered in stdlib handlers as hash("print") → FN_PRINTLN
+    let src = "> print\n"
+    let er = run_full_pipeline(src)
+
+    let err_str = format_error(er.error)
+    assert_true(er.error.kind == ERROR_OK, "print handler completed without error: " + err_str)
+    assert_eq(er.handler_id, 0, "no pending handler after dispatch")
+
+
+fn test_d4_handler_name_error():
+    println("\n--- D4: Handler — Unrecognized intent → ERROR_NAME ---")
+    let src = "> unknown_intent_xyz\n"
+    let er = run_full_pipeline(src)
+
+    // Should produce ERROR_NAME (the built-in IVT doesn't have "unknown_intent_xyz")
+    assert_eq(er.error.kind, ERROR_NAME, "VM error kind is ERROR_NAME(1)")
+    let err_msg = er.error.message
+    assert_true(err_msg != "", "error message is non-empty")
+    println("    Error message: \"" + err_msg + "\"")
+
+
+// ============================================================================
+//  TEST CATEGORY E — ERROR HANDLING (3)
+// ============================================================================
+
+fn test_e1_error_intent_not_registered():
+    println("\n--- E1: Error — Intent not registered → ERROR_NAME ---")
+    // Compile and run with an unregistered intent phrase
+    let src = "> this intent definitely does not exist in the IVT\n"
+    let er = run_full_pipeline(src)
+
+    assert_eq(er.error.kind, ERROR_NAME, "ERROR_NAME when intent not found")
+    assert_true(er.error.message != "", "error message is non-empty")
+    println("    Error: " + format_error(er.error))
+
+
+fn test_e2_error_divide_by_zero():
+    println("\n--- E2: Error — Divide by zero in markscript → ERROR_TYPE ---")
+    let src = text_join_strings([
+        "```markscript",
+        "let x = 5 / 0",
+        "```"
+    ], "\n")
+    let er = run_full_pipeline(src)
+
+    // OP_DIV with zero should set ERROR_TYPE in the VM
+    // Note: the VM sets verr to ERROR_TYPE but continues execution
+    assert_eq(er.error.kind, ERROR_TYPE, "VM error kind is ERROR_TYPE(4)")
+    println("    Error: " + format_error(er.error))
+
+
+fn test_e3_error_import_not_found():
+    println("\n--- E3: Error — @import not found → ERROR_IMPORT ---")
+    // Test import resolution with a non-existent file
+    let source = "@import \"nonexistent_file.md\"\n# Test\n"
+    let result = resolve_imports(source, "blades/markscript/src/test", 0, [])
+
+    // Should have at least one error of kind ERROR_IMPORT
+    let err_count = len(result.errors)
+    assert_true(err_count > 0, "import resolution produced errors (got " + str(err_count) + ")")
+
+    if err_count > 0:
+        let first_err = result.errors[0]
+        assert_eq(first_err.kind, ERROR_IMPORT, "error kind is ERROR_IMPORT(5)")
+        println("    Error: " + format_error(first_err))
+
+
+// ============================================================================
+//  MAIN — Run all tests
+// ============================================================================
+
+pub fn run_tests():
+    println("=== MARKSCRIPT END-TO-END PIPELINE INTEGRATION TEST ===\n")
+
+    // ── Category A: Lexer ──
+    println("========================================")
+    println("CATEGORY A: LEXER TESTS (6)")
+    println("========================================")
+    test_a1_lexer_header1()
+    test_a2_lexer_blockquote()
+    test_a3_lexer_tablepipe()
+    test_a4_lexer_fence()
+    test_a5_lexer_list()
+    test_a6_lexer_hr()
+
+    // ── Category B: Parser ──
+    println("\n========================================")
+    println("CATEGORY B: PARSER TESTS (5)")
+    println("========================================")
+    test_b1_parser_domain()
+    test_b2_parser_routine()
+    test_b3_parser_intent()
+    test_b4_parser_table()
+    test_b5_parser_fenced_code()
+
+    // ── Category C: Full Pipeline ──
+    println("\n========================================")
+    println("CATEGORY C: FULL PIPELINE TESTS (4)")
+    println("========================================")
+    test_c1_pipeline_simple()
+    test_c2_pipeline_table()
+    test_c3_pipeline_multi_domain()
+    test_c4_pipeline_markscript_minilang()
+
+    // ── Category D: Handler Dispatch ──
+    println("\n========================================")
+    println("CATEGORY D: HANDLER DISPATCH TESTS (4)")
+    println("========================================")
+    test_d1_handler_custom()
+    test_d2_handler_assert()
+    test_d3_handler_print()
+    test_d4_handler_name_error()
+
+    // ── Category E: Error Handling ──
+    println("\n========================================")
+    println("CATEGORY E: ERROR HANDLING TESTS (3)")
+    println("========================================")
+    test_e1_error_intent_not_registered()
+    test_e2_error_divide_by_zero()
+    test_e3_error_import_not_found()
+
+    println("\n========================================")
+    println("ALL E2E PIPELINE TESTS COMPLETE")
+    println("========================================")

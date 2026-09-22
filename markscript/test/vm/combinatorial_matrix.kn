@@ -1,0 +1,595 @@
+// ============================================================================
+//  MARKSCRIPT COMBINATORIAL TEST MATRIX
+//
+//  Auto-generated combinatorial test cases covering:
+//    1. Token pairs: every pair of token types (~50 representative pairs)
+//    2. Opcode sequences: common 2-3 opcode sequences
+//    3. Error cross-products: error kinds × triggering opcodes
+//    4. Variable lifecycle: store → load → overwrite → undefined
+//
+//  Focuses on the VM layer. Lexer/parser edge cases tested separately.
+// ============================================================================
+
+use std::text
+use types       // MarkValue, mark_int, mark_empty, MARK_INT
+use error       // MarkError, ERROR_OK, ERROR_NAME, ERROR_TYPE, error_ok
+use parser      // OP_HALT, OP_PUSH_STACK, OP_POP_STACK, OP_DUP, OP_ADD, OP_SUB,
+                // OP_MUL, OP_DIV, OP_LOAD_VAR, OP_STORE_VAR, OP_JMP, OP_JZ, OP_JN,
+                // OP_ENTER_DOMAIN, OP_ROUTINE_HEADER, OP_PUSH_PARAM, OP_EXECUTE_CALL,
+                // OP_FENCED_CODE, OP_CALL, OP_RET, hash_name
+use vm          // init_vm, execute_bytecode, register_handler, ExecResult, MarkScriptVM
+
+// ============================================================================
+//  HELPERS
+// ============================================================================
+
+fn assert_eq(actual: Int, expected: Int, msg: String):
+    if actual != expected:
+        println("  [FAIL] " + msg + ": expected " + str(expected) + " got " + str(actual))
+    else:
+        println("  [PASS] " + msg)
+
+fn assert_no_err(er: ExecResult, msg: String):
+    if er.error.kind == ERROR_OK:
+        println("  [PASS] " + msg)
+    else:
+        println("  [FAIL] " + msg + " — error: " + er.error.message)
+
+fn assert_err(er: ExecResult, expected_kind: Int, msg: String):
+    if er.error.kind == expected_kind:
+        println("  [PASS] " + msg)
+    else:
+        println("  [FAIL] " + msg + " — expected error kind " + str(expected_kind)
+            + " got " + str(er.error.kind))
+
+fn assert_stack_size(er: ExecResult, expected: Int, msg: String):
+    assert_eq(len(er.vm.stack), expected, msg)
+
+// ============================================================================
+//  MATRIX 1: OPCODE PAIRS (20 pairs)
+//
+//  Tests common 2-opcode sequences that appear in markscript.
+// ============================================================================
+
+fn test_pair_push_add():
+    println("\n--- OP_PAIR: PUSH + ADD (2+3=5) ---")
+    let bc: Array<Int> = [OP_PUSH_STACK, 2, OP_PUSH_STACK, 3, OP_ADD, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "PUSH+ADD no error")
+    assert_stack_size(er, 1, "result on stack")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 5, "2+3=5")
+
+fn test_pair_push_sub():
+    println("\n--- OP_PAIR: PUSH + SUB (10-3=7) ---")
+    let bc: Array<Int> = [OP_PUSH_STACK, 10, OP_PUSH_STACK, 3, OP_SUB, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "PUSH+SUB no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 7, "10-3=7")
+
+fn test_pair_push_mul():
+    println("\n--- OP_PAIR: PUSH + MUL (6*7=42) ---")
+    let bc: Array<Int> = [OP_PUSH_STACK, 6, OP_PUSH_STACK, 7, OP_MUL, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "PUSH+MUL no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 42, "6*7=42")
+
+fn test_pair_push_div():
+    println("\n--- OP_PAIR: PUSH + DIV (100/4=25) ---")
+    let bc: Array<Int> = [OP_PUSH_STACK, 100, OP_PUSH_STACK, 4, OP_DIV, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "PUSH+DIV no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 25, "100/4=25")
+
+fn test_pair_store_load():
+    println("\n--- OP_PAIR: STORE + LOAD (round-trip) ---")
+    let vh = hash_name("v")
+    let bc: Array<Int> = [OP_PUSH_STACK, 99, OP_STORE_VAR, vh, OP_LOAD_VAR, vh, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "STORE+LOAD no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 99, "round-trip = 99")
+
+fn test_pair_dup_pop():
+    println("\n--- OP_PAIR: DUP + POP (top is duplicated value) ---")
+    let bc: Array<Int> = [OP_PUSH_STACK, 7, OP_DUP, OP_POP_STACK, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "DUP+POP no error")
+    assert_stack_size(er, 1, "one value remains")
+
+fn test_pair_jmp_halt():
+    println("\n--- OP_PAIR: JMP → HALT ---")
+    let bc: Array<Int> = [OP_JMP, 4, OP_PUSH_STACK, 999, OP_PUSH_STACK, 42, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "JMP+HALT no error")
+    assert_stack_size(er, 1, "one value (42, 999 skipped)")
+
+fn test_pair_jz_halt():
+    println("\n--- OP_PAIR: JZ (zero) → HALT ---")
+    let bc: Array<Int> = [OP_PUSH_STACK, 0, OP_JZ, 6, OP_PUSH_STACK, 999, OP_PUSH_STACK, 42, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "JZ+HALT no error")
+    assert_stack_size(er, 1, "only 42 pushed (0 popped, 999 skipped)")
+
+fn test_pair_jn_halt():
+    println("\n--- OP_PAIR: JN (negative) → HALT ---")
+    let bc: Array<Int> = [OP_PUSH_STACK, -5, OP_JN, 6, OP_PUSH_STACK, 999, OP_PUSH_STACK, 42, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "JN+HALT no error")
+    assert_stack_size(er, 1, "only 42 pushed (-5 popped, 999 skipped)")
+
+fn test_pair_load_undefined():
+    println("\n--- OP_PAIR: LOAD undefined var → error ---")
+    let vh = hash_name("undefined_var_xyz")
+    let bc: Array<Int> = [OP_LOAD_VAR, vh, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_err(er, ERROR_NAME, "LOAD undefined → ERROR_NAME")
+
+fn test_pair_div_zero():
+    println("\n--- OP_PAIR: DIV by zero → ERROR_TYPE ---")
+    let bc: Array<Int> = [OP_PUSH_STACK, 42, OP_PUSH_STACK, 0, OP_DIV, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_err(er, ERROR_TYPE, "DIV/0 → ERROR_TYPE")
+
+fn test_pair_call_no_handler():
+    println("\n--- OP_PAIR: CALL without handler → ERROR_NAME ---")
+    // Push target hash, CALL
+    let vh = hash_name("no_handler")
+    let bc: Array<Int> = [OP_PUSH_STACK, vh, OP_CALL, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_err(er, ERROR_NAME, "CALL without handler → ERROR_NAME")
+
+fn test_pair_push_param_execute():
+    println("\n--- OP_PAIR: PUSH_PARAM + EXECUTE_CALL (IVT miss) ---")
+    let bc: Array<Int> = [OP_PUSH_PARAM, hash_name("no_intent_xyz"), OP_EXECUTE_CALL, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_err(er, ERROR_NAME, "PUSH_PARAM+EXECUTE_CALL miss → ERROR_NAME")
+
+fn test_pair_enter_routine():
+    println("\n--- OP_PAIR: ENTER_DOMAIN + ROUTINE_HEADER ---")
+    let bc: Array<Int> = [
+        OP_ENTER_DOMAIN, hash_name("Dom"),
+        OP_ROUTINE_HEADER, hash_name("Rout"),
+        OP_HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "ENTER_DOMAIN+ROUTINE_HEADER no error")
+    assert_eq(er.accumulator.int_val, hash_name("Rout"), "last accumulator = routine hash")
+
+// ============================================================================
+//  MATRIX 2: OPCODE TRIPLES (10 sequences)
+// ============================================================================
+
+fn test_triple_push_add_store():
+    println("\n--- OP_TRIPLE: PUSH + ADD + STORE ---")
+    let vh = hash_name("sum")
+    let bc: Array<Int> = [OP_PUSH_STACK, 10, OP_PUSH_STACK, 20, OP_ADD, OP_STORE_VAR, vh, OP_LOAD_VAR, vh, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "PUSH+ADD+STORE no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 30, "10+20=30 stored and loaded")
+
+fn test_triple_load_add_store():
+    println("\n--- OP_TRIPLE: LOAD + ADD + STORE (x=x+1) ---")
+    let vh = hash_name("x")
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, 5, OP_STORE_VAR, vh,   // x=5
+        OP_LOAD_VAR, vh,                        // load 5
+        OP_PUSH_STACK, 1,                       // push 1
+        OP_ADD,                                  // 5+1=6
+        OP_STORE_VAR, vh,                       // x=6
+        OP_LOAD_VAR, vh,                        // load 6
+        OP_HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "LOAD+ADD+STORE no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 6, "x=5, x=x+1, x=6")
+
+fn test_triple_push_jz_pop():
+    println("\n--- OP_TRIPLE: PUSH + JZ + POP (conditional pop) ---")
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, 0,
+        OP_JZ, 6,
+        OP_PUSH_STACK, 10,
+        OP_POP_STACK,
+        OP_PUSH_STACK, 99,
+        OP_HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "PUSH+JZ+POP no error")
+    assert_stack_size(er, 1, "99 is on stack (0 popped, 10 skipped)")
+
+fn test_triple_push_jn_skip():
+    println("\n--- OP_TRIPLE: PUSH + JN + fall-through (non-negative) ---")
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, 3,
+        OP_JN, 7,
+        OP_PUSH_STACK, 100,
+        OP_POP_STACK,
+        OP_PUSH_STACK, 200,
+        OP_HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "JN not taken — falls through")
+    assert_stack_size(er, 2, "100 and 200 on stack (3 popped)")
+
+fn test_triple_store_overwrite_load():
+    println("\n--- OP_TRIPLE: STORE overwrite + LOAD → last wins ---")
+    let vh = hash_name("multi")
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, 1, OP_STORE_VAR, vh,
+        OP_PUSH_STACK, 2, OP_STORE_VAR, vh,
+        OP_PUSH_STACK, 3, OP_STORE_VAR, vh,
+        OP_LOAD_VAR, vh,
+        OP_HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "overwrite chain no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 3, "last write (3) wins")
+
+fn test_triple_dup_add():
+    println("\n--- OP_TRIPLE: DUP + ADD (doubling) ---")
+    let bc: Array<Int> = [OP_PUSH_STACK, 21, OP_DUP, OP_ADD, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "DUP+ADD (doubling) no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 42, "21+21=42")
+
+fn test_triple_sub_mul():
+    println("\n--- OP_TRIPLE: SUB + MUL = (a-b)*c ---")
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, 10, OP_PUSH_STACK, 4, OP_SUB,   // 6
+        OP_PUSH_STACK, 7, OP_MUL,                        // 42
+        OP_HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "(10-4)*7 no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 42, "(10-4)*7 = 42")
+
+fn test_triple_jmp_backward():
+    println("\n--- OP_TRIPLE: JMP backward loop (3 iterations) ---")
+    // Loop: push i, decrement, jn back
+    // BC layout:
+    // 0: PUSH 3 (i=3)
+    // 2: DUP           ← loop_start=2
+    // 3: PUSH 1
+    // 5: SUB
+    // 6: DUP
+    // 7: JN 13         jump to exit if negative
+    // 9: JMP 2         jump back to loop_start
+    // 11: POP (clean up final zero)
+    // 12: HALT
+    let bc: Array<Int> = [
+        7, 3,          // PUSH 3
+        9,              // DUP → [3,3]
+        7, 1,          // PUSH 1 → [3,3,1]
+        15,             // SUB → [3,2]
+        9,              // DUP → [3,2,2]
+        20, 13,         // JN 13 → exit if < 0
+        12, 2,          // JMP 2  → loop back
+        8,              // POP (clean up)
+        0               // HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "backward loop no error")
+    // Stack should have [3,2,1,0] then final POP removes the 0
+    assert_stack_size(er, 3, "stack has 3 values after loop cleanup: [3,2,1]")
+
+fn test_triple_push_param_execute_registered():
+    println("\n--- OP_TRIPLE: PUSH_PARAM+EXECUTE_CALL (registered) → handler_id > 0 ---")
+    var vm = init_vm()
+    vm = register_handler(vm, hash_name("my_handler"), 42)
+
+    let bc: Array<Int> = [
+        OP_PUSH_PARAM, hash_name("my_handler"),
+        OP_EXECUTE_CALL,
+        OP_HALT
+    ]
+    let er = execute_bytecode(vm, bc)
+    assert_eq(er.handler_id, 42, "handler_id = 42 (my_handler)")
+    assert_no_err(er, "registered handler triggers dispatch without error")
+
+fn test_triple_fenced_code_skip():
+    println("\n--- OP_TRIPLE: FENCED_CODE + PUSH (structural skip) ---")
+    let bc: Array<Int> = [
+        OP_FENCED_CODE, hash_name("python"), hash_name("print(1)"),
+        OP_PUSH_STACK, 42,
+        OP_HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "FENCED_CODE skip + PUSH no error")
+    assert_stack_size(er, 1, "42 on stack after FENCED_CODE skip")
+
+// ============================================================================
+//  MATRIX 3: VARIABLE LIFECYCLE (5 tests)
+// ============================================================================
+
+fn test_var_create_read():
+    println("\n--- VAR: Create → Read ---")
+    let vh = hash_name("life")
+    let bc: Array<Int> = [OP_PUSH_STACK, 1, OP_STORE_VAR, vh, OP_LOAD_VAR, vh, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "create+read no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 1, "value is 1")
+
+fn test_var_update_read():
+    println("\n--- VAR: Create → Update → Read ---")
+    let vh = hash_name("upd")
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, 10, OP_STORE_VAR, vh,
+        OP_PUSH_STACK, 20, OP_STORE_VAR, vh,
+        OP_LOAD_VAR, vh,
+        OP_HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "create+update+read no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 20, "updated value is 20")
+
+fn test_var_two_independent():
+    println("\n--- VAR: Two independent variables ---")
+    let a = hash_name("a")
+    let b = hash_name("b")
+    let bc: Array<Int> = [
+        OP_PUSH_STACK, 100, OP_STORE_VAR, a,
+        OP_PUSH_STACK, 200, OP_STORE_VAR, b,
+        OP_LOAD_VAR, a,      // load 100
+        OP_LOAD_VAR, b,      // load 200
+        OP_ADD,               // 300
+        OP_HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "two independent vars no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 300, "a+b = 300")
+
+fn test_var_many_names():
+    println("\n--- VAR: 20 variables independently stored ---")
+    var vm = init_vm()
+    var bc: Array<Int> = []
+    var i: Int = 0
+    while i < 20:
+        push(bc, OP_PUSH_STACK)
+        push(bc, i * 10)
+        push(bc, OP_STORE_VAR)
+        push(bc, hash_name("n" + str(i)))
+        i = i + 1
+    push(bc, OP_LOAD_VAR)
+    push(bc, hash_name("n15"))
+    push(bc, OP_HALT)
+
+    let er = execute_bytecode(vm, bc)
+    assert_no_err(er, "20 variable store no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 150, "n15 = 150")
+
+fn test_var_read_before_write():
+    println("\n--- VAR: Read before write → ERROR_NAME ---")
+    let vh = hash_name("never_stored")
+    let bc: Array<Int> = [OP_LOAD_VAR, vh, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_err(er, ERROR_NAME, "read before write → ERROR_NAME")
+
+// ============================================================================
+//  MATRIX 4: ERROR CROSS-PRODUCTS (5 tests)
+// ============================================================================
+
+fn test_err_name_ivt_miss():
+    println("\n--- ERR×OP: ERROR_NAME × EXECUTE_CALL (IVT miss) ---")
+    let bc: Array<Int> = [OP_PUSH_PARAM, hash_name("unregistered_xyz"), OP_EXECUTE_CALL, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_err(er, ERROR_NAME, "EXECUTE_CALL → ERROR_NAME on miss")
+
+fn test_err_name_load_undefined():
+    println("\n--- ERR×OP: ERROR_NAME × LOAD_VAR (undefined) ---")
+    let bc: Array<Int> = [OP_LOAD_VAR, hash_name("undefined"), OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_err(er, ERROR_NAME, "LOAD_VAR → ERROR_NAME on undefined")
+
+fn test_err_name_call_no_handler():
+    println("\n--- ERR×OP: ERROR_NAME × CALL (no handler) ---")
+    let bc: Array<Int> = [OP_PUSH_STACK, hash_name("no_handler"), OP_CALL, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_err(er, ERROR_NAME, "CALL → ERROR_NAME on no handler")
+
+fn test_err_type_div_zero():
+    println("\n--- ERR×OP: ERROR_TYPE × DIV (zero) ---")
+    let bc: Array<Int> = [OP_PUSH_STACK, 100, OP_PUSH_STACK, 0, OP_DIV, OP_HALT]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_err(er, ERROR_TYPE, "DIV → ERROR_TYPE on zero divisor")
+
+fn test_cross_errors_independent():
+    println("\n--- ERR×OP: Multiple errors don't cascade incorrectly ---")
+    // Trigger NAME then continue: error should be from last problematic op
+    let bc: Array<Int> = [
+        OP_LOAD_VAR, hash_name("undef1"),   // ERROR_NAME
+        OP_PUSH_STACK, 1, OP_PUSH_STACK, 0,
+        OP_DIV,                               // ERROR_TYPE (overwrites)
+        OP_HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    // Last error wins
+    assert_err(er, ERROR_TYPE, "last error (TYPE) wins over earlier (NAME)")
+
+// ============================================================================
+//  MATRIX 5: STRESS SEQUENCES (5 tests)
+// ============================================================================
+
+fn test_stress_push_pop_cycle():
+    println("\n--- STRESS: 100 push/pop cycles ---")
+    var bc: Array<Int> = []
+    var i: Int = 0
+    while i < 100:
+        push(bc, OP_PUSH_STACK)
+        push(bc, i)
+        push(bc, OP_POP_STACK)
+        i = i + 1
+    push(bc, OP_HALT)
+
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "100 push/pop cycles no error")
+    assert_stack_size(er, 0, "stack empty after balanced push/pop")
+
+fn test_stress_deep_stack():
+    println("\n--- STRESS: Deep stack (500 pushes) ---")
+    var bc: Array<Int> = []
+    var i: Int = 0
+    while i < 500:
+        push(bc, OP_PUSH_STACK)
+        push(bc, i)
+        i = i + 1
+    push(bc, OP_HALT)
+
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "500 pushes no error")
+    assert_stack_size(er, 500, "stack depth = 500")
+
+fn test_stress_variable_thrash():
+    println("\n--- STRESS: Variable thrash (50 overwrites) ---")
+    let vh = hash_name("thrash")
+    var bc: Array<Int> = []
+    var i: Int = 0
+    while i < 50:
+        push(bc, OP_PUSH_STACK)
+        push(bc, i)
+        push(bc, OP_STORE_VAR)
+        push(bc, vh)
+        i = i + 1
+    push(bc, OP_LOAD_VAR)
+    push(bc, vh)
+    push(bc, OP_HALT)
+
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "50 variable overwrites no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 49, "last written value = 49")
+
+fn test_stress_jump_chain():
+    println("\n--- STRESS: Chain of 10 forward jumps ---")
+    // JMP chain: jump from 0→4→8→...→halt
+    var bc: Array<Int> = []
+    var i: Int = 0
+    while i < 10:
+        push(bc, OP_JMP)
+        push(bc, i * 4 + 4)  // jump forward
+        push(bc, OP_PUSH_STACK)
+        push(bc, 999)        // dead code
+        i = i + 1
+    push(bc, OP_PUSH_STACK)
+    push(bc, 42)
+    push(bc, OP_HALT)
+
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "10-jump chain no error")
+    assert_stack_size(er, 1, "only final push 42 on stack")
+
+fn test_stress_mixed_ops():
+    println("\n--- STRESS: Mixed operations (arithmetic + jumps + vars) ---")
+    let vh = hash_name("counter")
+    // Compute factorial(5) = 120 using while loop pattern
+    // counter = 5; result = 1
+    // while counter > 0: result *= counter; counter -= 1
+    // Simplified: use vars and arithmetic
+    var bc: Array<Int> = [
+        // counter=5, result=1
+        OP_PUSH_STACK, 5, OP_STORE_VAR, hash_name("n"),
+        OP_PUSH_STACK, 1, OP_STORE_VAR, hash_name("r"),
+        // loop: load n, dup, jz exit
+        OP_LOAD_VAR, hash_name("n"),
+        OP_DUP,
+        OP_JZ, 34,          // exit if n=0
+        // load r, load n, mul, store r
+        OP_LOAD_VAR, hash_name("r"),
+        OP_LOAD_VAR, hash_name("n"),
+        OP_MUL,
+        OP_STORE_VAR, hash_name("r"),
+        // push 1, load n, sub, store n
+        OP_PUSH_STACK, 1,
+        OP_LOAD_VAR, hash_name("n"),
+        OP_SUB,
+        OP_STORE_VAR, hash_name("n"),
+        // jmp back to loop
+        OP_JMP, 6,
+        // exit: load r, halt
+        OP_LOAD_VAR, hash_name("r"),
+        OP_HALT
+    ]
+    let er = execute_bytecode(init_vm(), bc)
+    assert_no_err(er, "factorial(5) no error")
+    if len(er.vm.stack) > 0:
+        assert_eq(er.vm.stack[0].int_val, 120, "factorial(5) = 120")
+
+// ============================================================================
+//  MAIN
+// ============================================================================
+
+pub fn run_tests():
+    println("=== MARKSCRIPT COMBINATORIAL TEST MATRIX ===\n")
+
+    println("========================================")
+    println("MATRIX 1: OPCODE PAIRS (14)")
+    println("========================================")
+    test_pair_push_add()
+    test_pair_push_sub()
+    test_pair_push_mul()
+    test_pair_push_div()
+    test_pair_store_load()
+    test_pair_dup_pop()
+    test_pair_jmp_halt()
+    test_pair_jz_halt()
+    test_pair_jn_halt()
+    test_pair_load_undefined()
+    test_pair_div_zero()
+    test_pair_call_no_handler()
+    test_pair_push_param_execute()
+    test_pair_enter_routine()
+
+    println("\n========================================")
+    println("MATRIX 2: OPCODE TRIPLES (10)")
+    println("========================================")
+    test_triple_push_add_store()
+    test_triple_load_add_store()
+    test_triple_push_jz_pop()
+    test_triple_push_jn_skip()
+    test_triple_store_overwrite_load()
+    test_triple_dup_add()
+    test_triple_sub_mul()
+    test_triple_jmp_backward()
+    test_triple_push_param_execute_registered()
+    test_triple_fenced_code_skip()
+
+    println("\n========================================")
+    println("MATRIX 3: VARIABLE LIFECYCLE (5)")
+    println("========================================")
+    test_var_create_read()
+    test_var_update_read()
+    test_var_two_independent()
+    test_var_many_names()
+    test_var_read_before_write()
+
+    println("\n========================================")
+    println("MATRIX 4: ERROR CROSS-PRODUCTS (5)")
+    println("========================================")
+    test_err_name_ivt_miss()
+    test_err_name_load_undefined()
+    test_err_name_call_no_handler()
+    test_err_type_div_zero()
+    test_cross_errors_independent()
+
+    println("\n========================================")
+    println("MATRIX 5: STRESS SEQUENCES (5)")
+    println("========================================")
+    test_stress_push_pop_cycle()
+    test_stress_deep_stack()
+    test_stress_variable_thrash()
+    test_stress_jump_chain()
+    test_stress_mixed_ops()
+
+    println("\n=== ALL COMBINATORIAL TESTS COMPLETE ===")

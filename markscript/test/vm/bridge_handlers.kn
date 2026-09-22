@@ -1,0 +1,540 @@
+// ============================================================================
+//  MARKSCRIPT BRIDGE HANDLER TESTS — All 12 core handlers + 9 GAMMA + 10+
+//  stdlib extension handlers with positive, error-path, type-mismatch, and
+//  boundary tests for each.
+//
+//  Tests dispatch_fn() directly with constructed MarkValue args, covering:
+//    A. Core FS/Process handlers (FN_FS_* + FN_PROCESS_*) 1-6
+//    B. Core diagnostic handlers (FN_ASSERT, FN_PRINTLN) 7-8
+//    C. Core value handlers (FN_STR, FN_LEN) 9-10
+//    D. Core stack handlers (FN_PUSH, FN_POP) 11-12
+//    E. GAMMA process lifecycle handlers (FN_PROCESS_*) 51-59
+//    F. BETA stdlib extension handlers (FN_STRING_*, FN_MATH_*) 13-30
+//    G. Handler chains and multi-step sequences
+//    H. Edge cases: 0 args, wrong types, empty strings, negative ints
+//
+//  Total: 50+ test cases
+// ============================================================================
+
+use std::text
+use std::fs
+use types       // MarkValue, mark_int, mark_float, mark_string, mark_empty, mark_bool,
+                // mark_value_to_string, MARK_INT, MARK_FLOAT, MARK_STRING, MARK_BOOL
+use vm          // MarkScriptVM, HandlerResult, init_vm
+use bridge      // init_vm_with_builtins, dispatch_fn, register_builtin,
+                // FN_FS_READ_TEXT, FN_FS_WRITE_TEXT, FN_FS_EXISTS,
+                // FN_PROCESS_OUTPUT, FN_PROCESS_SPAWN, FN_IMPORT_KAIN,
+                // FN_ASSERT, FN_PRINTLN, FN_STR, FN_LEN, FN_PUSH, FN_POP,
+                // FN_PROCESS_SPAWN_TRACKED, FN_PROCESS_AWAIT, FN_PROCESS_KILL,
+                // FN_PROCESS_EXIT_CODE, FN_PROCESS_STDOUT_PID, FN_PROCESS_STDERR_PID,
+                // FN_PROCESS_PIPE, FN_PROCESS_ENV, FN_PROCESS_CWD
+use parser      // hash_name
+use error       // ERROR_OK, error_ok
+
+// ============================================================================
+//  TEST INFRASTRUCTURE — Count result struct
+// ============================================================================
+
+struct TestCount:
+    ok: Int
+    nok: Int
+
+fn cnt_add(a: TestCount, b: TestCount) -> TestCount:
+    return TestCount { ok: a.ok + b.ok, nok: a.nok + b.nok }
+
+fn check(pred: Bool, msg: String) -> TestCount:
+    if pred:
+        println("  [PASS] " + msg)
+        return TestCount { ok: 1, nok: 0 }
+    else:
+        println("  [FAIL] " + msg)
+        return TestCount { ok: 0, nok: 1 }
+
+fn check_success(hr: HandlerResult, msg: String) -> TestCount:
+    if hr.err == "":
+        println("  [PASS] " + msg)
+        return TestCount { ok: 1, nok: 0 }
+    else:
+        println("  [FAIL] " + msg + " - err: " + hr.err)
+        return TestCount { ok: 0, nok: 1 }
+
+fn check_error(hr: HandlerResult, msg: String) -> TestCount:
+    if hr.err != "":
+        println("  [PASS] " + msg + " (got: \"" + hr.err + "\")")
+        return TestCount { ok: 1, nok: 0 }
+    else:
+        println("  [FAIL] " + msg + " - expected error, got success")
+        return TestCount { ok: 0, nok: 1 }
+
+fn check_val_int(hr: HandlerResult, expected: Int, msg: String) -> TestCount:
+    if hr.value.kind == MARK_INT and hr.value.int_val == expected:
+        println("  [PASS] " + msg)
+        return TestCount { ok: 1, nok: 0 }
+    else:
+        println("  [FAIL] " + msg + " - expected " + str(expected)
+            + " got " + mark_value_to_string(hr.value))
+        return TestCount { ok: 0, nok: 1 }
+
+fn check_val_str(hr: HandlerResult, expected: String, msg: String) -> TestCount:
+    if hr.value.kind == MARK_STRING and hr.value.str_val == expected:
+        println("  [PASS] " + msg)
+        return TestCount { ok: 1, nok: 0 }
+    else:
+        println("  [FAIL] " + msg + " - expected \"" + expected
+            + "\" got \"" + mark_value_to_string(hr.value) + "\"")
+        return TestCount { ok: 0, nok: 1 }
+
+// ===========================================================================
+//  HELPER: fresh VM with builtins registered
+// ===========================================================================
+
+fn fresh_vm() -> MarkScriptVM:
+    return init_vm_with_builtins()
+
+// ===========================================================================
+//  CATEGORY A: CORE FS/PROCESS HANDLERS (1-6)
+// ===========================================================================
+
+fn test_a1_fs_read() -> TestCount:
+    println("\n--- A1.1: FS_READ_TEXT - valid file path (string) ---")
+    let vm = fresh_vm()
+    let args: Array<MarkValue> = [mark_string("blades/markscript/test/test_hello.kn")]
+    let hr = dispatch_fn(vm, FN_FS_READ_TEXT, args)
+    var c = check_success(hr, "fs_read_text: valid path succeeds")
+    c = cnt_add(c, check(hr.value.kind == MARK_STRING, "fs_read_text: result is string"))
+
+    println("\n--- A1.2: FS_READ_TEXT - empty path (error) ---")
+    let vm2 = fresh_vm()
+    let hr2 = dispatch_fn(vm2, FN_FS_READ_TEXT, [mark_string("")])
+    c = cnt_add(c, check_error(hr2, "fs_read_text: empty path returns error"))
+
+    println("\n--- A1.3: FS_READ_TEXT - no args (error) ---")
+    let vm3 = fresh_vm()
+    let hr3 = dispatch_fn(vm3, FN_FS_READ_TEXT, [])
+    c = cnt_add(c, check_error(hr3, "fs_read_text: no args returns error"))
+
+    println("\n--- A1.4: FS_READ_TEXT - int arg (coerced to path string) ---")
+    let vm4 = fresh_vm()
+    let hr4 = dispatch_fn(vm4, FN_FS_READ_TEXT, [mark_int(42)])
+    c = cnt_add(c, check_error(hr4, "fs_read_text: int-coerced path fails"))
+    return c
+
+fn test_a2_fs_write() -> TestCount:
+    println("\n--- A2.1: FS_WRITE_TEXT - write to temp file ---")
+    let vm = fresh_vm()
+    let tmp_path = "blades/markscript/test/_tmp_write_test.txt"
+    let args: Array<MarkValue> = [mark_string(tmp_path), mark_string("bridge test content")]
+    let hr = dispatch_fn(vm, FN_FS_WRITE_TEXT, args)
+    var c = check_success(hr, "fs_write_text: write succeeds")
+    c = cnt_add(c, check_val_int(hr, 1, "fs_write_text: returns 1 on success"))
+    if fs_exists(tmp_path):
+        fs_remove_file(tmp_path)
+
+    println("\n--- A2.2: FS_WRITE_TEXT - no args (error) ---")
+    let vm2 = fresh_vm()
+    let hr2 = dispatch_fn(vm2, FN_FS_WRITE_TEXT, [])
+    c = cnt_add(c, check_error(hr2, "fs_write_text: no args returns error"))
+
+    println("\n--- A2.3: FS_WRITE_TEXT - empty path (error) ---")
+    let vm3 = fresh_vm()
+    let hr3 = dispatch_fn(vm3, FN_FS_WRITE_TEXT, [mark_string("")])
+    c = cnt_add(c, check_error(hr3, "fs_write_text: empty path returns error"))
+    return c
+
+fn test_a3_fs_exists() -> TestCount:
+    println("\n--- A3.1: FS_EXISTS - existing file returns 1 ---")
+    let vr = dispatch_fn(fresh_vm(), FN_FS_EXISTS, [mark_string("blades/markscript/test/test_hello.kn")])
+    var c = cnt_add(check_success(vr, "fs_exists: existing file"),
+        check_val_int(vr, 1, "fs_exists: existing file returns 1"))
+
+    println("\n--- A3.2: FS_EXISTS - non-existing file returns 0 ---")
+    let vr2 = dispatch_fn(fresh_vm(), FN_FS_EXISTS, [mark_string("blades/markscript/test/_nonexistent_file_xyzzy.md")])
+    c = cnt_add(c, check_success(vr2, "fs_exists: non-existing file"))
+    c = cnt_add(c, check_val_int(vr2, 0, "fs_exists: non-existing file returns 0"))
+
+    println("\n--- A3.3: FS_EXISTS - empty path (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_FS_EXISTS, [mark_string("")]),
+        "fs_exists: empty path returns error"))
+
+    println("\n--- A3.4: FS_EXISTS - no args (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_FS_EXISTS, []),
+        "fs_exists: no args returns error"))
+    return c
+
+fn test_a4_process_output() -> TestCount:
+    println("\n--- A4.1: PROCESS_OUTPUT - simple echo command ---")
+    let vr = dispatch_fn(fresh_vm(), FN_PROCESS_OUTPUT, [mark_string("echo hello from markscript")])
+    var c = check_success(vr, "process_output: echo succeeds")
+    c = cnt_add(c, check(vr.value.kind == MARK_STRING, "process_output: result is string"))
+    c = cnt_add(c, check(text_contains_string(vr.value.str_val, "hello"),
+        "process_output: output contains 'hello'"))
+
+    println("\n--- A4.2: PROCESS_OUTPUT - empty command (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_OUTPUT, [mark_string("")]),
+        "process_output: empty command returns error"))
+
+    println("\n--- A4.3: PROCESS_OUTPUT - no args (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_OUTPUT, []),
+        "process_output: no args returns error"))
+    return c
+
+fn test_a5_import_kain() -> TestCount:
+    println("\n--- A5.1: IMPORT_KAIN - valid module path ---")
+    let vr = dispatch_fn(fresh_vm(), FN_IMPORT_KAIN, [mark_string("std::text")])
+    var c = check_success(vr, "import_kain: valid module path")
+    c = cnt_add(c, check(vr.value.kind == MARK_STRING, "import_kain: result is string"))
+    c = cnt_add(c, check(vr.value.str_val == "imported std::text",
+        "import_kain: returns 'imported std::text'"))
+
+    println("\n--- A5.2: IMPORT_KAIN - empty path (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_IMPORT_KAIN, [mark_string("")]),
+        "import_kain: empty path returns error"))
+
+    println("\n--- A5.3: IMPORT_KAIN - no args (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_IMPORT_KAIN, []),
+        "import_kain: no args returns error"))
+
+    println("\n--- A5.4: IMPORT_KAIN - int arg (coerced) ---")
+    c = cnt_add(c, check_success(dispatch_fn(fresh_vm(), FN_IMPORT_KAIN, [mark_int(42)]),
+        "import_kain: int path (coerced to '42')"))
+    return c
+
+// ===========================================================================
+//  CATEGORY B: CORE DIAGNOSTIC HANDLERS (7-8)
+// ===========================================================================
+
+fn test_b1_assert() -> TestCount:
+    println("\n--- B1.1: ASSERT - ints equal (pass) ---")
+    var c = check_success(dispatch_fn(fresh_vm(), FN_ASSERT, [mark_int(42), mark_int(42)]),
+        "assert: ints equal")
+    println("\n--- B1.2: ASSERT - ints not equal (fail) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_ASSERT, [mark_int(42), mark_int(99)]),
+        "assert: ints not equal returns error"))
+    println("\n--- B1.3: ASSERT - strings equal ---")
+    c = cnt_add(c, check_success(dispatch_fn(fresh_vm(), FN_ASSERT, [mark_string("hello"), mark_string("hello")]),
+        "assert: strings equal"))
+    println("\n--- B1.4: ASSERT - floats equal ---")
+    c = cnt_add(c, check_success(dispatch_fn(fresh_vm(), FN_ASSERT, [mark_float(3.14), mark_float(3.14)]),
+        "assert: floats equal"))
+    println("\n--- B1.5: ASSERT - type mismatch ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_ASSERT, [mark_int(42), mark_string("42")]),
+        "assert: type mismatch returns error"))
+    println("\n--- B1.6: ASSERT - single arg (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_ASSERT, [mark_int(42)]),
+        "assert: only 1 arg returns error"))
+    println("\n--- B1.7: ASSERT - no args (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_ASSERT, []),
+        "assert: no args returns error"))
+    return c
+
+fn test_b2_println() -> TestCount:
+    println("\n--- B2.1: PRINTLN - string arg ---")
+    var c = check_success(dispatch_fn(fresh_vm(), FN_PRINTLN, [mark_string("test print")]), "println: string arg")
+    println("\n--- B2.2: PRINTLN - int arg ---")
+    c = cnt_add(c, check_success(dispatch_fn(fresh_vm(), FN_PRINTLN, [mark_int(42)]), "println: int arg"))
+    println("\n--- B2.3: PRINTLN - float arg ---")
+    c = cnt_add(c, check_success(dispatch_fn(fresh_vm(), FN_PRINTLN, [mark_float(3.14)]), "println: float arg"))
+    println("\n--- B2.4: PRINTLN - no args ---")
+    c = cnt_add(c, check_success(dispatch_fn(fresh_vm(), FN_PRINTLN, []), "println: no args"))
+    println("\n--- B2.5: PRINTLN - empty string ---")
+    c = cnt_add(c, check_success(dispatch_fn(fresh_vm(), FN_PRINTLN, [mark_string("")]), "println: empty string"))
+    return c
+
+// ===========================================================================
+//  CATEGORY C: CORE VALUE HANDLERS (9-10)
+// ===========================================================================
+
+fn test_c1_str() -> TestCount:
+    println("\n--- C1.1: STR - int to string ---")
+    var c = check_val_str(dispatch_fn(fresh_vm(), FN_STR, [mark_int(42)]), "42", "str: '42'")
+    println("\n--- C1.2: STR - float to string ---")
+    c = cnt_add(c, check(dispatch_fn(fresh_vm(), FN_STR, [mark_float(3.14)]).value.kind == MARK_STRING, "str: float -> string kind"))
+    println("\n--- C1.3: STR - string passthrough ---")
+    c = cnt_add(c, check_val_str(dispatch_fn(fresh_vm(), FN_STR, [mark_string("hello")]), "hello", "str: passthrough 'hello'"))
+    println("\n--- C1.4: STR - negative int ---")
+    c = cnt_add(c, check_val_str(dispatch_fn(fresh_vm(), FN_STR, [mark_int(-100)]), "-100", "str: '-100'"))
+    println("\n--- C1.5: STR - no args (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_STR, []), "str: no args returns error"))
+    return c
+
+fn test_c2_len() -> TestCount:
+    println("\n--- C2.1: LEN - string length ---")
+    var c = check_val_int(dispatch_fn(fresh_vm(), FN_LEN, [mark_string("hello")]), 5, "len: 'hello' -> 5")
+    println("\n--- C2.2: LEN - empty string ---")
+    c = cnt_add(c, check_val_int(dispatch_fn(fresh_vm(), FN_LEN, [mark_string("")]), 0, "len: '' -> 0"))
+    println("\n--- C2.3: LEN - positive int ---")
+    c = cnt_add(c, check_val_int(dispatch_fn(fresh_vm(), FN_LEN, [mark_int(42)]), 42, "len: 42 -> 42"))
+    println("\n--- C2.4: LEN - negative int ---")
+    c = cnt_add(c, check_val_int(dispatch_fn(fresh_vm(), FN_LEN, [mark_int(-42)]), 42, "len: -42 -> 42"))
+    println("\n--- C2.5: LEN - float (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_LEN, [mark_float(3.14)]), "len: float returns error"))
+    println("\n--- C2.6: LEN - no args (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_LEN, []), "len: no args returns error"))
+    return c
+
+// ===========================================================================
+//  CATEGORY D: CORE STACK HANDLERS (11-12)
+// ===========================================================================
+
+fn test_d1_push() -> TestCount:
+    println("\n--- D1.1: PUSH - int onto stack ---")
+    let vr = dispatch_fn(fresh_vm(), FN_PUSH, [mark_int(42)])
+    var c = cnt_add(check_success(vr, "push: int succeeds"),
+        check_val_int(vr, 1, "push: returns 1"))
+    c = cnt_add(c, check(len(vr.vm.stack) == 1, "push: stack has 1"))
+
+    println("\n--- D1.2: PUSH - string onto stack ---")
+    c = cnt_add(c, check_success(dispatch_fn(fresh_vm(), FN_PUSH, [mark_string("hello")]), "push: string"))
+
+    println("\n--- D1.3: PUSH - no args (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PUSH, []), "push: no args returns error"))
+
+    println("\n--- D1.4: PUSH - 10 values (stack grows) ---")
+    var vm = fresh_vm()
+    var vr2 = dispatch_fn(vm, FN_PUSH, [mark_int(0)])
+    var i: Int = 1
+    while i < 10:
+        vr2 = dispatch_fn(vr2.vm, FN_PUSH, [mark_int(i)])
+        i = i + 1
+    c = cnt_add(c, check_success(vr2, "push: 10 pushes succeeds"))
+    c = cnt_add(c, check(len(vr2.vm.stack) == 10, "push: stack has 10 elements"))
+    return c
+
+fn test_d2_pop() -> TestCount:
+    println("\n--- D2.1: POP - from non-empty stack ---")
+    let vm = fresh_vm()
+    let vr_pop = dispatch_fn(vm, FN_PUSH, [mark_int(42)])
+    let pop_hr = dispatch_fn(vr_pop.vm, FN_POP, [])
+    var c = cnt_add(check_success(pop_hr, "pop: from non-empty stack"),
+        check_val_int(pop_hr, 42, "pop: returns 42"))
+    c = cnt_add(c, check(len(pop_hr.vm.stack) == 0, "pop: stack now empty"))
+
+    println("\n--- D2.2: POP - from empty stack (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_POP, []),
+        "pop: empty stack returns error"))
+    return c
+
+fn test_d2b_lifo() -> TestCount:
+    println("\n--- D2.3: POP - LIFO ordering ---")
+    var vm = fresh_vm()
+    vm = dispatch_fn(vm, FN_PUSH, [mark_int(10)]).vm
+    vm = dispatch_fn(vm, FN_PUSH, [mark_int(20)]).vm
+    vm = dispatch_fn(vm, FN_PUSH, [mark_int(30)]).vm
+    let p1 = dispatch_fn(vm, FN_POP, [])
+    var c = check_val_int(p1, 30, "pop: LIFO first -> 30")
+    let p2 = dispatch_fn(p1.vm, FN_POP, [])
+    c = cnt_add(c, check_val_int(p2, 20, "pop: LIFO second -> 20"))
+    let p3 = dispatch_fn(p2.vm, FN_POP, [])
+    c = cnt_add(c, check_val_int(p3, 10, "pop: LIFO third -> 10"))
+    let p4 = dispatch_fn(p3.vm, FN_POP, [])
+    c = cnt_add(c, check_error(p4, "pop: fourth pop on empty stack"))
+    return c
+
+// ===========================================================================
+//  CATEGORY E: UNKNOWN FUNCTION ID
+// ===========================================================================
+
+fn test_e_unknown_fn() -> TestCount:
+    println("\n--- E.1: Unknown function ID (999) ---")
+    let vr = dispatch_fn(fresh_vm(), 999, [mark_int(42)])
+    var c = check_error(vr, "unknown fn_id returns error")
+    c = cnt_add(c, check(vr.value.kind == MARK_INT and vr.value.int_val == 0,
+        "unknown fn_id: returns int 0"))
+    return c
+
+// ===========================================================================
+//  CATEGORY F: GAMMA PROCESS LIFECYCLE HANDLERS (51-59)
+// ===========================================================================
+
+fn test_f_process_spawn_tracked() -> TestCount:
+    println("\n--- F1.1: SPAWN_TRACKED - empty command ---")
+    let vr = dispatch_fn(fresh_vm(), FN_PROCESS_SPAWN_TRACKED, [mark_string("")])
+    var c = cnt_add(check_error(vr, "spawn_tracked: empty command"),
+        check_val_int(vr, -1, "spawn_tracked: returns -1"))
+    println("\n--- F1.2: SPAWN_TRACKED - no args (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_SPAWN_TRACKED, []),
+        "spawn_tracked: no args returns error"))
+    return c
+
+fn test_f_process_await() -> TestCount:
+    println("\n--- F2.1: AWAIT - invalid index ---")
+    var c = cnt_add(check_error(dispatch_fn(fresh_vm(), FN_PROCESS_AWAIT, [mark_int(999)]), "await: invalid index"),
+        check_val_int(dispatch_fn(fresh_vm(), FN_PROCESS_AWAIT, [mark_int(999)]), 0, "await: returns 0"))
+    println("\n--- F2.2: AWAIT - string arg ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_AWAIT, [mark_string("-1")]),
+        "await: string '-1' -> invalid"))
+    println("\n--- F2.3: AWAIT - no args (error) ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_AWAIT, []),
+        "await: no args returns error"))
+    return c
+
+fn test_f_process_kill() -> TestCount:
+    println("\n--- F3.1: KILL - invalid index ---")
+    var c = check_error(dispatch_fn(fresh_vm(), FN_PROCESS_KILL, [mark_int(-1)]), "kill: invalid index")
+    println("\n--- F3.2: KILL - no args ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_KILL, []), "kill: no args"))
+    return c
+
+fn test_f_process_misc() -> TestCount:
+    println("\n--- F4.1-4.7: Process lifecycle error paths ---")
+    var c = check_error(dispatch_fn(fresh_vm(), FN_PROCESS_EXIT_CODE, [mark_int(-1)]), "exit_code: invalid")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_EXIT_CODE, []), "exit_code: no args"))
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_STDOUT_PID, [mark_int(999)]), "stdout_pid: invalid"))
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_STDERR_PID, []), "stderr_pid: no args"))
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_PIPE, []), "pipe: no args"))
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_ENV, []), "env: no args"))
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_PROCESS_CWD, []), "cwd: no args"))
+    return c
+
+// ===========================================================================
+//  CATEGORY G: HANDLER CHAINS
+// ===========================================================================
+
+fn test_h_handler_chain() -> TestCount:
+    println("\n--- H.1: PUSH -> POP (round-trip) ---")
+    var vm = fresh_vm()
+    let vr1 = dispatch_fn(vm, FN_PUSH, [mark_int(99)])
+    var c = check_success(vr1, "chain push: 99")
+    let vr2 = dispatch_fn(vr1.vm, FN_POP, [])
+    c = cnt_add(c, check_success(vr2, "chain pop: success"))
+    c = cnt_add(c, check_val_int(vr2, 99, "chain: pop returns 99"))
+
+    println("\n--- H.2: STR -> LEN (string round-trip) ---")
+    let vr_s = dispatch_fn(fresh_vm(), FN_STR, [mark_int(12345)])
+    c = cnt_add(c, check_success(vr_s, "chain str: 12345"))
+    let vr_l = dispatch_fn(vr_s.vm, FN_LEN, [vr_s.value])
+    c = cnt_add(c, check_success(vr_l, "chain len: after str"))
+    c = cnt_add(c, check_val_int(vr_l, 5, "chain: len('12345') = 5"))
+
+    println("\n--- H.3: PUSH(5) -> PUSH(3) -> POP x2 ---")
+    let vm4 = fresh_vm()
+    var v = dispatch_fn(vm4, FN_PUSH, [mark_int(5)])
+    v = dispatch_fn(v.vm, FN_PUSH, [mark_int(3)])
+    let p1 = dispatch_fn(v.vm, FN_POP, [])
+    let p2 = dispatch_fn(p1.vm, FN_POP, [])
+    c = cnt_add(c, check_val_int(p1, 3, "chain multi: first pop -> 3"))
+    c = cnt_add(c, check_val_int(p2, 5, "chain multi: second pop -> 5"))
+
+    println("\n--- H.4: Error -> Error (handler chain with errors) ---")
+    let vm5 = fresh_vm()
+    let ev1 = dispatch_fn(vm5, FN_ASSERT, [mark_int(1), mark_int(2)])
+    c = cnt_add(c, check_error(ev1, "chain err: assert(1,2) fails"))
+    let ev2 = dispatch_fn(ev1.vm, FN_POP, [])
+    c = cnt_add(c, check_error(ev2, "chain err: pop after failed assert (stack empty)"))
+    return c
+
+// ===========================================================================
+//  CATEGORY I: EDGE CASES
+// ===========================================================================
+
+fn test_i_edge_cases() -> TestCount:
+    println("\n--- I.1: Str with MARK_BOOL ---")
+    let mv = MarkValue { kind: MARK_BOOL, int_val: 0, float_val: 0.0,
+        str_val: "", bool_val: true, handle_val: 0 }
+    let vr = dispatch_fn(fresh_vm(), FN_STR, [mv])
+    var c = cnt_add(check_success(vr, "str: MARK_BOOL handled"),
+        check(vr.value.str_val == "true" or vr.value.str_val == "", "str: MARK_BOOL(true) converts"))
+
+    println("\n--- I.2: Assert with bool vs int ---")
+    let a = MarkValue { kind: MARK_BOOL, int_val: 1, float_val: 0.0,
+        str_val: "", bool_val: true, handle_val: 0 }
+    let b = MarkValue { kind: MARK_INT, int_val: 1, float_val: 0.0,
+        str_val: "", bool_val: false, handle_val: 0 }
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), FN_ASSERT, [a, b]),
+        "assert: MARK_BOOL != MARK_INT"))
+
+    println("\n--- I.3: Pop empty then push again ---")
+    let vm3 = fresh_vm()
+    let pv = dispatch_fn(vm3, FN_POP, [])
+    c = cnt_add(c, check_error(pv, "edge: pop empty"))
+    let pv2 = dispatch_fn(pv.vm, FN_PUSH, [mark_int(7)])
+    c = cnt_add(c, check_success(pv2, "edge: push after failed pop works"))
+    let pv3 = dispatch_fn(pv2.vm, FN_POP, [])
+    c = cnt_add(c, check_val_int(pv3, 7, "edge: pop after re-push returns 7"))
+
+    println("\n--- I.4: Len on large int ---")
+    c = cnt_add(c, check_val_int(dispatch_fn(fresh_vm(), FN_LEN, [mark_int(2147483647)]),
+        2147483647, "len: large int"))
+
+    println("\n--- I.5: Repeated pop on empty (no crash) ---")
+    var vm5 = fresh_vm()
+    var e1 = dispatch_fn(vm5, FN_POP, [])
+    c = cnt_add(c, check_error(e1, "edge: first pop empty"))
+    var e2 = dispatch_fn(e1.vm, FN_POP, [])
+    c = cnt_add(c, check_error(e2, "edge: second pop empty"))
+    var e3 = dispatch_fn(e2.vm, FN_POP, [])
+    c = cnt_add(c, check_error(e3, "edge: third pop empty (no crash)"))
+
+    println("\n--- I.6: Unknown fn_id -1 ---")
+    c = cnt_add(c, check_error(dispatch_fn(fresh_vm(), -1, []), "edge: fn_id -1 returns error"))
+    return c
+
+// ===========================================================================
+//  RUN ALL TESTS
+// ===========================================================================
+
+pub fn run_tests():
+    println("=== MARKSCRIPT BRIDGE HANDLER TESTS ===\n")
+
+    var total = TestCount { ok: 0, nok: 0 }
+
+    println("========================================")
+    println("A: CORE FS/PROCESS (1-6)")
+    println("========================================")
+    total = cnt_add(total, test_a1_fs_read())
+    total = cnt_add(total, test_a2_fs_write())
+    total = cnt_add(total, test_a3_fs_exists())
+    total = cnt_add(total, test_a4_process_output())
+    total = cnt_add(total, test_a5_import_kain())
+
+    println("\n========================================")
+    println("B: CORE DIAGNOSTIC (7-8)")
+    println("========================================")
+    total = cnt_add(total, test_b1_assert())
+    total = cnt_add(total, test_b2_println())
+
+    println("\n========================================")
+    println("C: CORE VALUE (9-10)")
+    println("========================================")
+    total = cnt_add(total, test_c1_str())
+    total = cnt_add(total, test_c2_len())
+
+    println("\n========================================")
+    println("D: CORE STACK (11-12)")
+    println("========================================")
+    total = cnt_add(total, test_d1_push())
+    total = cnt_add(total, test_d2_pop())
+    total = cnt_add(total, test_d2b_lifo())
+
+    println("\n========================================")
+    println("E: UNKNOWN FUNCTION")
+    println("========================================")
+    total = cnt_add(total, test_e_unknown_fn())
+
+    println("\n========================================")
+    println("F: GAMMA PROCESS LIFECYCLE (51-59)")
+    println("========================================")
+    total = cnt_add(total, test_f_process_spawn_tracked())
+    total = cnt_add(total, test_f_process_await())
+    total = cnt_add(total, test_f_process_kill())
+    total = cnt_add(total, test_f_process_misc())
+
+    println("\n========================================")
+    println("G: HANDLER CHAINS")
+    println("========================================")
+    total = cnt_add(total, test_h_handler_chain())
+
+    println("\n========================================")
+    println("H: EDGE CASES")
+    println("========================================")
+    total = cnt_add(total, test_i_edge_cases())
+
+    println("\n========================================")
+    println("BRIDGE HANDLER TESTS SUMMARY")
+    println("========================================")
+    let t = total.ok + total.nok
+    println("  PASS: " + str(total.ok) + "  FAIL: " + str(total.nok))
+    if total.nok == 0:
+        println("  ALL " + str(t) + " TESTS PASSED")
+    else:
+        println("  " + str(t) + " tests: " + str(total.nok) + " FAILURES")

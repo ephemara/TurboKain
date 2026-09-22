@@ -1,0 +1,3 @@
+| file | samples | nseg | skdev_x1e3 | skfrac_x1e4 | skflag | verdict |
+|---|---|---|---|---|---|---|
+| D:/TurboKain/reports/2026-09-22_first-light/off_ch44.f32 | 3670016 | 512 | 1073 | 4 | 0 | CLEAN |

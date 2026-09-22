@@ -1,0 +1,123 @@
+// Quick runner: compiles test_markscript.md and disassembles.
+use std::text
+use std::fs
+use lexer
+use parser
+
+fn opcode_name(op: Int) -> String:
+    if op == OP_HALT:           return "HALT"
+    elif op == OP_ENTER_DOMAIN: return "ENTER_DOMAIN"
+    elif op == OP_ROUTINE_HEADER: return "ROUTINE_HEADER"
+    elif op == OP_PUSH_PARAM:   return "PUSH_PARAM"
+    elif op == OP_EXECUTE_CALL: return "EXECUTE_CALL"
+    elif op == OP_PUSH_MATRIX:  return "PUSH_MATRIX"
+    elif op == OP_FENCED_CODE:  return "FENCED_CODE"
+    elif op == OP_PUSH_STACK:   return "PUSH_STACK"
+    elif op == OP_POP_STACK:    return "POP_STACK"
+    elif op == OP_DUP:          return "DUP"
+    elif op == OP_CALL:         return "CALL"
+    elif op == OP_RET:          return "RET"
+    elif op == OP_JMP:          return "JMP"
+    elif op == OP_JZ:           return "JZ"
+    elif op == OP_ADD:          return "ADD"
+    elif op == OP_SUB:          return "SUB"
+    elif op == OP_MUL:          return "MUL"
+    elif op == OP_DIV:          return "DIV"
+    elif op == OP_LOAD_VAR:     return "LOAD_VAR"
+    elif op == OP_STORE_VAR:    return "STORE_VAR"
+    elif op == OP_JN:           return "JN"
+    else:                       return "UNKNOWN"
+
+fn is_no_operand(op: Int) -> Bool:
+    if op == OP_HALT: return true
+    if op == OP_EXECUTE_CALL: return true
+    if op == OP_POP_STACK: return true
+    if op == OP_DUP: return true
+    if op == OP_CALL: return true
+    if op == OP_RET: return true
+    if op == OP_ADD: return true
+    if op == OP_SUB: return true
+    if op == OP_MUL: return true
+    if op == OP_DIV: return true
+    return false
+
+pub fn main():
+    let source = fs_read_text("examples/test_markscript.md")
+    let lex = create_lexer(source)
+    let bc = compile_source(lex)
+
+    println("=== BYTECODE (" + str(len(bc)) + " ints) ===\n")
+
+    var ip: Int = 0
+    let bclen = len(bc)
+    while ip < bclen:
+        let op = bc[ip]
+        let name = opcode_name(op)
+
+        if is_no_operand(op):
+            println(str(ip) + ": " + name)
+            ip = ip + 1
+
+        elif op == OP_FENCED_CODE:
+            if ip + 2 < bclen:
+                println(str(ip) + ": " + name + " lang=" + str(bc[ip + 1]) + " content=" + str(bc[ip + 2]))
+                ip = ip + 3
+            else:
+                ip = bclen
+
+        elif op == OP_JMP or op == OP_JZ or op == OP_JN:
+            if ip + 1 < bclen:
+                println(str(ip) + ": " + name + " → " + str(bc[ip + 1]))
+                ip = ip + 2
+            else:
+                ip = bclen
+
+        elif op == OP_PUSH_MATRIX:
+            if ip + 4 < bclen:
+                let dc = bc[ip + 4]
+                let cc = 0
+                if ip + 5 < bclen:
+                    cc = bc[ip + 5]
+                println(str(ip) + ": " + name + " h=" + str(bc[ip + 1]) + " c=" + str(bc[ip + 2]) + " r=" + str(bc[ip + 3]) + " data=" + str(dc))
+                ip = ip + 6 + cc + dc
+            else:
+                ip = bclen
+
+        else:
+            if ip + 1 < bclen:
+                println(str(ip) + ": " + name + " " + str(bc[ip + 1]))
+                ip = ip + 2
+            else:
+                ip = bclen
+
+    // Count VM opcodes (7-20) emitted vs structural (0-6)
+    var vm_count: Int = 0
+    var struct_count: Int = 0
+    var ip2: Int = 0
+    while ip2 < bclen:
+        let op2 = bc[ip2]
+        if op2 >= 7 and op2 <= 20:
+            vm_count = vm_count + 1
+        elif op2 >= 0 and op2 <= 6:
+            struct_count = struct_count + 1
+        // advance
+        if is_no_operand(op2):
+            ip2 = ip2 + 1
+        elif op2 == OP_FENCED_CODE:
+            ip2 = ip2 + 3
+        elif op2 == OP_PUSH_MATRIX:
+            ip2 = ip2 + 5
+            if ip2 < bclen:
+                let dc2 = bc[ip2 - 1]
+                let cc2 = bc[ip2]
+                ip2 = ip2 + 1 + cc2 + dc2
+        else:
+            ip2 = ip2 + 2
+
+    println("\n=== STATS ===")
+    println("Structural opcodes (0-6): " + str(struct_count))
+    println("VM opcodes (7-20):       " + str(vm_count))
+    if vm_count > 0:
+        println("SUCCESS: VM opcodes 7-20 are now alive!")
+    else:
+        println("NOTE: No VM opcodes emitted")

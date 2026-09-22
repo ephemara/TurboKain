@@ -5,3 +5,10 @@ out/
 *.exe
 *.pdb
 *.ll
+# signal data (regenerable via slice.exe; receipts, not bytes, are the record)
+*.f32
+*.raw
+*.bin
+*.dat
+*.fil
+*.h5

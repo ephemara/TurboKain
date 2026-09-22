@@ -1,0 +1,15 @@
+use jit
+
+fn main() -> Int with Unsafe:
+    let bc: Array<Int> = [0]
+    println("Compiling [0]...")
+    let r = jit_compile_block(bc, 0, 1)
+    println("Error: '" + r.error + "'")
+    println("Size: " + str(r.code_size))
+    if r.code_size > 20:
+        println("Suspiciously large for halt-only")
+        return 1
+    println("Calling...")
+    let res = call_jit(r.code_ptr)
+    println("Result: " + str(res))
+    return 0
