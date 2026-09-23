@@ -1,0 +1,89 @@
+{
+  "generated": "2026-09-23T00:48:09",
+  "tag": "frb_smoke",
+  "git_rev": "51915d8",
+  "host": {
+    "python": "3.14.7",
+    "platform": "Windows-2025Server-10.0.26100-SP0",
+    "machine": "AMD64",
+    "node": "Quin"
+  },
+  "plan": {
+    "input": "D:\\data\\raw\\blc20_guppi_57991_49905_DIAG_FRB121102_0011.0000.raw",
+    "tools": [
+      "sk_gate",
+      "xeno_scan"
+    ],
+    "chans": [
+      44
+    ],
+    "pols": [
+      0
+    ],
+    "blocks": 2,
+    "fs": null,
+    "workdir": "D:\\TurboKain\\reports\\2026-09-23_frb_smoke_scan"
+  },
+  "fingerprint": {
+    "path": "D:\\data\\raw\\blc20_guppi_57991_49905_DIAG_FRB121102_0011.0000.raw",
+    "size": 17180721152,
+    "mtime": "2026-09-22T09:43:53",
+    "head_sha256_1MiB": "ead7d4167651f5f2"
+  },
+  "stages": [
+    {
+      "stage": "slice",
+      "chan": 44,
+      "pol": 0,
+      "argv": [
+        "D:\\TurboKain\\kain\\core\\slice.exe",
+        "--in",
+        "D:\\data\\raw\\blc20_guppi_57991_49905_DIAG_FRB121102_0011.0000.raw",
+        "--chan",
+        "44",
+        "--pol",
+        "0",
+        "--out",
+        "D:\\TurboKain\\reports\\2026-09-23_frb_smoke_scan\\ch44_p0.f32",
+        "--blocks",
+        "2"
+      ],
+      "exit": 0,
+      "seconds": 0.09534939998411573,
+      "log": "D:\\TurboKain\\reports\\2026-09-23_frb_smoke_scan\\logs\\slice_ch44_p0.log"
+    },
+    {
+      "stage": "sk_gate",
+      "chan": 44,
+      "pol": 0,
+      "argv": [
+        "D:\\TurboKain\\kain\\core\\sk_gate.exe",
+        "--in",
+        "D:\\TurboKain\\reports\\2026-09-23_frb_smoke_scan\\ch44_p0.f32",
+        "--out",
+        "D:\\TurboKain\\reports\\2026-09-23_frb_smoke_scan\\sk_gate_ch44_p0"
+      ],
+      "exit": 0,
+      "seconds": 0.13066249998519197,
+      "log": "D:\\TurboKain\\reports\\2026-09-23_frb_smoke_scan\\logs\\sk_gate_ch44_p0.log"
+    },
+    {
+      "stage": "xeno_scan",
+      "chan": 44,
+      "pol": 0,
+      "argv": [
+        "D:\\TurboKain\\kain\\core\\xeno_scan.exe",
+        "--in",
+        "D:\\TurboKain\\reports\\2026-09-23_frb_smoke_scan\\ch44_p0.f32",
+        "--out",
+        "D:\\TurboKain\\reports\\2026-09-23_frb_smoke_scan\\xeno_scan_ch44_p0"
+      ],
+      "exit": 0,
+      "seconds": 0.13890359998913482,
+      "log": "D:\\TurboKain\\reports\\2026-09-23_frb_smoke_scan\\logs\\xeno_scan_ch44_p0.log"
+    }
+  ],
+  "summary": "D:\\TurboKain\\reports\\2026-09-23_frb_smoke_scan\\summary.tsv",
+  "row_count": 3,
+  "failures": []
+}

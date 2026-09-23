@@ -1,0 +1,1074 @@
+// ============================================================================
+// config.kn — TurboKain 05: config-driven CLI (M7: kill hardcoded constants)
+//
+// Oracle: E:/SetiYeti python/seti_config.py (DEFAULTS + resolve order).
+// One preset drives every detector: header-derived FS/geometry wins over
+// preset/defaults, CLI --set wins over everything. No new hardcoded
+// constants — freeze a value here with a why comment, and it rides the
+// preset file, not the source.
+//
+// Precedence (low -> high): defaults -> preset file -> raw header
+// (fs/freq/bw/nchan/npol/nbits/tbin only) -> --set + shorthand flags.
+//
+// Preset format: `key = value` lines, `#` comments, `[section]` ignored.
+// Also accepts `"key": value` JSON-ish lines (tolerant parser). Unknown
+// keys are quarantined (counted, reported, never applied).
+//
+// Header derive: 32 KB preflight via fs_read_text_range (small-read rule —
+// never the whole file), OBSFREQ/OBSBW/TBIN/OBSNCHAN|NCHAN/NPOL/NBITS via
+// the slice.kn END-hunt-free extract. FS = 1/TBIN, 1dp (str(Float)
+// truncates — scaled-int format, same ban as boxcar_bank).
+//
+//   config --show [--preset P] [--raw R] [--set k=v ...] [--data-dir D]
+//   config --json [...]            (resolved JSON to stdout)
+//   config --get KEY [...]         (bare value, for shell: FS=$(...))
+//   config --out resolved.json [--out-md t.md] [--csv r.csv] [...]
+//   config --init template.toml    (default preset with why comments)
+//   config --prove                 (self-test, no files)
+//
+// Shorthands (all src=cli): --fs --freq-mhz --bw-mhz --nchan --npol
+// --dm-max --dm-trials --pulse-sigma --fold-sigma --seg --topk
+//
+// Exit codes: 0 ok, 1 help / prove FAIL, 2 error.
+// Tables are KBs — fs bridge only, no bulk IO, no kernel32.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::text
+
+const EXIT_OK: Int = 0
+const EXIT_HELP: Int = 1
+const EXIT_ERROR: Int = 2
+
+// ── text -> numbers ─────────────────────────────────────────────────────────
+fn parse_int_text(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var sign: Int = 1
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = -1
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var value: Int = 0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        var digit: Int = 0
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return value * sign
+        value = value * 10 + digit
+        index = index + 1
+    return value * sign
+
+// Float with exponent (headers write TBIN as 3.41333334E-07; argv never
+// needs it, but the header derive does — boxcar's parser has no E form).
+fn parse_float_exp(text: String) -> Float:
+    var t: String = text_trim_string(text)
+    if len(t) == 0:
+        return 0.0
+    var sign: Float = 1.0
+    var index: Int = 0
+    if char_at(t, 0) == "-":
+        sign = 0.0 - 1.0
+        index = 1
+    elif char_at(t, 0) == "+":
+        index = 1
+    var whole: Float = 0.0
+    while index < len(t):
+        let ch: String = char_at(t, index)
+        if ch == ".":
+            break
+        if ch == "e" or ch == "E":
+            break
+        var digit: Float = 0.0
+        if ch == "0":
+            digit = 0.0
+        elif ch == "1":
+            digit = 1.0
+        elif ch == "2":
+            digit = 2.0
+        elif ch == "3":
+            digit = 3.0
+        elif ch == "4":
+            digit = 4.0
+        elif ch == "5":
+            digit = 5.0
+        elif ch == "6":
+            digit = 6.0
+        elif ch == "7":
+            digit = 7.0
+        elif ch == "8":
+            digit = 8.0
+        elif ch == "9":
+            digit = 9.0
+        else:
+            return sign * whole
+        whole = whole * 10.0 + digit
+        index = index + 1
+    if index < len(t):
+        if char_at(t, index) == ".":
+            index = index + 1
+            var div: Float = 10.0
+            while index < len(t):
+                let ch2: String = char_at(t, index)
+                if ch2 == "e" or ch2 == "E":
+                    break
+                var d2: Float = 0.0
+                if ch2 == "0":
+                    d2 = 0.0
+                elif ch2 == "1":
+                    d2 = 1.0
+                elif ch2 == "2":
+                    d2 = 2.0
+                elif ch2 == "3":
+                    d2 = 3.0
+                elif ch2 == "4":
+                    d2 = 4.0
+                elif ch2 == "5":
+                    d2 = 5.0
+                elif ch2 == "6":
+                    d2 = 6.0
+                elif ch2 == "7":
+                    d2 = 7.0
+                elif ch2 == "8":
+                    d2 = 8.0
+                elif ch2 == "9":
+                    d2 = 9.0
+                else:
+                    return sign * whole
+                whole = whole + d2 / div
+                div = div * 10.0
+                index = index + 1
+    var base: Float = sign * whole
+    if index < len(t):
+        if char_at(t, index) == "e" or char_at(t, index) == "E":
+            index = index + 1
+            var esign: Int = 1
+            if index < len(t):
+                if char_at(t, index) == "-":
+                    esign = -1
+                    index = index + 1
+                elif char_at(t, index) == "+":
+                    index = index + 1
+            var exp: Int = 0
+            while index < len(t):
+                let ch3: String = char_at(t, index)
+                var d3: Int = -1
+                if ch3 == "0":
+                    d3 = 0
+                elif ch3 == "1":
+                    d3 = 1
+                elif ch3 == "2":
+                    d3 = 2
+                elif ch3 == "3":
+                    d3 = 3
+                elif ch3 == "4":
+                    d3 = 4
+                elif ch3 == "5":
+                    d3 = 5
+                elif ch3 == "6":
+                    d3 = 6
+                elif ch3 == "7":
+                    d3 = 7
+                elif ch3 == "8":
+                    d3 = 8
+                elif ch3 == "9":
+                    d3 = 9
+                else:
+                    break
+                exp = exp * 10 + d3
+                index = index + 1
+            var scale: Float = 1.0
+            var k: Int = 0
+            while k < exp:
+                if esign == 1:
+                    scale = scale * 10.0
+                else:
+                    scale = scale / 10.0
+                k = k + 1
+            return base * scale
+    return base
+
+fn find_from(hay: String, needle: String, start: Int) -> Int:
+    let hn: Int = len(hay)
+    let nn: Int = len(needle)
+    if nn == 0:
+        return start
+    var i: Int = start
+    if i < 0:
+        i = 0
+    while i + nn <= hn:
+        var j: Int = 0
+        var hit: Int = 1
+        while j < nn:
+            if char_at(hay, i + j) != char_at(needle, j):
+                hit = 0
+            j = j + 1
+        if hit == 1:
+            return i
+        i = i + 1
+    return -1
+
+// GUPPI header card value (slice.kn extract, no dependency).
+fn extract_value_string(header: String, key: String) -> String:
+    let kp: Int = find_from(header, key, 0)
+    if kp < 0:
+        return ""
+    let ep: Int = find_from(header, "=", kp)
+    if ep < 0:
+        return ""
+    let hn: Int = len(header)
+    var s: Int = ep + 1
+    var skipping: Int = 1
+    while s < hn:
+        if skipping == 1:
+            if char_at(header, s) == " ":
+                s = s + 1
+            else:
+                skipping = 0
+        else:
+            break
+    var e: Int = s
+    var done: Int = 0
+    while e < hn:
+        if done == 0:
+            let c: String = char_at(header, e)
+            if c == " ":
+                done = 1
+            elif c == "/":
+                done = 1
+            else:
+                e = e + 1
+        else:
+            break
+    if e <= s:
+        return ""
+    return text_substring_string(header, s, e - s)
+
+// ASCII lowercase (manual — avoids unproven stdlib symbols in this lane).
+fn lower_ascii(s: String) -> String:
+    var r: String = ""
+    var i: Int = 0
+    while i < len(s):
+        let c: String = char_at(s, i)
+        var lc: String = c
+        if c == "A":
+            lc = "a"
+        elif c == "B":
+            lc = "b"
+        elif c == "C":
+            lc = "c"
+        elif c == "D":
+            lc = "d"
+        elif c == "E":
+            lc = "e"
+        elif c == "F":
+            lc = "f"
+        elif c == "G":
+            lc = "g"
+        elif c == "H":
+            lc = "h"
+        elif c == "I":
+            lc = "i"
+        elif c == "J":
+            lc = "j"
+        elif c == "K":
+            lc = "k"
+        elif c == "L":
+            lc = "l"
+        elif c == "M":
+            lc = "m"
+        elif c == "N":
+            lc = "n"
+        elif c == "O":
+            lc = "o"
+        elif c == "P":
+            lc = "p"
+        elif c == "Q":
+            lc = "q"
+        elif c == "R":
+            lc = "r"
+        elif c == "S":
+            lc = "s"
+        elif c == "T":
+            lc = "t"
+        elif c == "U":
+            lc = "u"
+        elif c == "V":
+            lc = "v"
+        elif c == "W":
+            lc = "w"
+        elif c == "X":
+            lc = "x"
+        elif c == "Y":
+            lc = "y"
+        elif c == "Z":
+            lc = "z"
+        r = r + lc
+        i = i + 1
+    return r
+
+// Strip one layer of surrounding single/double quotes, then trim.
+fn strip_quotes(s: String) -> String:
+    var t: String = text_trim_string(s)
+    if len(t) >= 2:
+        let f: String = char_at(t, 0)
+        let l: String = char_at(t, len(t) - 1)
+        if f == text_chr(34) and l == text_chr(34):
+            return text_trim_string(text_substring_string(t, 1, len(t) - 2))
+        if f == "'" and l == "'":
+            return text_trim_string(text_substring_string(t, 1, len(t) - 2))
+    return t
+
+// Numeric test for JSON quoting (empty = not numeric -> null).
+fn is_numeric_string(s: String) -> Int:
+    if len(s) == 0:
+        return 0
+    var i: Int = 0
+    while i < len(s):
+        let c: String = char_at(s, i)
+        var ok: Int = 0
+        if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
+            ok = 1
+        elif c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
+            ok = 1
+        elif c == "." or c == "-" or c == "+" or c == "e" or c == "E":
+            ok = 1
+        if ok == 0:
+            return 0
+        i = i + 1
+    return 1
+
+// FS float -> 1dp string via scaled ints (str(Float) truncates — never it).
+fn format_1dp(v: Float) -> String:
+    var neg: Int = 0
+    var x: Float = v
+    if v < 0.0:
+        neg = 1
+        x = 0.0 - v
+    let ip: Int = x as Int
+    let fp: Int = ((x - (ip as Float)) * 10.0) as Int
+    var r: String = str(ip) + "." + str(fp)
+    if neg == 1:
+        r = "-" + r
+    return r
+
+fn usage() -> String:
+    var t: String = "config 0.1.0 — TurboKain preset resolver (M7)\n"
+    t = t + "One preset drives every detector. Header geometry wins over the\n"
+    t = t + "preset; CLI --set wins over everything. Unknown keys quarantined.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  config --show [--preset P] [--raw R] [--set k=v ...] [--data-dir D]\n"
+    t = t + "  config --json [...]                  (resolved JSON to stdout)\n"
+    t = t + "  config --get KEY [...]               (bare value for shell use)\n"
+    t = t + "  config --out r.json [--out-md t.md] [--csv r.csv] [...]\n"
+    t = t + "  config --init template.toml          (defaults + why comments)\n"
+    t = t + "  config --prove                       (self-test, no files)\n"
+    t = t + "\n"
+    t = t + "SHORTHANDS (src=cli): --fs --freq-mhz --bw-mhz --nchan --npol\n"
+    t = t + "  --dm-max --dm-trials --pulse-sigma --fold-sigma --seg --topk\n"
+    t = t + "\n"
+    t = t + "EXAMPLES:\n"
+    t = t + "  config --init presets/cband.toml\n"
+    t = t + "  config --show --preset presets/cband.toml --raw D:/data/raw/x.raw\n"
+    t = t + "  config --get fs --preset presets/cband.toml --raw x.raw\n"
+    t = t + "  config --out resolved.json --preset P --set dm_max=2000\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 ok, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+fn main() -> Int:
+    let args: Array<String> = process_user_args()
+
+    // ── key table: 40 keys, parallel arrays (key/value/src/why) ──
+    var keys: Array<String> = []
+    var vals: Array<String> = []
+    var srcs: Array<String> = []
+    var whys: Array<String> = []
+    push(keys, "fs")
+    push(vals, "2929687.5")
+    push(srcs, "default")
+    push(whys, "GBT GUPPI coarse-chan rate; header TBIN wins")
+    push(keys, "freq_mhz")
+    push(vals, "")
+    push(srcs, "default")
+    push(whys, "from header OBSFREQ; empty disables band priors")
+    push(keys, "bw_mhz")
+    push(vals, "")
+    push(srcs, "default")
+    push(whys, "from header OBSBW; sign gives sideband")
+    push(keys, "nchan")
+    push(vals, "64")
+    push(srcs, "default")
+    push(whys, "from header OBSNCHAN; 64-coarse standard")
+    push(keys, "npol")
+    push(vals, "4")
+    push(srcs, "default")
+    push(whys, "from header NPOL; AABBCRCI quad products")
+    push(keys, "nbits")
+    push(vals, "8")
+    push(srcs, "default")
+    push(whys, "from header NBITS; 8-bit storm / 2-bit survey")
+    push(keys, "tbin")
+    push(vals, "")
+    push(srcs, "default")
+    push(whys, "from header TBIN; fs = 1/tbin")
+    push(keys, "blocks")
+    push(vals, "0-127")
+    push(srcs, "default")
+    push(whys, "full 128-block file; partial for smoke runs")
+    push(keys, "pol_list")
+    push(vals, "0")
+    push(srcs, "default")
+    push(whys, "pols to scan; 0,1,2,3 for full-Stokes work")
+    push(keys, "fam_trig")
+    push(vals, "3.0")
+    push(srcs, "default")
+    push(whys, "block-0 smoke noise sits 2.2-2.8; 3.0 clears it")
+    push(keys, "fam_seg")
+    push(vals, "32768")
+    push(srcs, "default")
+    push(whys, "FAM segment: 89.4 Hz bins at 2.93 MHz FS")
+    push(keys, "fam_topk")
+    push(vals, "15")
+    push(srcs, "default")
+    push(whys, "peaks per Y2/Y4 kept for the comb rule")
+    push(keys, "fold_fmin")
+    push(vals, "1.0")
+    push(srcs, "default")
+    push(whys, "rotation band floor; below is red noise")
+    push(keys, "fold_fmax")
+    push(vals, "2000.0")
+    push(srcs, "default")
+    push(whys, "rotation band ceiling; env_fs/3 headroom")
+    push(keys, "fold_harms")
+    push(vals, "8")
+    push(srcs, "default")
+    push(whys, "harmonic sum depth; duty-cycle matched")
+    push(keys, "fold_sigma")
+    push(vals, "16.0")
+    push(srcs, "default")
+    push(whys, "8-draw noise max ~10.8; weakest inject 3400")
+    push(keys, "dm_min")
+    push(vals, "0.0")
+    push(srcs, "default")
+    push(whys, "DM floor; negative-DM rides exotic lane later")
+    push(keys, "dm_max")
+    push(vals, "1000.0")
+    push(srcs, "default")
+    push(whys, "covers galactic + FRB121102 (560) headroom")
+    push(keys, "dm_trials")
+    push(vals, "32")
+    push(srcs, "default")
+    push(whys, "DM grid density; 32 spans 0-1000 w/o gaps")
+    push(keys, "boxcar_widths")
+    push(vals, "1,2,4,8,16,32,64,128")
+    push(srcs, "default")
+    push(whys, "matched widths us-scale to ms-scale pulses")
+    push(keys, "pulse_sigma")
+    push(vals, "14.0")
+    push(srcs, "default")
+    push(whys, "DM x width max ~10.8 on noise; injects 168+")
+    push(keys, "sk_segs")
+    push(vals, "512")
+    push(srcs, "default")
+    push(whys, "SK frames cap; min 8 or time-domain carries it")
+    push(keys, "sk_frac")
+    push(vals, "0.02")
+    push(srcs, "default")
+    push(whys, "SK deviant-bin fraction gate (>=2% flags)")
+    push(keys, "sk_dev")
+    push(vals, "0.50")
+    push(srcs, "default")
+    push(whys, "per-bin |SK-1| deviation; grouped sums lie")
+    push(keys, "xeno_ladder")
+    push(vals, "20.0")
+    push(srcs, "default")
+    push(whys, "cepstral comb ratio; unfloored nulls hit 1332")
+    push(keys, "xeno_coh")
+    push(vals, "6.0")
+    push(srcs, "default")
+    push(whys, "zero-crossing regularity; clock-grade only")
+    push(keys, "xeno_dm_r2")
+    push(vals, "0.80")
+    push(srcs, "default")
+    push(whys, "arrival-order fit floor for dm_sign verdicts")
+    push(keys, "comb_min_members")
+    push(vals, "3")
+    push(srcs, "default")
+    push(whys, "THE COMB RULE: 3+ harmonics before it is a comb")
+    push(keys, "comb_min_score")
+    push(vals, "6.0")
+    push(srcs, "default")
+    push(whys, "THE COMB RULE score floor (M1 structure producer)")
+    push(keys, "kurt_thresh")
+    push(vals, "1.0")
+    push(srcs, "default")
+    push(whys, "excess-kurtosis gate; coded traffic is not Gaussian")
+    push(keys, "tail_thresh")
+    push(vals, "3.0")
+    push(srcs, "default")
+    push(whys, "4-sigma tail excess vs 6.33e-5 null")
+    push(keys, "frame_sigma")
+    push(vals, "40.0")
+    push(srcs, "default")
+    push(whys, "3x above 16-draw noise tail (~14); 40x below inject")
+    push(keys, "frame_dec")
+    push(vals, "512")
+    push(srcs, "default")
+    push(whys, "frame-hunt decimation; 10us-10s lags stay cheap")
+    push(keys, "drift_rate_max")
+    push(vals, "10.0")
+    push(srcs, "default")
+    push(whys, "deDoppler bank edge Hz/s; sidereal is ~0.1")
+    push(keys, "drift_snrt")
+    push(vals, "10.0")
+    push(srcs, "default")
+    push(whys, "incoherent drift SNR floor; turboSETI parity")
+    push(keys, "alpha_tol")
+    push(vals, "2000.0")
+    push(srcs, "default")
+    push(whys, "cadence cross-match Hz tolerance; PFB-safe")
+    push(keys, "persist_min")
+    push(vals, "4")
+    push(srcs, "default")
+    push(whys, "blocks a hit must persist; single-block is RFI")
+    push(keys, "multichan_min")
+    push(vals, "3")
+    push(srcs, "default")
+    push(whys, "chans a hit must span; one-chan is birdie")
+    push(keys, "workers")
+    push(vals, "4")
+    push(srcs, "default")
+    push(whys, "actor fanout width; chans x blocks x pols coarse")
+    push(keys, "line_exclude")
+    push(vals, "0")
+    push(srcs, "default")
+    push(whys, "standing-line chans cut from SCD top-k")
+    let nkeys: Int = len(keys)
+
+    // key -> index (-1 unknown)
+    // (linear scan; 40 keys, runs once per line — trivial cost)
+
+    // ── argv ──
+    var preset_path: String = ""
+    var raw_path: String = ""
+    var data_dir: String = ""
+    var out_path: String = ""
+    var out_md: String = ""
+    var csv_path: String = ""
+    var init_path: String = ""
+    var get_key: String = ""
+    var show: Int = 1
+    var json_mode: Int = 0
+    var show_help: Int = 0
+    var prove: Int = 0
+    var cli_sets: Array<String> = []
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--prove":
+            prove = 1
+        elif a == "--json":
+            json_mode = 1
+        elif a == "--show":
+            show = 1
+        elif a == "--preset":
+            if i + 1 < len(args):
+                preset_path = args[i + 1]
+                i = i + 1
+        elif a == "--raw":
+            if i + 1 < len(args):
+                raw_path = args[i + 1]
+                i = i + 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                raw_path = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif a == "--out-md":
+            if i + 1 < len(args):
+                out_md = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif a == "--init":
+            if i + 1 < len(args):
+                init_path = args[i + 1]
+                i = i + 1
+        elif a == "--get":
+            if i + 1 < len(args):
+                get_key = args[i + 1]
+                i = i + 1
+        elif a == "--set":
+            if i + 1 < len(args):
+                push(cli_sets, args[i + 1])
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                push(cli_sets, "fs=" + args[i + 1])
+                i = i + 1
+        elif a == "--freq-mhz":
+            if i + 1 < len(args):
+                push(cli_sets, "freq_mhz=" + args[i + 1])
+                i = i + 1
+        elif a == "--bw-mhz":
+            if i + 1 < len(args):
+                push(cli_sets, "bw_mhz=" + args[i + 1])
+                i = i + 1
+        elif a == "--nchan":
+            if i + 1 < len(args):
+                push(cli_sets, "nchan=" + args[i + 1])
+                i = i + 1
+        elif a == "--npol":
+            if i + 1 < len(args):
+                push(cli_sets, "npol=" + args[i + 1])
+                i = i + 1
+        elif a == "--dm-max":
+            if i + 1 < len(args):
+                push(cli_sets, "dm_max=" + args[i + 1])
+                i = i + 1
+        elif a == "--dm-trials":
+            if i + 1 < len(args):
+                push(cli_sets, "dm_trials=" + args[i + 1])
+                i = i + 1
+        elif a == "--pulse-sigma":
+            if i + 1 < len(args):
+                push(cli_sets, "pulse_sigma=" + args[i + 1])
+                i = i + 1
+        elif a == "--fold-sigma":
+            if i + 1 < len(args):
+                push(cli_sets, "fold_sigma=" + args[i + 1])
+                i = i + 1
+        elif a == "--seg":
+            if i + 1 < len(args):
+                push(cli_sets, "fam_seg=" + args[i + 1])
+                i = i + 1
+        elif a == "--topk":
+            if i + 1 < len(args):
+                push(cli_sets, "fam_topk=" + args[i + 1])
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    // positional: preset path shorthand
+    if preset_path == "":
+        if len(pos) > 0:
+            preset_path = pos[0]
+
+    if show_help == 1:
+        print(usage())
+        return EXIT_HELP
+
+    // ── --prove: self-contained, no files ──
+    if prove == 1:
+        var npass: Int = 0
+        var total: Int = 0
+        // t1: defaults intact
+        total = total + 1
+        if vals[18] == "32" and vals[9] == "3.0" and vals[20] == "14.0":
+            npass = npass + 1
+        else:
+            println("[prove] t1 defaults drifted")
+        // t2: tolerant preset parse (equals, colon, quotes, section, comment)
+        total = total + 1
+        var pt: String = "# storm preset\n[dm]\ndm_max = 2000\npulse_sigma : 10.0\n"
+        pt = pt + "freq_mhz = \"1407.7\"\nbogus_key = 5\n"
+        var p_lines: Array<String> = text_split_lines(pt)
+        var p_ok: Int = 0
+        var p_unk: Int = 0
+        var li: Int = 0
+        while li < len(p_lines):
+            var row: String = text_trim_string(p_lines[li])
+            if len(row) > 0:
+                if char_at(row, 0) != "#" and char_at(row, 0) != "[":
+                    var sep: Int = find_from(row, "=", 0)
+                    if sep < 0:
+                        sep = find_from(row, ":", 0)
+                    if sep >= 0:
+                        var kk: String = lower_ascii(text_trim_string(text_substring_string(row, 0, sep)))
+                        var vv: String = row
+                        // inline comment cut at ' #' boundary
+                        var hc: Int = find_from(row, " #", sep)
+                        if hc >= 0:
+                            vv = text_substring_string(row, sep + 1, hc - sep - 1)
+                        else:
+                            vv = text_substring_string(row, sep + 1, len(row) - sep - 1)
+                        vv = strip_quotes(vv)
+                        // known?
+                        var ki: Int = -1
+                        var q2: Int = 0
+                        while q2 < nkeys:
+                            if keys[q2] == kk:
+                                ki = q2
+                            q2 = q2 + 1
+                        if ki >= 0:
+                            p_ok = p_ok + 1
+                        else:
+                            p_unk = p_unk + 1
+            li = li + 1
+        if p_ok == 3 and p_unk == 1:
+            npass = npass + 1
+        else:
+            println("[prove] t2 preset parse p_ok=" + str(p_ok) + " p_unk=" + str(p_unk))
+        // t3: exponent float (TBIN form) -> FS head
+        total = total + 1
+        let tb: Float = parse_float_exp("3.41333334E-07")
+        let fsh: Float = 1.0 / tb
+        let fss: String = format_1dp(fsh)
+        if text_substring_string(fss, 0, 4) == "2929":
+            npass = npass + 1
+        else:
+            println("[prove] t3 TBIN->FS got " + fss)
+        // t4: negative exponent + plain decimals
+        total = total + 1
+        let e1: Float = parse_float_exp("-187.5")
+        let e2: Float = parse_float_exp("1.5E3")
+        if e1 < 0.0 and e2 > 1400.0 and e2 < 1600.0:
+            npass = npass + 1
+        else:
+            println("[prove] t4 float forms")
+        // t5: JSON quoting rules
+        total = total + 1
+        if is_numeric_string("1,2,4,8") == 0 and is_numeric_string("1000.0") == 1 and is_numeric_string("") == 0:
+            npass = npass + 1
+        else:
+            println("[prove] t5 quoting")
+        // t6: quote strip
+        total = total + 1
+        let qq: String = text_chr(34)
+        if strip_quotes(qq + "1407.7" + qq) == "1407.7" and strip_quotes("'ab'") == "ab":
+            npass = npass + 1
+        else:
+            println("[prove] t6 strip_quotes")
+        println("[prove] " + str(npass) + "/" + str(total))
+        if npass == total:
+            println("receipt=PASS prove=" + str(npass) + "/" + str(total))
+            return EXIT_OK
+        println("receipt=FAIL prove=" + str(npass) + "/" + str(total))
+        return EXIT_HELP
+
+    // ── --init: defaults + why template ──
+    if len(init_path) > 0:
+        if fs_exists(init_path) == true:
+            println("config: --init refuses to overwrite: " + init_path)
+            return EXIT_ERROR
+        var it: String = "# TurboKain preset — one file drives every detector.\n"
+        it = it + "# Precedence: this file < raw header (geometry) < CLI --set.\n"
+        it = it + "# Unknown keys are quarantined, never applied.\n"
+        it = it + "\n[geometry]\n"
+        var gi: Int = 0
+        while gi < nkeys:
+            // section breaks for readability
+            if gi == 7:
+                it = it + "\n[scan]\n"
+            if gi == 9:
+                it = it + "\n[fam]\n"
+            if gi == 12:
+                it = it + "\n[fold]\n"
+            if gi == 16:
+                it = it + "\n[dm]\n"
+            if gi == 21:
+                it = it + "\n[sk]\n"
+            if gi == 24:
+                it = it + "\n[xeno]\n"
+            if gi == 27:
+                it = it + "\n[structure]\n"
+            if gi == 31:
+                it = it + "\n[frame]\n"
+            if gi == 33:
+                it = it + "\n[drift]\n"
+            if gi == 35:
+                it = it + "\n[cadence]\n"
+            if gi == 38:
+                it = it + "\n[pipeline]\n"
+            it = it + "# " + whys[gi] + "\n"
+            it = it + keys[gi] + " = " + vals[gi] + "\n"
+            gi = gi + 1
+        fs_write_text(init_path, it)
+        println("config: wrote " + init_path + " (" + str(nkeys) + " keys)")
+        println("receipt=PASS init=" + str(nkeys))
+        return EXIT_OK
+
+    // ── resolve data_dir for relative paths ──
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+    if preset_path != "":
+        if data_dir != "":
+            if find_from(preset_path, ":", 0) < 0:
+                if char_at(preset_path, 0) != "/":
+                    let probe_p: String = data_dir + "/" + preset_path
+                    if fs_exists(preset_path) == false:
+                        if fs_exists(probe_p) == true:
+                            preset_path = probe_p
+    if raw_path != "":
+        if data_dir != "":
+            if find_from(raw_path, ":", 0) < 0:
+                if len(raw_path) > 0:
+                    if char_at(raw_path, 0) != "/":
+                        let probe_r: String = data_dir + "/" + raw_path
+                        if fs_exists(raw_path) == false:
+                            if fs_exists(probe_r) == true:
+                                raw_path = probe_r
+
+    // ── layer 2: preset file ──
+    var n_preset: Int = 0
+    var n_unknown: Int = 0
+    var unknown_first: String = ""
+    if preset_path != "":
+        if fs_exists(preset_path) == false:
+            println("config: preset not found: " + preset_path)
+            return EXIT_ERROR
+        let ptxt: String = fs_read_text(preset_path)
+        let plines: Array<String> = text_split_lines(ptxt)
+        var pj: Int = 0
+        while pj < len(plines):
+            var prow: String = text_trim_string(plines[pj])
+            if len(prow) > 0:
+                if char_at(prow, 0) != "#" and char_at(prow, 0) != "[":
+                    var psep: Int = find_from(prow, "=", 0)
+                    if psep < 0:
+                        psep = find_from(prow, ":", 0)
+                    if psep >= 0:
+                        var pkk: String = lower_ascii(text_trim_string(text_substring_string(prow, 0, psep)))
+                        var pvv: String = ""
+                        var phc: Int = find_from(prow, " #", psep)
+                        if phc >= 0:
+                            pvv = text_substring_string(prow, psep + 1, phc - psep - 1)
+                        else:
+                            pvv = text_substring_string(prow, psep + 1, len(prow) - psep - 1)
+                        pvv = strip_quotes(pvv)
+                        var pki: Int = -1
+                        var pq: Int = 0
+                        while pq < nkeys:
+                            if keys[pq] == pkk:
+                                pki = pq
+                            pq = pq + 1
+                        if pki >= 0:
+                            vals[pki] = pvv
+                            srcs[pki] = "preset"
+                            n_preset = n_preset + 1
+                        else:
+                            n_unknown = n_unknown + 1
+                            if len(unknown_first) == 0:
+                                unknown_first = pkk
+            pj = pj + 1
+
+    // ── layer 3: raw header (geometry keys only, never over cli) ──
+    var n_header: Int = 0
+    var header_note: String = "no raw"
+    // mark cli keys first so the header cannot clobber them
+    var cli_marks: Array<String> = []
+    var cm: Int = 0
+    while cm < len(cli_sets):
+        let cs: String = cli_sets[cm]
+        let ceq: Int = find_from(cs, "=", 0)
+        if ceq >= 0:
+            push(cli_marks, lower_ascii(text_trim_string(text_substring_string(cs, 0, ceq))))
+        cm = cm + 1
+    if raw_path != "":
+        if fs_exists(raw_path) == false:
+            println("config: raw not found: " + raw_path)
+            return EXIT_ERROR
+        let head: String = fs_read_text_range(raw_path, 0, 32768)
+        if len(head) == 0:
+            println("config: raw header unreadable: " + raw_path)
+            return EXIT_ERROR
+        let h_freq: String = text_trim_string(extract_value_string(head, "OBSFREQ"))
+        let h_bw: String = text_trim_string(extract_value_string(head, "OBSBW"))
+        let h_tbin: String = text_trim_string(extract_value_string(head, "TBIN"))
+        var h_nchan: String = text_trim_string(extract_value_string(head, "OBSNCHAN"))
+        if len(h_nchan) == 0:
+            h_nchan = text_trim_string(extract_value_string(head, "NCHAN"))
+        let h_npol: String = text_trim_string(extract_value_string(head, "NPOL"))
+        let h_nbits: String = text_trim_string(extract_value_string(head, "NBITS"))
+        // apply helper inline per key (cli-marked keys keep cli value)
+        var hk: Int = 0
+        while hk < 7:
+            var hkey: String = keys[hk]
+            var hval: String = ""
+            if hk == 0:
+                if len(h_tbin) > 0:
+                    let tb2: Float = parse_float_exp(h_tbin)
+                    if tb2 > 0.0:
+                        hval = format_1dp(1.0 / tb2)
+            elif hk == 1:
+                hval = h_freq
+            elif hk == 2:
+                hval = h_bw
+            elif hk == 3:
+                hval = h_nchan
+            elif hk == 4:
+                hval = h_npol
+            elif hk == 5:
+                hval = h_nbits
+            elif hk == 6:
+                hval = h_tbin
+            if len(hval) > 0:
+                var is_cli: Int = 0
+                var mx: Int = 0
+                while mx < len(cli_marks):
+                    if cli_marks[mx] == hkey:
+                        is_cli = 1
+                    mx = mx + 1
+                if is_cli == 0:
+                    vals[hk] = hval
+                    srcs[hk] = "header"
+                    n_header = n_header + 1
+            hk = hk + 1
+        header_note = "header " + str(n_header) + "/7 from " + raw_path
+
+    // ── layer 4: CLI sets (highest precedence) ──
+    var n_cli: Int = 0
+    var ci: Int = 0
+    while ci < len(cli_sets):
+        let cset: String = cli_sets[ci]
+        let ceq2: Int = find_from(cset, "=", 0)
+        if ceq2 >= 0:
+            var ckk: String = lower_ascii(text_trim_string(text_substring_string(cset, 0, ceq2)))
+            var cvv: String = strip_quotes(text_substring_string(cset, ceq2 + 1, len(cset) - ceq2 - 1))
+            var cki: Int = -1
+            var cq: Int = 0
+            while cq < nkeys:
+                if keys[cq] == ckk:
+                    cki = cq
+                cq = cq + 1
+            if cki >= 0:
+                vals[cki] = cvv
+                srcs[cki] = "cli"
+                n_cli = n_cli + 1
+            else:
+                n_unknown = n_unknown + 1
+                if len(unknown_first) == 0:
+                    unknown_first = ckk
+        ci = ci + 1
+
+    // ── --get: bare value for shell capture ──
+    if len(get_key) > 0:
+        let gk: String = lower_ascii(text_trim_string(get_key))
+        var gki: Int = -1
+        var gq: Int = 0
+        while gq < nkeys:
+            if keys[gq] == gk:
+                gki = gq
+            gq = gq + 1
+        if gki < 0:
+            println("config: unknown key: " + get_key)
+            return EXIT_ERROR
+        println(vals[gki])
+        return EXIT_OK
+
+    // ── emitters ──
+    let qq2: String = text_chr(34)
+    // JSON (numbers raw, lists + text quoted, empty null)
+    var js: String = "{\n"
+    var jx: Int = 0
+    while jx < nkeys:
+        var vj: String = vals[jx]
+        var jem: String = "null"
+        if len(vj) > 0:
+            if find_from(vj, ",", 0) >= 0:
+                jem = qq2 + vj + qq2
+            elif is_numeric_string(vj) == 1:
+                jem = vj
+            else:
+                jem = qq2 + vj + qq2
+        js = js + "  " + qq2 + keys[jx] + qq2 + ": " + jem
+        if jx + 1 < nkeys:
+            js = js + ","
+        js = js + "\n"
+        jx = jx + 1
+    js = js + "}\n"
+    // md table (MarkScript-native)
+    var md: String = "| key | value | src | why |\n"
+    md = md + "|---|---|---|---|\n"
+    var mx2: Int = 0
+    while mx2 < nkeys:
+        var mv: String = vals[mx2]
+        if len(mv) == 0:
+            mv = "-"
+        md = md + "| " + keys[mx2] + " | " + mv + " | " + srcs[mx2] + " | " + whys[mx2] + " |\n"
+        mx2 = mx2 + 1
+    // csv mirror
+    var cs: String = "key,value,src\n"
+    var cx: Int = 0
+    while cx < nkeys:
+        cs = cs + keys[cx] + "," + vals[cx] + "," + srcs[cx] + "\n"
+        cx = cx + 1
+    // human list
+    var hu: String = "# config resolved"
+    if preset_path != "":
+        hu = hu + " preset=" + preset_path + "(" + str(n_preset) + ")"
+    hu = hu + " " + header_note + " cli=" + str(n_cli)
+    if n_unknown > 0:
+        hu = hu + " quarantined=" + str(n_unknown) + "(" + unknown_first + ")"
+    hu = hu + "\n"
+    var hx: Int = 0
+    while hx < nkeys:
+        var hv: String = vals[hx]
+        if len(hv) == 0:
+            hv = "-"
+        hu = hu + keys[hx] + " = " + hv + "  # " + srcs[hx] + "\n"
+        hx = hx + 1
+
+    if out_path != "":
+        fs_write_text(out_path, js)
+        println("config: wrote " + out_path + " (" + str(nkeys) + " keys)")
+    if out_md != "":
+        fs_write_text(out_md, md)
+        println("config: wrote " + out_md)
+    if csv_path != "":
+        fs_write_text(csv_path, cs)
+        println("config: wrote " + csv_path)
+    if n_unknown > 0:
+        println("config: quarantined " + str(n_unknown) + " unknown key(s), first=" + unknown_first)
+
+    if json_mode == 1:
+        print(js)
+    else:
+        if out_path == "" and out_md == "" and csv_path == "":
+            print(hu)
+        else:
+            println("receipt=PASS keys=" + str(nkeys) + " preset=" + str(n_preset) + " header=" + str(n_header) + " cli=" + str(n_cli))
+    return EXIT_OK

@@ -1,0 +1,4 @@
+chan	pol	tool	exit	seconds	receipt	verdicts	outputs	log
+44	0	slice	0	0.09534939998411573	True	PASS	D:\TurboKain\reports\2026-09-23_frb_smoke_scan\ch44_p0.f32	D:\TurboKain\reports\2026-09-23_frb_smoke_scan\logs\slice_ch44_p0.log
+44	0	sk_gate	0	0.13066249998519197	True	CLEAN,PASS	D:\TurboKain\reports\2026-09-23_frb_smoke_scan\sk_gate_ch44_p0	D:\TurboKain\reports\2026-09-23_frb_smoke_scan\logs\sk_gate_ch44_p0.log
+44	0	xeno_scan	0	0.13890359998913482	True	XENO-CLEAN,PASS	D:\TurboKain\reports\2026-09-23_frb_smoke_scan\xeno_scan_ch44_p0	D:\TurboKain\reports\2026-09-23_frb_smoke_scan\logs\xeno_scan_ch44_p0.log

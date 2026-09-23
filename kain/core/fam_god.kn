@@ -492,6 +492,70 @@ fn col_index(header: Array<String>, name: String) -> Int:
         i = i + 1
     return -1
 
+// ── Journal v2 provenance helpers (M9 recurrence upgrade) ───────────────────
+// scan_root_of maps a raw path to its observation root so the SAME observation
+// swept twice (full file + .PART1GB head, .0000/.0001 parts) de-dups instead of
+// self-matching. "...TRAPPIST1_0015.0000.raw" and "...0015.0000.PART1GB.raw"
+// both reduce to "0015"; OFF legs ("..._OFF_0016") stay distinct.
+fn base_name_of(path: String) -> String:
+    var cut: Int = 0
+    var k: Int = 0
+    while k < len(path):
+        if char_at(path, k) == "/":
+            cut = k + 1
+        k = k + 1
+    if cut >= len(path):
+        return path
+    return text_substring_string(path, cut, len(path) - cut)
+
+fn strip_suffix(text: String, suffix: String) -> String:
+    let n: Int = len(text)
+    let m: Int = len(suffix)
+    if n > m:
+        if find_from(text, suffix, n - m) == n - m:
+            return text_substring_string(text, 0, n - m)
+    return text
+
+fn strip_numeric_exts(text: String) -> String:
+    var t: String = text
+    var guard: Int = 0
+    while guard < 6:
+        var dot: Int = -1
+        var k: Int = 0
+        while k < len(t):
+            if char_at(t, k) == ".":
+                dot = k
+            k = k + 1
+        if dot < 0:
+            break
+        let tail: String = text_substring_string(t, dot + 1, len(t) - dot - 1)
+        if len(tail) == 0:
+            break
+        if is_all_digits(tail) == 0:
+            break
+        t = text_substring_string(t, 0, dot)
+        guard = guard + 1
+    return t
+
+fn scan_root_of(path: String) -> String:
+    if len(path) == 0:
+        return ""
+    var b: String = base_name_of(path)
+    b = strip_suffix(b, ".raw")
+    b = strip_suffix(b, ".PART1GB")
+    b = strip_numeric_exts(b)
+    var us: Int = -1
+    var k: Int = 0
+    while k < len(b):
+        if char_at(b, k) == "_":
+            us = k
+        k = k + 1
+    if us < 0:
+        return b
+    if us + 1 >= len(b):
+        return b
+    return text_substring_string(b, us + 1, len(b) - us - 1)
+
 // ── Quickselect (boxcar pattern; upper-middle for even n) ───────────────────
 fn qs_partition(a: ptr<Float>, lo: Int, hi: Int) -> Int with Unsafe:
     let piv: Float = mem_load(ptr_offset(a, hi, "Float"), "Float")
@@ -523,13 +587,14 @@ fn quickselect_k(a: ptr<Float>, n: Int, k: Int) -> Float with Unsafe:
     return mem_load(ptr_offset(a, k, "Float"), "Float")
 
 fn usage() -> String:
-    var t: String = "fam_god 0.5.0 — TurboKain god-mode cyclo hunter (ONE file)\n"
+    var t: String = "fam_god 0.6.0 — TurboKain god-mode cyclo hunter (ONE file)\n"
     t = t + "twiddle FFT lanes + exact chi-square floor (trials-corrected) +\n"
     t = t + "SEG bank. Peak lists identical to fam_scan; numbers principled.\n"
     t = t + "\n"
     t = t + "USAGE:\n"
     t = t + "  fam_god --in <f32> [--fs HZ] [--seg N] [--segbank] [--topk K]\n"
     t = t + "          [--pfwe P] [--drift D] [--tbdsnr S] [--journal J]\n"
+    t = t + "          [--src RAWP] [--chan N] [--pol N] (journal v2 provenance)\n"
     t = t + "          SCD zoom + evidence-ledger tripwires ride every run.\n"
     t = t + "          [--cand path] [--out fam.md] [--csv fam.csv]\n"
     t = t + "          [--data-dir D] [--json]\n"
@@ -555,6 +620,9 @@ fn main() -> Int with Unsafe:
     var topk_set: Int = 0
     var pfwe_gate: Float = 0.01
     var journal_path: String = ""
+    var src_path: String = ""
+    var src_chan: Int = -1
+    var src_pol: Int = -1
     var drift_max: Int = TBD_D_DEFAULT
     var tbd_gate_x100: Int = TBD_SNR_DEFAULT_X100
     var json: Int = 0
@@ -610,6 +678,18 @@ fn main() -> Int with Unsafe:
         elif a == "--journal":
             if i + 1 < len(args):
                 journal_path = args[i + 1]
+                i = i + 1
+        elif a == "--src":
+            if i + 1 < len(args):
+                src_path = args[i + 1]
+                i = i + 1
+        elif a == "--chan":
+            if i + 1 < len(args):
+                src_chan = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--pol":
+            if i + 1 < len(args):
+                src_pol = parse_int_text(args[i + 1])
                 i = i + 1
         elif a == "--drift":
             if i + 1 < len(args):
@@ -1133,25 +1213,90 @@ fn main() -> Int with Unsafe:
         verdict = "FAM-HIT"
     elif tbd_hit == 1:
         verdict = "TBD-HIT"
-    // ── Journal: match current peaks vs prior runs, append with repeats ──
+    // ── Journal v2: provenance + trailing window + same-scan split + triage ──
+    // repeat = cross-observation matches (different scan root): the monument signal.
+    // sscan  = same-observation matches (dup sweeps, backend common-mode): excluded.
+    // comb/dc/degen pre-triage the known-local families + 2-bit degeneracy.
+    // Legacy v1 journals (no sscan col) are header-upgraded in place; old rows
+    // without provenance count as cross-scan, preserving old repeat semantics.
     if journal_path != "":
+        let V2HDR: String = "| tag | seg | rank | bin | alpha_hz_x100 | ratio_x100 | log10p_x100 | hit | repeat | sscan | comb | dc | degen | file | chan |\n"
+        let V2SEP: String = "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
         var jtxt: String = ""
         if fs_exists(journal_path):
             jtxt = fs_read_text(journal_path)
         else:
-            jtxt = "| tag | seg | rank | bin | alpha_hz_x100 | ratio_x100 | log10p_x100 | hit | repeat |\n|---|---|---|---|---|---|---|---|---|\n"
-        let jlines: Array<String> = text_split_lines(jtxt)
+            jtxt = V2HDR + V2SEP
+        var jlines: Array<String> = text_split_lines(jtxt)
         var jhead: Array<String> = []
+        var jhdr_idx: Int = -1
         var jl: Int = 0
         while jl < len(jlines):
             if len(text_trim_string(jlines[jl])) > 0 and is_sep_row(jlines[jl]) == 0:
                 jhead = row_cells(jlines[jl])
+                jhdr_idx = jl
                 break
             jl = jl + 1
+        if jhdr_idx < 0:
+            jtxt = V2HDR + V2SEP + jtxt
+            jlines = text_split_lines(jtxt)
+            jhead = row_cells(jlines[0])
+            jhdr_idx = 0
         let jtc: Int = col_index(jhead, "tag")
         let jsc: Int = col_index(jhead, "seg")
         let jbc: Int = col_index(jhead, "bin")
+        let jscol: Int = col_index(jhead, "sscan")
+        let jfcol: Int = col_index(jhead, "file")
+        if jscol < 0:
+            var jnew: String = ""
+            var jx: Int = 0
+            while jx < len(jlines):
+                if jx == jhdr_idx:
+                    jnew = jnew + V2HDR
+                elif jx == jhdr_idx + 1 and is_sep_row(jlines[jx]) == 1:
+                    jnew = jnew + V2SEP
+                else:
+                    jnew = jnew + jlines[jx] + "\n"
+                jx = jx + 1
+            jtxt = jnew
+            jlines = text_split_lines(jtxt)
+        var myfilecell: String = "-"
+        var mychanstr: String = "-"
+        var myroot: String = ""
+        if len(src_path) > 0:
+            myfilecell = base_name_of(src_path)
+            myroot = scan_root_of(src_path)
+            if src_chan >= 0:
+                mychanstr = str(src_chan)
         var newrows: String = ""
+        var ndata: Int = 0
+        var rc0: Int = 0
+        while rc0 < len(jlines):
+            if len(text_trim_string(jlines[rc0])) > 0 and is_sep_row(jlines[rc0]) == 0:
+                ndata = ndata + 1
+            rc0 = rc0 + 1
+        var skip: Int = 0
+        if ndata > 5000:
+            skip = ndata - 5000
+        var winroot: Array<String> = []
+        var rb: Int = 0
+        var seenb: Int = 0
+        while rb < len(jlines):
+            let rr2: String = jlines[rb]
+            if len(text_trim_string(rr2)) > 0 and is_sep_row(rr2) == 0:
+                if seenb >= skip:
+                    let rc2: Array<String> = row_cells(rr2)
+                    var fcell: String = ""
+                    if jfcol >= 0:
+                        if jfcol < len(rc2):
+                            fcell = rc2[jfcol]
+                    var rt: String = ""
+                    if fcell != "":
+                        if fcell != "-":
+                            rt = scan_root_of(fcell)
+                    push(winroot, rt)
+                seenb = seenb + 1
+            rb = rb + 1
         let lres0: Int = resonate_fire_count()
         let lent0: Int = entangle_propagation_count()
         let lpat0: Int = patch_journal_count()
@@ -1164,28 +1309,94 @@ fn main() -> Int with Unsafe:
             let pt: Int = mem_load(ptr_offset(pk_tag, kj, "Int"), "Int")
             let ps: Int = mem_load(ptr_offset(pk_seg, kj, "Int"), "Int")
             let pb: Int = mem_load(ptr_offset(pk_bin, kj, "Int"), "Int")
+            let prank: Int = mem_load(ptr_offset(pk_rank, kj, "Int"), "Int")
+            let palpha: Int = mem_load(ptr_offset(pk_alpha, kj, "Int"), "Int")
+            let pratio: Int = mem_load(ptr_offset(pk_ratio, kj, "Int"), "Int")
+            let plogp: Int = mem_load(ptr_offset(pk_logp, kj, "Int"), "Int")
+            let phit: Int = mem_load(ptr_offset(pk_hit, kj, "Int"), "Int")
+            var degen: Int = 0
+            var st0: Int = 0
+            var st1: Int = 0
+            var st2: Int = 0
+            var km: Int = 0
+            while km < pk_n:
+                if mem_load(ptr_offset(pk_seg, km, "Int"), "Int") == ps:
+                    if mem_load(ptr_offset(pk_bin, km, "Int"), "Int") == pb:
+                        if mem_load(ptr_offset(pk_ratio, km, "Int"), "Int") == pratio:
+                            if mem_load(ptr_offset(pk_logp, km, "Int"), "Int") == plogp:
+                                let qt: Int = mem_load(ptr_offset(pk_tag, km, "Int"), "Int")
+                                if qt == 0:
+                                    st0 = 1
+                                elif qt == 1:
+                                    st1 = 1
+                                else:
+                                    st2 = 1
+                km = km + 1
+            if st0 == 1 and st1 == 1 and st2 == 1:
+                degen = 1
+            var dc: Int = 0
+            if palpha < 100000:
+                dc = 1
+            var pnum: Int = pb * 4096
+            var cseg: Int = ps
+            if cseg < 1:
+                cseg = 1
+            var m: Int = (pnum + cseg / 2) / cseg
+            if m - (m / 2) * 2 == 0:
+                var dlo: Int = pnum - (m - 1) * cseg
+                if dlo < 0:
+                    dlo = 0 - dlo
+                var dhi: Int = (m + 1) * cseg - pnum
+                if dhi < 0:
+                    dhi = 0 - dhi
+                if m == 0:
+                    m = 1
+                elif dlo <= dhi:
+                    m = m - 1
+                else:
+                    m = m + 1
+            var dnum: Int = pnum - m * cseg
+            if dnum < 0:
+                dnum = 0 - dnum
+            var comb: Int = 0
+            if dnum <= 6144:
+                comb = 1
             var rep: Int = 0
+            var ssc: Int = 0
             if matched_files == 1:
                 var rl: Int = 0
+                var seen: Int = 0
+                var widx: Int = 0
                 var scanned: Int = 0
                 while rl < len(jlines) and scanned < 5000:
                     let rr: String = jlines[rl]
-                    if len(text_trim_string(rr)) > 0 and is_sep_row(rr) == 0:
-                        let rc: Array<String> = row_cells(rr)
-                        if jtc < len(rc) and jsc < len(rc) and jbc < len(rc):
-                            var ot: Int = -1
-                            if rc[jtc] == "Y2":
-                                ot = 0
-                            elif rc[jtc] == "Y4":
-                                ot = 1
-                            elif rc[jtc] == "Y6":
-                                ot = 2
-                            if ot == pt:
-                                if parse_int_text(rc[jsc]) == ps:
-                                    let ob: Int = parse_int_text(rc[jbc])
-                                    if ob >= pb - 2 and ob <= pb + 2:
-                                        rep = rep + 1
-                        scanned = scanned + 1
+                    if len(text_trim_string(rr)) > 0:
+                        if is_sep_row(rr) == 0:
+                            if seen >= skip:
+                                let rc: Array<String> = row_cells(rr)
+                                if jtc < len(rc) and jsc < len(rc) and jbc < len(rc):
+                                    var ot: Int = -1
+                                    if rc[jtc] == "Y2":
+                                        ot = 0
+                                    elif rc[jtc] == "Y4":
+                                        ot = 1
+                                    elif rc[jtc] == "Y6":
+                                        ot = 2
+                                    if ot == pt:
+                                        if parse_int_text(rc[jsc]) == ps:
+                                            let ob: Int = parse_int_text(rc[jbc])
+                                            if ob >= pb - 2 and ob <= pb + 2:
+                                                if len(myroot) > 0 and widx < len(winroot):
+                                                    let wr: String = winroot[widx]
+                                                    if len(wr) > 0 and wr == myroot:
+                                                        ssc = ssc + 1
+                                                    else:
+                                                        rep = rep + 1
+                                                else:
+                                                    rep = rep + 1
+                                widx = widx + 1
+                                scanned = scanned + 1
+                            seen = seen + 1
                     rl = rl + 1
             if rep >= 2:
                 let _lh: Int = ledger_hit(EvidenceLedger, rep)
@@ -1194,13 +1405,13 @@ fn main() -> Int with Unsafe:
                 tn = "Y4"
             elif pt == 2:
                 tn = "Y6"
-            newrows = newrows + "| " + tn + " | " + str(ps) + " | " + str(mem_load(ptr_offset(pk_rank, kj, "Int"), "Int")) + " | " + str(pb) + " | " + str(mem_load(ptr_offset(pk_alpha, kj, "Int"), "Int")) + " | " + str(mem_load(ptr_offset(pk_ratio, kj, "Int"), "Int")) + " | " + str(mem_load(ptr_offset(pk_logp, kj, "Int"), "Int")) + " | " + str(mem_load(ptr_offset(pk_hit, kj, "Int"), "Int")) + " | " + str(rep) + " |\n"
+            newrows = newrows + "| " + tn + " | " + str(ps) + " | " + str(prank) + " | " + str(pb) + " | " + str(palpha) + " | " + str(pratio) + " | " + str(plogp) + " | " + str(phit) + " | " + str(rep) + " | " + str(ssc) + " | " + str(comb) + " | " + str(dc) + " | " + str(degen) + " | " + myfilecell + " | " + mychanstr + " |\n"
             kj = kj + 1
         if len(jtxt) > 0:
             if char_at(jtxt, len(jtxt) - 1) != "\n":
                 jtxt = jtxt + "\n"
         fs_write_text(journal_path, jtxt + newrows)
-        println("fam_god: journal peaks=" + str(pk_n) + " path=" + journal_path)
+        println("fam_god: journal peaks=" + str(pk_n) + " path=" + journal_path + " src=" + myfilecell + " ch=" + mychanstr + " root=" + myroot)
         os_sleep_millis(100)
         println("fam_god: ledger repeats=" + str(EvidenceLedger.repeats) + " top=" + str(EvidenceLedger.top_repeat) + " trips=" + str(EvidenceLedger.trips) + " ticks=" + str(EvidenceLedger.ticks) + " dRes+" + str(resonate_fire_count() - lres0) + " dEnt+" + str(entangle_propagation_count() - lent0) + " dPat+" + str(patch_journal_count() - lpat0) + " dPul+" + str(runtime_machine_pulse_total_fire_count() - lpul0))
     println("fam_god: tbd score_x100=" + str(tbd_score_x) + " span=" + str(ntbd) + " drift_x100=" + str(tbd_drift) + " hit=" + str(tbd_hit))

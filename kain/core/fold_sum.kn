@@ -120,6 +120,80 @@ fn parse_int_text(text: String) -> Int:
         index = index + 1
     return value * sign
 
+fn parse_float_text(text: String) -> Float:
+    if len(text) == 0:
+        return 0.0
+    var sign: Float = 1.0
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = 0.0 - 1.0
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var whole: Float = 0.0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        if ch == ".":
+            break
+        var digit: Float = 0.0
+        if ch == "0":
+            digit = 0.0
+        elif ch == "1":
+            digit = 1.0
+        elif ch == "2":
+            digit = 2.0
+        elif ch == "3":
+            digit = 3.0
+        elif ch == "4":
+            digit = 4.0
+        elif ch == "5":
+            digit = 5.0
+        elif ch == "6":
+            digit = 6.0
+        elif ch == "7":
+            digit = 7.0
+        elif ch == "8":
+            digit = 8.0
+        elif ch == "9":
+            digit = 9.0
+        else:
+            return sign * whole
+        whole = whole * 10.0 + digit
+        index = index + 1
+    if index < len(text):
+        if char_at(text, index) == ".":
+            index = index + 1
+            var div: Float = 10.0
+            while index < len(text):
+                let ch2: String = char_at(text, index)
+                var d2: Float = 0.0
+                if ch2 == "0":
+                    d2 = 0.0
+                elif ch2 == "1":
+                    d2 = 1.0
+                elif ch2 == "2":
+                    d2 = 2.0
+                elif ch2 == "3":
+                    d2 = 3.0
+                elif ch2 == "4":
+                    d2 = 4.0
+                elif ch2 == "5":
+                    d2 = 5.0
+                elif ch2 == "6":
+                    d2 = 6.0
+                elif ch2 == "7":
+                    d2 = 7.0
+                elif ch2 == "8":
+                    d2 = 8.0
+                elif ch2 == "9":
+                    d2 = 9.0
+                else:
+                    return sign * whole
+                whole = whole + d2 / div
+                div = div * 10.0
+                index = index + 1
+    return sign * whole
+
 fn find_from(hay: String, needle: String, start: Int) -> Int:
     let hn: Int = len(hay)
     let nn: Int = len(needle)
@@ -269,7 +343,7 @@ fn usage() -> String:
     t = t + "\n"
     t = t + "USAGE:\n"
     t = t + "  fold_sum --in <f32> [--out fold.md] [--csv fold.csv] [--topk N]\n"
-    t = t + "           [--data-dir D] [--json]\n"
+    t = t + "           [--fs HZ] [--data-dir D] [--json]\n"
     t = t + "  fold_sum <f32> [out.md]\n"
     t = t + "\n"
     t = t + "EXIT CODES: 0 searched, 1 help, 2 error.\n"
@@ -282,6 +356,7 @@ fn main() -> Int with Unsafe:
     var out_path: String = ""
     var csv_path: String = ""
     var topk: Int = TOPK
+    var fs: Float = FS_HZ
     var json: Int = 0
     var show_help: Int = 0
     var pos: Array<String> = []
@@ -309,6 +384,10 @@ fn main() -> Int with Unsafe:
         elif a == "--topk":
             if i + 1 < len(args):
                 topk = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fs = parse_float_text(args[i + 1])
                 i = i + 1
         elif a == "--data-dir":
             if i + 1 < len(args):
@@ -395,14 +474,19 @@ fn main() -> Int with Unsafe:
     decay p2t
 
     // ── Envelope + decimate to ~6 kHz ──
+    // dec from RUNTIME fs (was hardcoded FS_HZ: mis-decimated any non-
+    // voltage input and mislabeled every Hz. Sgr B2 S-band caught it).
+    // dec=1 (no thinning) when already below ~6 kHz; even-force + floor
+    // only apply when actually decimating (dec > 1).
     var dec: Int = 488
-    let fest: Float = FS_HZ / ENV_FS
+    let fest: Float = fs / ENV_FS
     dec = (fest + 0.5) as Int
     if dec < 1:
         dec = 1
-    dec = dec / 2 * 2
-    if dec < 2:
-        dec = 2
+    if dec > 1:
+        dec = dec / 2 * 2
+        if dec < 2:
+            dec = 2
     let n: Int = nsamp / dec * dec
     if n < dec * 64:
         println("fold_sum: too short after decimation")
@@ -491,7 +575,7 @@ fn main() -> Int with Unsafe:
     decay scratch
 
     // ── Harmonic sum under share/fanout over the f0 grid ──
-    let env_fs: Float = FS_HZ / (dec as Float)
+    let env_fs: Float = fs / (dec as Float)
     let df: Float = env_fs / (nfft as Float)
     var i0: Int = 2
     let ci0: Int = (FMIN / df + 0.5) as Int
@@ -521,7 +605,6 @@ fn main() -> Int with Unsafe:
     while hc < nf0:
         mem_store(ptr_offset(hbuf, hc, "Float"), (mem_load(ptr_offset(hbi, hc, "Int"), "Int") as Float) / 1000000.0, "Float")
         hc = hc + 1
-    decay hbi
     decay hbi
 
     // ── Sigma vs MAD floor (scalar reduce) ──

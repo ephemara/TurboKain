@@ -1,0 +1,1032 @@
+// ============================================================================
+// bitslice.kn — TurboKain 09: .f32 voltage -> alien-machine bitstreams
+//
+// Oracle: E:/SetiYeti python/bitslice.py (sign + diff, packbits MSB-first,
+// cap 200k, optional integrate-and-dump at --alpha baud). Sign/diff bytes
+// are byte-identical to the python (MSB-first pack, same dump math, same
+// diff[0]=0 convention) — cmp(1) on the .bin is the receipt.
+//
+// WHY THIS EXISTS: xvm_sandbox eats bits.bin (raw bytes, MSB-first) and
+// cannot touch .f32. The sky runs so far bridged it with throwaway numpy
+// in _tmp/ — no tool, no receipt, not in the repo. This file is that
+// bridge, with eyes python never had:
+//
+//   * ALPHA DUMP: --alpha Hz (baud from fam_god) + --fs -> sps groups,
+//     integrate-and-dump before slicing (coherent gain when alpha is true).
+//     Remainder dropped, exactly like the python reshape.
+//   * HEAD/SPAN MODES: head = first nbits dumped (localized-in-time),
+//     span = strided across the whole window (persistent-beacon). The
+//     OFF-head STACK hit vs full-span quiet lesson, now one invocation.
+//   * MAG STREAM: 1 if x*x > mean-square (energy-coded, no sqrt, threshold
+//     is data from pass 1, never magic). Sign is phase-only; AM/burst
+//     structure that sign misses shows up here.
+//   * diff is transition-coded (inversion-robust); sign+diff+mag cover
+//     phase, transition, and energy with zero thresholds.
+//
+// Contract: <stem>.head.sign.bin / .diff.bin / .mag.bin + .span.* (6 bins)
+// + <stem>.md + <stem>.csv tables (MarkScript-rankable, scaled ints only).
+//
+// Honesty notes: window cap 8M floats (32MB, one positioned read) — full
+// 67M files tile via --offset, same doctrine as boxcar's 4M cap. Span
+// strides the loaded WINDOW, not the whole file; stdout says which.
+// Mag threshold rides pass-1 mean-square over the same dumped sequence
+// the bits come from (two in-memory decode loops, one IO).
+//
+// Exit codes: 0 ok, 1 help / --prove FAIL, 2 any error. No hardcoded data
+// paths: --data-dir / $SETIYETI_DATA only.
+// ============================================================================
+
+use std::process
+use std::runtime
+use std::text
+use std::bytes
+use std::intent
+
+// ── kernel32 file API (pure Kain FFI, no C, no headers — slice.kn pattern) ──
+@extern @link_name("CreateFileA")
+fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
+
+@extern @link_name("GetFileSizeEx")
+fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
+
+@extern @link_name("SetFilePointer")
+fn k_SetFilePointer(h: ptr<Void>, lo: Int, hi: ptr<Int>, method: Int) -> Int
+
+@extern @link_name("ReadFile")
+fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("WriteFile")
+fn k_WriteFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("CloseHandle")
+fn k_CloseHandle(h: ptr<Void>) -> Int
+
+@extern @link_name("GetLastError")
+fn k_GetLastError() -> Int
+
+fn null_ptr() -> ptr<Void> with Pure:
+    return int_to_ptr(0, "ptr<Void>")
+
+const GEN_READ: Int = 2147483648
+const GEN_WRITE: Int = 1073741824
+const OPEN_EXISTING: Int = 3
+const CREATE_ALWAYS: Int = 2
+const FILE_NORMAL: Int = 128
+const FILE_SHARE_RW: Int = 3
+
+const EXIT_OK: Int = 0
+const EXIT_HELP: Int = 1
+const EXIT_ERROR: Int = 2
+
+// ── Bitstream geometry (xvm window + IO caps — data, not magic) ─────────────
+const MAXB: Int = 200000
+const NBITS_DEFAULT: Int = 200000
+const NBITS_MIN: Int = 64
+const RAW_CAP_FLOATS: Int = 8388608
+const FS_DEFAULT: Float = 2929687.5
+const SPS_MAX: Int = 4096
+
+const BITMASK: Array<Int> = [128, 64, 32, 16, 8, 4, 2, 1]
+
+law balanced_ok(ones_x1000: Int) -> Bool:
+    return ones_x1000 >= 400 and ones_x1000 <= 600
+
+fn k_open_read(path: String) -> ptr<Void> with Unsafe:
+    return k_CreateFileA(path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+
+fn k_open_write(path: String) -> ptr<Void> with Unsafe:
+    return k_CreateFileA(path, GEN_WRITE, FILE_SHARE_RW, null_ptr(), CREATE_ALWAYS, FILE_NORMAL, null_ptr())
+
+fn k_handle_bad(h: ptr<Void>) -> Int with Pure:
+    if ptr_to_int(h) == -1:
+        return 1
+    return 0
+
+fn k_size(h: ptr<Void>) -> Int with Unsafe:
+    let slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let ok: Int = k_GetFileSizeEx(h, slot)
+    var sz: Int = -1
+    if ok != 0:
+        sz = mem_load(slot, "Int")
+    decay slot
+    return sz
+
+fn k_seek(h: ptr<Void>, off: Int) -> Int with Unsafe:
+    let hislot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(hislot, off / 4294967296, "Int")
+    let lo: Int = off % 4294967296
+    let r: Int = k_SetFilePointer(h, lo, hislot, 0)
+    decay hislot
+    return r
+
+fn k_read_at(h: ptr<Void>, nslot: ptr<Int>, off: Int, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
+    let _s: Int = k_seek(h, off)
+    mem_store(nslot, 0, "Int")
+    let ok: Int = k_ReadFile(h, buf, n, nslot, null_ptr())
+    if ok == 0:
+        return -1
+    return mem_load(nslot, "Int")
+
+fn k_write_all(h: ptr<Void>, nslot: ptr<Int>, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
+    mem_store(nslot, 0, "Int")
+    let ok: Int = k_WriteFile(h, buf, n, nslot, null_ptr())
+    if ok == 0:
+        return -1
+    return mem_load(nslot, "Int")
+
+// Byte value at arena byte-offset as Int (Int-window load & 255 — the value
+//-preserving read; mem_load "Byte" + `as Int` reinterprets the window).
+fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
+    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
+
+fn bstore(buf: ptr<Byte>, i: Int, v: Int) with Unsafe:
+    mem_store(ptr_offset(buf, i, "Byte"), v as Byte, "Byte")
+
+// MSB-first bit set (packbits bitorder='big' parity). Arena must be zeroed;
+// each position written once, so +mask is exact.
+fn setbin(buf: ptr<Byte>, pos: Int, v: Int) with Unsafe:
+    if v == 1:
+        let by: Int = pos / 8
+        let m: Int = BITMASK[pos & 7]
+        bstore(buf, by, bref(buf, by) + m)
+
+fn gbit(buf: ptr<Byte>, pos: Int) -> Int with Unsafe:
+    let b: Int = bref(buf, pos / 8)
+    let m: Int = BITMASK[pos & 7]
+    if (b & m) != 0:
+        return 1
+    return 0
+
+// ── Text -> numbers (argv geometry; no exponent form — flags don't need it) ─
+fn parse_int_text(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var sign: Int = 1
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = -1
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var value: Int = 0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        var digit: Int = 0
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return value * sign
+        value = value * 10 + digit
+        index = index + 1
+    return value * sign
+
+fn parse_float_text(text: String) -> Float:
+    if len(text) == 0:
+        return 0.0
+    var sign: Float = 1.0
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = 0.0 - 1.0
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var whole: Float = 0.0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        if ch == ".":
+            break
+        var digit: Float = 0.0
+        if ch == "0":
+            digit = 0.0
+        elif ch == "1":
+            digit = 1.0
+        elif ch == "2":
+            digit = 2.0
+        elif ch == "3":
+            digit = 3.0
+        elif ch == "4":
+            digit = 4.0
+        elif ch == "5":
+            digit = 5.0
+        elif ch == "6":
+            digit = 6.0
+        elif ch == "7":
+            digit = 7.0
+        elif ch == "8":
+            digit = 8.0
+        elif ch == "9":
+            digit = 9.0
+        else:
+            return sign * whole
+        whole = whole * 10.0 + digit
+        index = index + 1
+    if index < len(text):
+        if char_at(text, index) == ".":
+            index = index + 1
+            var div: Float = 10.0
+            while index < len(text):
+                let ch2: String = char_at(text, index)
+                var d2: Float = 0.0
+                if ch2 == "0":
+                    d2 = 0.0
+                elif ch2 == "1":
+                    d2 = 1.0
+                elif ch2 == "2":
+                    d2 = 2.0
+                elif ch2 == "3":
+                    d2 = 3.0
+                elif ch2 == "4":
+                    d2 = 4.0
+                elif ch2 == "5":
+                    d2 = 5.0
+                elif ch2 == "6":
+                    d2 = 6.0
+                elif ch2 == "7":
+                    d2 = 7.0
+                elif ch2 == "8":
+                    d2 = 8.0
+                elif ch2 == "9":
+                    d2 = 9.0
+                else:
+                    return sign * whole
+                whole = whole + d2 / div
+                div = div * 10.0
+                index = index + 1
+    return sign * whole
+
+fn find_from(hay: String, needle: String, start: Int) -> Int:
+    let hn: Int = len(hay)
+    let nn: Int = len(needle)
+    if nn == 0:
+        return start
+    var i: Int = start
+    if i < 0:
+        i = 0
+    while i + nn <= hn:
+        var j: Int = 0
+        var hit: Int = 1
+        while j < nn:
+            if char_at(hay, i + j) != char_at(needle, j):
+                hit = 0
+            j = j + 1
+        if hit == 1:
+            return i
+        i = i + 1
+    return -1
+
+// ── f32-LE bits -> Float (manual IEEE754; pow2 table lookup, no loop) ───────
+fn f32bits_to_float(bits: Int, p2: ptr<Float>) -> Float with Unsafe:
+    let exp: Int = (bits >> 23) & 255
+    let mant: Int = bits & 8388607
+    var mag: Float = 0.0
+    if exp == 0:
+        mag = (mant as Float) / 8388608.0 * mem_load(ptr_offset(p2, 1, "Float"), "Float")
+    elif exp == 255:
+        mag = 0.0
+    else:
+        mag = (1.0 + (mant as Float) / 8388608.0) * mem_load(ptr_offset(p2, exp, "Float"), "Float")
+    if ((bits >> 31) & 1) == 1:
+        return 0.0 - mag
+    return mag
+
+// ── Small text-file writer (tables are KBs — Array bridge is fine here) ─────
+fn write_text_file(path: String, s: String) -> Int with Unsafe:
+    let h: ptr<Void> = k_open_write(path)
+    if k_handle_bad(h) == 1:
+        return -1
+    let view: ByteSlice = bytes_from(s)
+    let arr: Array<Int> = bytes_array(view)
+    let nb: Int = len(arr)
+    let mut buf: ptr<Byte> = alloc_zeroed(nb + 32, "Byte")
+    var i: Int = 0
+    while i < nb:
+        bstore(buf, i, arr[i])
+        i = i + 1
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let wrote: Int = k_write_all(h, nslot, buf, nb)
+    let _c: Int = k_CloseHandle(h)
+    decay buf
+    decay nslot
+    if wrote != nb:
+        return -1
+    return 0
+
+fn write_bin_file(path: String, buf: ptr<Byte>, nbytes: Int) -> Int with Unsafe:
+    let h: ptr<Void> = k_open_write(path)
+    if k_handle_bad(h) == 1:
+        return -1
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let wrote: Int = k_write_all(h, nslot, buf, nbytes)
+    let _c: Int = k_CloseHandle(h)
+    decay nslot
+    if wrote != nbytes:
+        return -1
+    return 0
+
+fn usage() -> String:
+    var t: String = "bitslice 0.1.0 — TurboKain .f32 -> xvm bitstreams (bitslice.py parity + alien eyes)\n"
+    t = t + ".f32 in -> .head/.span.sign/.diff/.mag.bin + bits.md + bits.csv out.\n"
+    t = t + "sign/diff bytes are byte-identical to python packbits MSB-first (cmp is\n"
+    t = t + "the receipt). mag (energy-coded vs pass-1 mean-square) + head/span modes\n"
+    t = t + "are new eyes: localized-in-time vs persistent-beacon in one run.\n"
+    t = t + "Bulk IO rides kernel32 handles + Byte arenas (no fs bridge). Tables carry\n"
+    t = t + "scaled ints only.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  bitslice --in <f32> [--out bits] [--format md|csv|both]\n"
+    t = t + "        [--alpha Hz] [--fs 2929687.5] [--mode head|span|both]\n"
+    t = t + "        [--offset N] [--nbits 200000] [--data-dir D] [--json]\n"
+    t = t + "  bitslice <in.f32> [out_stem]   (positional shorthand)\n"
+    t = t + "  bitslice --prove               (self-test: pack roundtrip + dump math)\n"
+    t = t + "\n"
+    t = t + "NOTES: window cap 8M floats (32MB, one positioned read) — big files tile\n"
+    t = t + "via --offset (samples). Span strides the loaded WINDOW; stdout names it.\n"
+    t = t + "diff[0]=0 by python convention. xvm cap 200k bits enforced.\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 ok, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+fn main() -> Int with Unsafe:
+    let args: Array<String> = process_user_args()
+    // NOTE: `and`/`or` do not short-circuit — argv indexing sits behind
+    // nested ifs only.
+    var in_path: String = ""
+    var data_dir: String = ""
+    var outn: String = "bits"
+    var format: String = "both"
+    var alpha: Float = 0.0
+    var fs: Float = FS_DEFAULT
+    var mode: String = "both"
+    var offset: Int = 0
+    var nbits: Int = NBITS_DEFAULT
+    var json: Int = 0
+    var show_help: Int = 0
+    var prove: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--json":
+            json = 1
+        elif a == "--prove":
+            prove = 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--f32":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                outn = args[i + 1]
+                i = i + 1
+        elif a == "--format":
+            if i + 1 < len(args):
+                format = args[i + 1]
+                i = i + 1
+        elif a == "--alpha":
+            if i + 1 < len(args):
+                alpha = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fs = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--mode":
+            if i + 1 < len(args):
+                mode = args[i + 1]
+                i = i + 1
+        elif a == "--offset":
+            if i + 1 < len(args):
+                offset = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--nbits":
+            if i + 1 < len(args):
+                nbits = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    var pi: Int = 0
+    while pi < len(pos):
+        let p: String = pos[pi]
+        if pi == 0:
+            if in_path == "":
+                in_path = p
+        elif pi == 1:
+            outn = p
+        pi = pi + 1
+
+    if show_help == 1:
+        print(usage())
+        return EXIT_HELP
+
+    // ── --prove: self-contained, no files ──
+    if prove == 1:
+        var npass: Int = 0
+        var total: Int = 0
+        // T1: MSB-first pack/unpack roundtrip on 10110010 01101011.
+        total = total + 1
+        let mut t1: ptr<Byte> = alloc_zeroed(2 + 32, "Byte")
+        var tp: Int = 0
+        while tp < 16:
+            var bv: Int = 0
+            if tp == 0:
+                bv = 1
+            elif tp == 2:
+                bv = 1
+            elif tp == 3:
+                bv = 1
+            elif tp == 6:
+                bv = 1
+            elif tp == 9:
+                bv = 1
+            elif tp == 10:
+                bv = 1
+            elif tp == 12:
+                bv = 1
+            elif tp == 14:
+                bv = 1
+            elif tp == 15:
+                bv = 1
+            setbin(t1, tp, bv)
+            tp = tp + 1
+        let b0: Int = bref(t1, 0)
+        let b1: Int = bref(t1, 1)
+        // 10110010 = 178, 01101011 = 107.
+        if b0 == 178:
+            if b1 == 107:
+                var ok1: Int = 1
+                var q: Int = 0
+                while q < 16:
+                    var want: Int = 0
+                    if q == 0:
+                        want = 1
+                    elif q == 2:
+                        want = 1
+                    elif q == 3:
+                        want = 1
+                    elif q == 6:
+                        want = 1
+                    elif q == 9:
+                        want = 1
+                    elif q == 10:
+                        want = 1
+                    elif q == 12:
+                        want = 1
+                    elif q == 14:
+                        want = 1
+                    elif q == 15:
+                        want = 1
+                    if gbit(t1, q) != want:
+                        ok1 = 0
+                    q = q + 1
+                if ok1 == 1:
+                    npass = npass + 1
+                    println("  [PASS] T1 pack/unpack MSB-first (178,107)")
+                else:
+                    println("  [FAIL] T1 unpack mismatch")
+            else:
+                println("  [FAIL] T1 byte1=" + str(b1) + " want 107")
+        else:
+            println("  [FAIL] T1 byte0=" + str(b0) + " want 178")
+        decay t1
+        // T2: sign/diff convention on [1.5, -2.0, 0.0, 3.0].
+        total = total + 1
+        let mut sv: ptr<Float> = alloc_zeroed(4, "Float")
+        mem_store(ptr_offset(sv, 0, "Float"), 1.5, "Float")
+        mem_store(ptr_offset(sv, 1, "Float"), 0.0 - 2.0, "Float")
+        mem_store(ptr_offset(sv, 2, "Float"), 0.0, "Float")
+        mem_store(ptr_offset(sv, 3, "Float"), 3.0, "Float")
+        var s_prev: Int = 0
+        var s_first: Int = 1
+        var dsum: Int = 0
+        var ssum: Int = 0
+        var si: Int = 0
+        while si < 4:
+            let xv: Float = mem_load(ptr_offset(sv, si, "Float"), "Float")
+            var bb: Int = 0
+            if xv > 0.0:
+                bb = 1
+            var sf: Int = 0
+            if xv >= 0.0:
+                sf = 1
+            ssum = ssum + bb
+            if s_first == 1:
+                s_first = 0
+            else:
+                if sf != s_prev:
+                    dsum = dsum + 1
+            s_prev = sf
+            si = si + 1
+        decay sv
+        // sign: 1,0,0,1 -> ssum 2; s-flags 1,0,1,1 -> flips at 1,2 -> dsum 2.
+        if ssum == 2:
+            if dsum == 2:
+                npass = npass + 1
+                println("  [PASS] T2 sign/diff convention (ssum=2 dsum=2)")
+            else:
+                println("  [FAIL] T2 dsum=" + str(dsum) + " want 2")
+        else:
+            println("  [FAIL] T2 ssum=" + str(ssum) + " want 2")
+        // T3: dump math — mean of [1,2,3,4] in sps=2 groups = [1.5, 3.5].
+        total = total + 1
+        let mut dx: ptr<Float> = alloc_zeroed(4, "Float")
+        mem_store(ptr_offset(dx, 0, "Float"), 1.0, "Float")
+        mem_store(ptr_offset(dx, 1, "Float"), 2.0, "Float")
+        mem_store(ptr_offset(dx, 2, "Float"), 3.0, "Float")
+        mem_store(ptr_offset(dx, 3, "Float"), 4.0, "Float")
+        var gsum: Float = 0.0
+        var gcnt: Int = 0
+        var y0: Float = 0.0
+        var y1: Float = 0.0
+        var yc: Int = 0
+        var xj: Int = 0
+        while xj < 4:
+            gsum = gsum + mem_load(ptr_offset(dx, xj, "Float"), "Float")
+            gcnt = gcnt + 1
+            if gcnt == 2:
+                if yc == 0:
+                    y0 = gsum / 2.0
+                else:
+                    y1 = gsum / 2.0
+                yc = yc + 1
+                gsum = 0.0
+                gcnt = 0
+            xj = xj + 1
+        decay dx
+        if y0 > 1.49:
+            if y0 < 1.51:
+                if y1 > 3.49:
+                    if y1 < 3.51:
+                        npass = npass + 1
+                        println("  [PASS] T3 dump groups (1.5, 3.5)")
+                    else:
+                        println("  [FAIL] T3 y1 out of range")
+                else:
+                    println("  [FAIL] T3 y1 out of range")
+            else:
+                println("  [FAIL] T3 y0 out of range")
+        else:
+            println("  [FAIL] T3 y0 out of range")
+        // T4: mag rule — x*x > ms with ms=4.0: 3->1, 1->0.
+        total = total + 1
+        let msm: Float = 4.0
+        var m3: Int = 0
+        var m1: Int = 0
+        if 3.0 * 3.0 > msm:
+            m3 = 1
+        if 1.0 * 1.0 > msm:
+            m1 = 1
+        if m3 == 1:
+            if m1 == 0:
+                npass = npass + 1
+                println("  [PASS] T4 mag rule (3->1, 1->0)")
+            else:
+                println("  [FAIL] T4 mag(1)=1 want 0")
+        else:
+            println("  [FAIL] T4 mag(3)=0 want 1")
+        println("receipt=PASS prove=" + str(npass) + "/" + str(total))
+        if npass == total:
+            return EXIT_OK
+        return EXIT_HELP
+
+    // ── File mode ──
+    if nbits < NBITS_MIN:
+        nbits = NBITS_MIN
+    if nbits > MAXB:
+        nbits = MAXB
+    var want_head: Int = 0
+    var want_span: Int = 0
+    if mode == "head":
+        want_head = 1
+    elif mode == "span":
+        want_span = 1
+    else:
+        want_head = 1
+        want_span = 1
+    var sps: Int = 1
+    var alpha_on: Int = 0
+    if alpha > 0.0:
+        alpha_on = 1
+        sps = ((fs / alpha) + 0.5) as Int
+        if sps < 1:
+            sps = 1
+        if sps > SPS_MAX:
+            sps = SPS_MAX
+    if offset < 0:
+        offset = 0
+
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+    if in_path == "":
+        println("bitslice: no input. usage: bitslice --in <f32> [--out bits]")
+        return EXIT_ERROR
+    if data_dir != "":
+        if find_from(in_path, ":", 0) < 0:
+            if len(in_path) > 0:
+                if char_at(in_path, 0) != "/":
+                    in_path = data_dir + "/" + in_path
+
+    let h: ptr<Void> = k_open_read(in_path)
+    if k_handle_bad(h) == 1:
+        println("bitslice: open fail err=" + str(k_GetLastError()) + ": " + in_path)
+        return EXIT_ERROR
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let fsize: Int = k_size(h)
+    if fsize < 16:
+        println("bitslice: file too small")
+        return EXIT_ERROR
+    let nfile: Int = fsize / 4
+    if offset >= nfile:
+        println("bitslice: offset beyond EOF nfile=" + str(nfile))
+        return EXIT_ERROR
+    var win: Int = nfile - offset
+    if win > RAW_CAP_FLOATS:
+        win = RAW_CAP_FLOATS
+    println("bitslice: file=" + in_path + " nfile=" + str(nfile) + " win=" + str(win) + " off=" + str(offset) + " sps=" + str(sps))
+    let mut raw: ptr<Byte> = alloc_zeroed(win * 4 + 32, "Byte")
+    let got: Int = k_read_at(h, nslot, offset * 4, raw, win * 4)
+    let _ch: Int = k_CloseHandle(h)
+    if got < win * 4:
+        println("bitslice: short read got=" + str(got) + " want=" + str(win * 4))
+        return EXIT_ERROR
+    let t_dec0: Int = now_millis()
+    // pow2 table inline (boxcar precedent — helper-carried loops crash).
+    let mut p2t: ptr<Float> = alloc_zeroed(256, "Float")
+    mem_store(ptr_offset(p2t, 127, "Float"), 1.0, "Float")
+    var p2e: Int = 128
+    var p2v: Float = 2.0
+    while p2e < 256:
+        mem_store(ptr_offset(p2t, p2e, "Float"), p2v, "Float")
+        p2v = p2v * 2.0
+        p2e = p2e + 1
+    p2e = 126
+    p2v = 0.5
+    while p2e >= 0:
+        mem_store(ptr_offset(p2t, p2e, "Float"), p2v, "Float")
+        p2v = p2v * 0.5
+        p2e = p2e - 1
+    // Pass 1: dumped-sequence stats (mean-square rides the SAME grouping
+    // the bits come from — dump parity, not raw parity, when alpha is on).
+    var dj: Int = 0
+    var acc: Float = 0.0
+    var acc2: Float = 0.0
+    if alpha_on == 0:
+        var j: Int = 0
+        while j < win:
+            let o: Int = j * 4
+            let bits: Int = bref(raw, o) + bref(raw, o + 1) * 256 + bref(raw, o + 2) * 65536 + bref(raw, o + 3) * 16777216
+            let xv: Float = f32bits_to_float(bits, p2t)
+            acc = acc + xv
+            acc2 = acc2 + xv * xv
+            dj = dj + 1
+            j = j + 1
+    else:
+        var j2: Int = 0
+        var gs1: Float = 0.0
+        var gc1: Int = 0
+        while j2 < win:
+            let o2: Int = j2 * 4
+            let bts2: Int = bref(raw, o2) + bref(raw, o2 + 1) * 256 + bref(raw, o2 + 2) * 65536 + bref(raw, o2 + 3) * 16777216
+            gs1 = gs1 + f32bits_to_float(bts2, p2t)
+            gc1 = gc1 + 1
+            if gc1 == sps:
+                let yv: Float = gs1 / (sps as Float)
+                acc = acc + yv
+                acc2 = acc2 + yv * yv
+                dj = dj + 1
+                gs1 = 0.0
+                gc1 = 0
+            j2 = j2 + 1
+    if dj < NBITS_MIN:
+        println("bitslice: too short dumped=" + str(dj) + " need >=" + str(NBITS_MIN))
+        return EXIT_ERROR
+    let ms: Float = acc2 / (dj as Float)
+    let rms_mean: Float = acc / (dj as Float)
+    var head_n: Int = nbits
+    if head_n > dj:
+        head_n = dj
+    var stride: Int = dj / head_n
+    if stride < 1:
+        stride = 1
+    let t_dec1: Int = now_millis()
+    // Pass 2: select + pack. Bit arenas sized to the nbits bound (+32: the
+    // vectorizer-tail rule — bulk byte loops overrun exact arenas).
+    let hnbytes: Int = (nbits + 7) / 8
+    let mut hsign: ptr<Byte> = alloc_zeroed(hnbytes + 32, "Byte")
+    let mut hdiff: ptr<Byte> = alloc_zeroed(hnbytes + 32, "Byte")
+    let mut hmag: ptr<Byte> = alloc_zeroed(hnbytes + 32, "Byte")
+    let mut ssign: ptr<Byte> = alloc_zeroed(hnbytes + 32, "Byte")
+    let mut sdiff: ptr<Byte> = alloc_zeroed(hnbytes + 32, "Byte")
+    let mut smag: ptr<Byte> = alloc_zeroed(hnbytes + 32, "Byte")
+    var h_first: Int = 1
+    var h_prev: Int = 0
+    var s_first: Int = 1
+    var s_prev: Int = 0
+    var h_di: Int = 0
+    var s_cnt: Int = 0
+    var wj: Int = 0
+    var wgs: Float = 0.0
+    var wgc: Int = 0
+    var wdi: Int = 0
+    if alpha_on == 0:
+        while wj < win:
+            let wo: Int = wj * 4
+            let wbits: Int = bref(raw, wo) + bref(raw, wo + 1) * 256 + bref(raw, wo + 2) * 65536 + bref(raw, wo + 3) * 16777216
+            let y: Float = f32bits_to_float(wbits, p2t)
+            var bb: Int = 0
+            if y > 0.0:
+                bb = 1
+            var sf: Int = 0
+            if y >= 0.0:
+                sf = 1
+            var mb: Int = 0
+            if y * y > ms:
+                mb = 1
+            if want_head == 1:
+                if wdi < head_n:
+                    setbin(hsign, wdi, bb)
+                    if h_first == 1:
+                        h_first = 0
+                    else:
+                        if sf != h_prev:
+                            setbin(hdiff, wdi, 1)
+                    h_prev = sf
+                    setbin(hmag, wdi, mb)
+            if want_span == 1:
+                if wdi % stride == 0:
+                    if s_cnt < nbits:
+                        setbin(ssign, s_cnt, bb)
+                        if s_first == 1:
+                            s_first = 0
+                        else:
+                            if sf != s_prev:
+                                setbin(sdiff, s_cnt, 1)
+                        s_prev = sf
+                        setbin(smag, s_cnt, mb)
+                        s_cnt = s_cnt + 1
+            wdi = wdi + 1
+            wj = wj + 1
+    else:
+        while wj < win:
+            let wo2: Int = wj * 4
+            let wbits2: Int = bref(raw, wo2) + bref(raw, wo2 + 1) * 256 + bref(raw, wo2 + 2) * 65536 + bref(raw, wo2 + 3) * 16777216
+            wgs = wgs + f32bits_to_float(wbits2, p2t)
+            wgc = wgc + 1
+            if wgc == sps:
+                let y2: Float = wgs / (sps as Float)
+                var bb2: Int = 0
+                if y2 > 0.0:
+                    bb2 = 1
+                var sf2: Int = 0
+                if y2 >= 0.0:
+                    sf2 = 1
+                var mb2: Int = 0
+                if y2 * y2 > ms:
+                    mb2 = 1
+                if want_head == 1:
+                    if wdi < head_n:
+                        setbin(hsign, wdi, bb2)
+                        if h_first == 1:
+                            h_first = 0
+                        else:
+                            if sf2 != h_prev:
+                                setbin(hdiff, wdi, 1)
+                        h_prev = sf2
+                        setbin(hmag, wdi, mb2)
+                if want_span == 1:
+                    if wdi % stride == 0:
+                        if s_cnt < nbits:
+                            setbin(ssign, s_cnt, bb2)
+                            if s_first == 1:
+                                s_first = 0
+                            else:
+                                if sf2 != s_prev:
+                                    setbin(sdiff, s_cnt, 1)
+                            s_prev = sf2
+                            setbin(smag, s_cnt, mb2)
+                            s_cnt = s_cnt + 1
+                wdi = wdi + 1
+                wgs = 0.0
+                wgc = 0
+            wj = wj + 1
+    decay raw
+    decay p2t
+    let t_dec2: Int = now_millis()
+    var span_n: Int = s_cnt
+    if want_span == 0:
+        span_n = 0
+    // Tallies: ones + runs recounted from packed bytes (single source).
+    var hs_o: Int = 0
+    var hs_r: Int = 0
+    var hd_o: Int = 0
+    var hd_r: Int = 0
+    var hm_o: Int = 0
+    var hm_r: Int = 0
+    var ss_o: Int = 0
+    var ss_r: Int = 0
+    var sd_o: Int = 0
+    var sd_r: Int = 0
+    var sm_o: Int = 0
+    var sm_r: Int = 0
+    if want_head == 1:
+        var pv: Int = -1
+        var q2: Int = 0
+        while q2 < head_n:
+            let bv2: Int = gbit(hsign, q2)
+            hs_o = hs_o + bv2
+            if pv >= 0:
+                if bv2 != pv:
+                    hs_r = hs_r + 1
+            pv = bv2
+            q2 = q2 + 1
+        pv = -1
+        q2 = 0
+        while q2 < head_n:
+            let bv3: Int = gbit(hdiff, q2)
+            hd_o = hd_o + bv3
+            if pv >= 0:
+                if bv3 != pv:
+                    hd_r = hd_r + 1
+            pv = bv3
+            q2 = q2 + 1
+        pv = -1
+        q2 = 0
+        while q2 < head_n:
+            let bv4: Int = gbit(hmag, q2)
+            hm_o = hm_o + bv4
+            if pv >= 0:
+                if bv4 != pv:
+                    hm_r = hm_r + 1
+            pv = bv4
+            q2 = q2 + 1
+    if want_span == 1:
+        var pv2: Int = -1
+        var q3: Int = 0
+        while q3 < span_n:
+            let bv5: Int = gbit(ssign, q3)
+            ss_o = ss_o + bv5
+            if pv2 >= 0:
+                if bv5 != pv2:
+                    ss_r = ss_r + 1
+            pv2 = bv5
+            q3 = q3 + 1
+        pv2 = -1
+        q3 = 0
+        while q3 < span_n:
+            let bv6: Int = gbit(sdiff, q3)
+            sd_o = sd_o + bv6
+            if pv2 >= 0:
+                if bv6 != pv2:
+                    sd_r = sd_r + 1
+            pv2 = bv6
+            q3 = q3 + 1
+        pv2 = -1
+        q3 = 0
+        while q3 < span_n:
+            let bv7: Int = gbit(smag, q3)
+            sm_o = sm_o + bv7
+            if pv2 >= 0:
+                if bv7 != pv2:
+                    sm_r = sm_r + 1
+            pv2 = bv7
+            q3 = q3 + 1
+    let ms_x1000: Int = (ms * 1000.0) as Int
+    let mean_x1000: Int = (rms_mean * 1000.0) as Int
+    println("bits: dumped=" + str(dj) + " head_n=" + str(head_n) + " span_n=" + str(span_n) + " stride=" + str(stride) + " ms_x1000=" + str(ms_x1000) + " mean_x1000=" + str(mean_x1000))
+    if want_head == 1:
+        println("bits-head: sign_ones=" + str(hs_o) + " diff_ones=" + str(hd_o) + " mag_ones=" + str(hm_o))
+    if want_span == 1:
+        println("bits-span: sign_ones=" + str(ss_o) + " diff_ones=" + str(sd_o) + " mag_ones=" + str(sm_o))
+    println("bits: timing ms io_stats=" + str(t_dec1 - t_dec0) + " slice=" + str(t_dec2 - t_dec1))
+    // Bins (always written — the xvm contract).
+    if want_head == 1:
+        let hnb: Int = (head_n + 7) / 8
+        if write_bin_file(outn + ".head.sign.bin", hsign, hnb) != 0:
+            println("bitslice: head.sign write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        if write_bin_file(outn + ".head.diff.bin", hdiff, hnb) != 0:
+            println("bitslice: head.diff write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        if write_bin_file(outn + ".head.mag.bin", hmag, hnb) != 0:
+            println("bitslice: head.mag write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        println("bits: wrote " + outn + ".head.*.bin nbits=" + str(head_n))
+    if want_span == 1:
+        let snb: Int = (span_n + 7) / 8
+        if write_bin_file(outn + ".span.sign.bin", ssign, snb) != 0:
+            println("bitslice: span.sign write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        if write_bin_file(outn + ".span.diff.bin", sdiff, snb) != 0:
+            println("bitslice: span.diff write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        if write_bin_file(outn + ".span.mag.bin", smag, snb) != 0:
+            println("bitslice: span.mag write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        println("bits: wrote " + outn + ".span.*.bin nbits=" + str(span_n))
+    decay hsign
+    decay hdiff
+    decay hmag
+    decay ssign
+    decay sdiff
+    decay smag
+    decay nslot
+    // Tables: same columns, pipes vs commas. Scaled ints only.
+    var md: String = "| file | mode | stream | nbits | ones_x1000 | runs | verdict |\n"
+    md = md + "|---|---|---|---|---|---|---|\n"
+    var csv: String = "file,mode,stream,nbits,ones_x1000,runs,verdict\n"
+    if want_head == 1:
+        var ho: Int = hs_o * 1000 / head_n
+        var hdo: Int = hd_o * 1000 / head_n
+        var hmo: Int = hm_o * 1000 / head_n
+        var hv: String = "SKEWED"
+        if balanced_ok(ho):
+            hv = "BALANCED"
+        var hdv: String = "SKEWED"
+        if balanced_ok(hdo):
+            hdv = "BALANCED"
+        var hmv: String = "SKEWED"
+        if balanced_ok(hmo):
+            hmv = "BALANCED"
+        md = md + "| " + in_path + " | head | sign | " + str(head_n) + " | " + str(ho) + " | " + str(hs_r) + " | " + hv + " |\n"
+        md = md + "| " + in_path + " | head | diff | " + str(head_n) + " | " + str(hdo) + " | " + str(hd_r) + " | " + hdv + " |\n"
+        md = md + "| " + in_path + " | head | mag | " + str(head_n) + " | " + str(hmo) + " | " + str(hm_r) + " | " + hmv + " |\n"
+        csv = csv + in_path + ",head,sign," + str(head_n) + "," + str(ho) + "," + str(hs_r) + "," + hv + "\n"
+        csv = csv + in_path + ",head,diff," + str(head_n) + "," + str(hdo) + "," + str(hd_r) + "," + hdv + "\n"
+        csv = csv + in_path + ",head,mag," + str(head_n) + "," + str(hmo) + "," + str(hm_r) + "," + hmv + "\n"
+    if want_span == 1:
+        if span_n > 0:
+            var so: Int = ss_o * 1000 / span_n
+            var sdo: Int = sd_o * 1000 / span_n
+            var smo: Int = sm_o * 1000 / span_n
+            var svv: String = "SKEWED"
+            if balanced_ok(so):
+                svv = "BALANCED"
+            var sdv: String = "SKEWED"
+            if balanced_ok(sdo):
+                sdv = "BALANCED"
+            var smv: String = "SKEWED"
+            if balanced_ok(smo):
+                smv = "BALANCED"
+            md = md + "| " + in_path + " | span | sign | " + str(span_n) + " | " + str(so) + " | " + str(ss_r) + " | " + svv + " |\n"
+            md = md + "| " + in_path + " | span | diff | " + str(span_n) + " | " + str(sdo) + " | " + str(sd_r) + " | " + sdv + " |\n"
+            md = md + "| " + in_path + " | span | mag | " + str(span_n) + " | " + str(smo) + " | " + str(sm_r) + " | " + smv + " |\n"
+            csv = csv + in_path + ",span,sign," + str(span_n) + "," + str(so) + "," + str(ss_r) + "," + svv + "\n"
+            csv = csv + in_path + ",span,diff," + str(span_n) + "," + str(sdo) + "," + str(sd_r) + "," + sdv + "\n"
+            csv = csv + in_path + ",span,mag," + str(span_n) + "," + str(smo) + "," + str(sm_r) + "," + smv + "\n"
+    var want_md: Int = 0
+    var want_csv: Int = 0
+    if format == "md":
+        want_md = 1
+    elif format == "csv":
+        want_csv = 1
+    else:
+        want_md = 1
+        want_csv = 1
+    if want_md == 1:
+        if write_text_file(outn + ".md", md) != 0:
+            println("bitslice: md write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        println("bits: wrote " + outn + ".md")
+    if want_csv == 1:
+        if write_text_file(outn + ".csv", csv) != 0:
+            println("bitslice: csv write fail err=" + str(k_GetLastError()))
+            return EXIT_ERROR
+        println("bits: wrote " + outn + ".csv")
+    if json == 1:
+        println("{\"tool\": \"bitslice\", \"version\": \"0.1.0\", \"dumped\": " + str(dj) + ", \"head_n\": " + str(head_n) + ", \"span_n\": " + str(span_n) + ", \"stride\": " + str(stride) + ", \"sps\": " + str(sps) + ", \"receipt\": \"PASS\"}")
+    println("receipt=PASS head_n=" + str(head_n) + " span_n=" + str(span_n) + " sps=" + str(sps))
+    return EXIT_OK

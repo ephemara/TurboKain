@@ -13,4 +13,7 @@ out/
 *.fil
 *.h5
 *.log
+# python orchestration layer — bytecode is regenerable
+__pycache__/
+*.pyc
 /reports/2026-09-22_fullsweep

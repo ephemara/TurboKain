@@ -1,0 +1,3 @@
+| on_file | off_file | kind | on_flag | off_flag | on_best | off_best | verdict | reason |
+|---|---|---|---|---|---|---|---|---|
+| ../../reports/2026-09-23_oumuamua/pulse_on.md | ../../reports/2026-09-23_oumuamua/pulse_off.md | pulse | 1 | 0 | 1423 | 1338 | WATCH | ON-only structured (persistence still required for CANDIDATE) |

@@ -1,0 +1,8 @@
+| file | mode | stream | nbits | ones_x1000 | runs | verdict |
+|---|---|---|---|---|---|---|
+| ../../reports/2026-09-22_gc/c07_bandmean.f32 | head | sign | 279 | 1000 | 0 | SKEWED |
+| ../../reports/2026-09-22_gc/c07_bandmean.f32 | head | diff | 279 | 0 | 0 | SKEWED |
+| ../../reports/2026-09-22_gc/c07_bandmean.f32 | head | mag | 279 | 508 | 23 | BALANCED |
+| ../../reports/2026-09-22_gc/c07_bandmean.f32 | span | sign | 279 | 1000 | 0 | SKEWED |
+| ../../reports/2026-09-22_gc/c07_bandmean.f32 | span | diff | 279 | 0 | 0 | SKEWED |
+| ../../reports/2026-09-22_gc/c07_bandmean.f32 | span | mag | 279 | 508 | 23 | BALANCED |

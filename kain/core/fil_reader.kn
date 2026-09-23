@@ -1,0 +1,869 @@
+// ============================================================================
+// fil_reader.kn — TurboKain 11: Sigproc filterbank ingest at slice parity
+//
+// The GC unlock: the archive's galactic-center data (BLGCSURVEY C-band,
+// Sgr B2 S-band gpuspec) exists ONLY as filterbank (.fil / HDF5), never as
+// GUPPI raw. slice.exe cannot touch it. This tool reads Sigproc .fil
+// (binary len-prefixed header + float spectra) and emits the same .f32
+// LE time-series our detectors eat. Same CLI/CSV contract shape as slice.
+//
+// Header: HEADER_START ... HEADER_END, each field u32len + name bytes,
+// then typed value (u32 int / f64 double / len-prefixed string). Unknown
+// field names quarantine the file (cannot skip what we cannot type).
+// Data: spectrum-major rows of nchans*nifs samples, nbits 32/8/16.
+//   32: f32 bits copied verbatim (no conversion, no loss)
+//   8:  unsigned byte -> f32 encode
+//   16: little-endian int16 (sign-extended) -> f32 encode
+// nifs != 1 quarantines (multi-feed layout is a later lane).
+//
+// Modes: probe (no --out), --chan N (one channel vs time),
+// --chan-lo A --chan-hi B --mean (band-averaged lightcurve),
+// --spec T (one full spectrum, all channels, for drift-lane later).
+// fs for downstream = 1/tsamp (printed 1dp scaled-int; str(Float) ban).
+//
+//   fil_reader <fil> [chan] [out.f32]
+//   fil_reader --in <fil> --chan N --out x.f32 [--out-md m.md] [--csv c.csv]
+//   fil_reader --in <fil> --chan-lo A --chan-hi B --mean --out light.f32
+//   fil_reader --in <fil> --spec T --out spec.f32
+//   fil_reader --prove   (synthetic .fil roundtrip, no sky)
+//
+// Bulk IO rides kernel32 handles + Byte arenas (slice pattern, +32 slack).
+// Tables ride the fs bridge (KBs). Exit: 0 / 1 help-prove-FAIL / 2 error.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+// ── kernel32 file API (slice.kn pattern, no fs bridge for bulk) ────────────
+@extern @link_name("CreateFileA")
+fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
+
+@extern @link_name("ReadFile")
+fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("WriteFile")
+fn k_WriteFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("GetFileSizeEx")
+fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
+
+@extern @link_name("SetFilePointer")
+fn k_SetFilePointer(h: ptr<Void>, lo: Int, hi: ptr<Int>, method: Int) -> Int
+
+@extern @link_name("CloseHandle")
+fn k_CloseHandle(h: ptr<Void>) -> Int
+
+@extern @link_name("GetLastError")
+fn k_GetLastError() -> Int
+
+fn null_ptr() -> ptr<Void> with Pure:
+    return int_to_ptr(0, "ptr<Void>")
+
+const GEN_READ: Int = 2147483648
+const GEN_WRITE: Int = 1073741824
+const OPEN_EXISTING: Int = 3
+const CREATE_ALWAYS: Int = 2
+const FILE_NORMAL: Int = 128
+const FILE_SHARE_RW: Int = 3
+
+const EXIT_OK: Int = 0
+const EXIT_HELP: Int = 1
+const EXIT_ERROR: Int = 2
+
+const HEAD_ARENA: Int = 65536
+const SLACK: Int = 32
+
+fn k_open_read(path: String) -> ptr<Void> with Unsafe:
+    return k_CreateFileA(path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+
+fn k_open_write(path: String) -> ptr<Void> with Unsafe:
+    return k_CreateFileA(path, GEN_WRITE, FILE_SHARE_RW, null_ptr(), CREATE_ALWAYS, FILE_NORMAL, null_ptr())
+
+fn k_handle_bad(h: ptr<Void>) -> Int with Pure:
+    if ptr_to_int(h) == -1:
+        return 1
+    return 0
+
+fn k_size(h: ptr<Void>) -> Int with Unsafe:
+    let slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let ok: Int = k_GetFileSizeEx(h, slot)
+    var sz: Int = -1
+    if ok != 0:
+        sz = mem_load(slot, "Int")
+    decay slot
+    return sz
+
+fn k_seek(h: ptr<Void>, off: Int) -> Int with Unsafe:
+    let hislot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(hislot, off / 4294967296, "Int")
+    let lo: Int = off % 4294967296
+    let r: Int = k_SetFilePointer(h, lo, hislot, 0)
+    decay hislot
+    return r
+
+fn k_read_at(h: ptr<Void>, nslot: ptr<Int>, off: Int, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
+    let _s: Int = k_seek(h, off)
+    mem_store(nslot, 0, "Int")
+    let ok: Int = k_ReadFile(h, buf, n, nslot, null_ptr())
+    if ok == 0:
+        return -1
+    return mem_load(nslot, "Int")
+
+fn k_write_all(h: ptr<Void>, nslot: ptr<Int>, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
+    mem_store(nslot, 0, "Int")
+    let ok: Int = k_WriteFile(h, buf, n, nslot, null_ptr())
+    if ok == 0:
+        return -1
+    return mem_load(nslot, "Int")
+
+// Int-window byte value (value-preserving; see slice.kn).
+fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
+    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
+
+fn bstore(buf: ptr<Byte>, i: Int, v: Int) with Unsafe:
+    mem_store(ptr_offset(buf, i, "Byte"), v as Byte, "Byte")
+
+fn u32le(buf: ptr<Byte>, off: Int) -> Int with Unsafe:
+    return bref(buf, off) + bref(buf, off + 1) * 256 + bref(buf, off + 2) * 65536 + bref(buf, off + 3) * 16777216
+
+fn i16le(buf: ptr<Byte>, off: Int) -> Int with Unsafe:
+    let raw: Int = bref(buf, off) + bref(buf, off + 1) * 256
+    if raw >= 32768:
+        return raw - 65536
+    return raw
+
+fn store_u32le(buf: ptr<Byte>, off: Int, v: Int) with Unsafe:
+    bstore(buf, off, v % 256)
+    bstore(buf, off + 1, (v / 256) % 256)
+    bstore(buf, off + 2, (v / 65536) % 256)
+    bstore(buf, off + 3, (v / 16777216) % 256)
+
+// f64 LE pair -> Float (headers only: subnormal/inf flush to 0, honest).
+fn f64_decode(hi: Int, lo: Int) -> Float:
+    let exp: Int = (hi >> 20) & 2047
+    let sign: Int = (hi >> 31) & 1
+    if exp == 0:
+        return 0.0
+    if exp == 2047:
+        return 0.0
+    let fhi: Float = (hi & 1048575) as Float
+    var frac: Float = fhi * 4294967296.0 + (lo as Float)
+    var p: Float = 1.0
+    var k: Int = 0
+    while k < 52:
+        p = p * 2.0
+        k = k + 1
+    var mag: Float = (1.0 + frac / p) * 1.0
+    // scale 2^(exp-1023)
+    var e: Int = exp - 1023
+    if e >= 0:
+        var j: Int = 0
+        while j < e:
+            mag = mag * 2.0
+            j = j + 1
+    else:
+        var j2: Int = 0
+        while j2 < (0 - e):
+            mag = mag / 2.0
+            j2 = j2 + 1
+    if sign == 1:
+        return 0.0 - mag
+    return mag
+
+// f32 bits -> Float via inline-built pow2 table (boxcar pattern: table is
+// built INLINE in main — small-callee crash workaround — and passed in).
+fn f32bits_to_float(bits: Int, p2: ptr<Float>) -> Float with Unsafe:
+    let exp: Int = (bits >> 23) & 255
+    let mant: Int = bits & 8388607
+    var mag: Float = 0.0
+    if exp == 0:
+        mag = (mant as Float) / 8388608.0 * mem_load(ptr_offset(p2, 1, "Float"), "Float")
+    elif exp == 255:
+        mag = 0.0
+    else:
+        mag = (1.0 + (mant as Float) / 8388608.0) * mem_load(ptr_offset(p2, exp, "Float"), "Float")
+    if ((bits >> 31) & 1) == 1:
+        return 0.0 - mag
+    return mag
+
+// Float -> f32 bits (u8/i16 lanes + band-mean output; subnormals flush).
+// No << operator (unproven in this lane) — shifts are multiplies.
+fn float_to_f32bits(v: Float) -> Int:
+    if v == 0.0:
+        return 0
+    var sign: Int = 0
+    var x: Float = v
+    if x < 0.0:
+        sign = 1
+        x = 0.0 - x
+    var exp: Int = 127
+    while x >= 2.0:
+        x = x / 2.0
+        exp = exp + 1
+    while x < 1.0:
+        x = x * 2.0
+        exp = exp - 1
+    if exp <= 0:
+        return sign * 2147483648
+    if exp >= 255:
+        return sign * 2147483648 + 255 * 8388608
+    let mant: Int = ((x - 1.0) * 8388608.0) as Int
+    return sign * 2147483648 + exp * 8388608 + mant
+
+fn parse_int_text(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var sign: Int = 1
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = -1
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var value: Int = 0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        var digit: Int = 0
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return value * sign
+        value = value * 10 + digit
+        index = index + 1
+    return value * sign
+
+fn find_from(hay: String, needle: String, start: Int) -> Int:
+    let hn: Int = len(hay)
+    let nn: Int = len(needle)
+    if nn == 0:
+        return start
+    var i: Int = start
+    if i < 0:
+        i = 0
+    while i + nn <= hn:
+        var j: Int = 0
+        var hit: Int = 1
+        while j < nn:
+            if char_at(hay, i + j) != char_at(needle, j):
+                hit = 0
+            j = j + 1
+        if hit == 1:
+            return i
+        i = i + 1
+    return -1
+
+// 1dp via scaled ints (str(Float) truncates — never it).
+fn format_1dp(v: Float) -> String:
+    var neg: Int = 0
+    var x: Float = v
+    if v < 0.0:
+        neg = 1
+        x = 0.0 - v
+    let ip: Int = x as Int
+    let fp: Int = ((x - (ip as Float)) * 10.0) as Int
+    var r: String = str(ip) + "." + str(fp)
+    if neg == 1:
+        r = "-" + r
+    return r
+
+fn usage() -> String:
+    var t: String = "fil_reader 0.1.0 — TurboKain Sigproc filterbank ingest\n"
+    t = t + ".fil in -> .f32 LE time-series out (slice contract for spectra).\n"
+    t = t + "nbits 32 copied verbatim; 8/16 encoded; nifs!=1 quarantines.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  fil_reader <fil> [chan] [out.f32]   (positional shorthand)\n"
+    t = t + "  fil_reader --in <fil> --chan N --out x.f32 [--out-md m.md] [--csv c.csv]\n"
+    t = t + "  fil_reader --in <fil> --chan-lo A --chan-hi B --mean --out light.f32\n"
+    t = t + "  fil_reader --in <fil> --spec T --out spec.f32\n"
+    t = t + "  fil_reader --prove                  (synthetic roundtrip)\n"
+    t = t + "  no --out -> probe-only (header + quarantine verdict).\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 ok, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+fn main() -> Int with Unsafe:
+    let args: Array<String> = process_user_args()
+    var in_path: String = ""
+    var data_dir: String = ""
+    var out_path: String = ""
+    var out_md: String = ""
+    var csv_path: String = ""
+    var want_chan: Int = -1
+    var chan_lo: Int = -1
+    var chan_hi: Int = -1
+    var do_mean: Int = 0
+    var want_spec: Int = -1
+    var json: Int = 0
+    var show_help: Int = 0
+    var prove: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--json":
+            json = 1
+        elif a == "--prove":
+            prove = 1
+        elif a == "--mean":
+            do_mean = 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif a == "--out-md":
+            if i + 1 < len(args):
+                out_md = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif a == "--chan":
+            if i + 1 < len(args):
+                want_chan = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--chan-lo":
+            if i + 1 < len(args):
+                chan_lo = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--chan-hi":
+            if i + 1 < len(args):
+                chan_hi = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--spec":
+            if i + 1 < len(args):
+                want_spec = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    var pi: Int = 0
+    while pi < len(pos):
+        let p: String = pos[pi]
+        if pi == 0:
+            if in_path == "":
+                in_path = p
+        elif pi == 1:
+            if want_chan < 0:
+                want_chan = parse_int_text(p)
+            elif out_path == "":
+                out_path = p
+        elif pi == 2:
+            if out_path == "":
+                out_path = p
+        pi = pi + 1
+
+    if show_help == 1:
+        print(usage())
+        return EXIT_HELP
+
+    // ── pow2 table INLINE (small-callee crash workaround — never extract) ──
+    let mut p2t: ptr<Float> = alloc_zeroed(256, "Float")
+    var pv: Float = 1.0
+    var pd: Int = 0
+    while pd < 127:
+        pv = pv / 2.0
+        pd = pd + 1
+    mem_store(ptr_offset(p2t, 0, "Float"), pv, "Float")
+    var pe: Int = 1
+    while pe < 256:
+        pv = pv * 2.0
+        mem_store(ptr_offset(p2t, pe, "Float"), pv, "Float")
+        pe = pe + 1
+
+    // ── --prove: synthetic .fil roundtrip via scratch file (removed after) ──
+    if prove == 1:
+        // prove owns its OWN table (pp2): main-path p2t must not be
+        // touched on this path (ownership validator joins branch states).
+        let mut pp2: ptr<Float> = alloc_zeroed(256, "Float")
+        var ppv: Float = 1.0
+        var ppd: Int = 0
+        while ppd < 127:
+            ppv = ppv / 2.0
+            ppd = ppd + 1
+        mem_store(ptr_offset(pp2, 0, "Float"), ppv, "Float")
+        var ppe: Int = 1
+        while ppe < 256:
+            ppv = ppv * 2.0
+            mem_store(ptr_offset(pp2, ppe, "Float"), ppv, "Float")
+            ppe = ppe + 1
+        var npass: Int = 0
+        var total: Int = 0
+        let cwd: String = process_current_working_directory()
+        let scratch: String = cwd + "/_tmp_filprove.fil"
+        // build: nchans=16 nifs=1 nbits=32 nspec=4, ramp value = t*16+c
+        // --- string-based header build (exact bytes via text_chr) ---
+        total = total + 1
+        // f64 roundtrip: 1.073741824 -> decode must start with 1073741 us
+        let dtest: Float = f64_decode(1072770571, 3894859413)
+        let dus: Int = (dtest * 1000000.0) as Int
+        if dus > 1073000 and dus < 1075000:
+            npass = npass + 1
+        else:
+            println("[prove] t1 f64 got us=" + str(dus))
+        // f32 roundtrip: bits(1.5)=0x3FC00000 -> 1.5 -> re-encode same bits
+        total = total + 1
+        let f15: Float = f32bits_to_float(1069547520, pp2)
+        let b15: Int = float_to_f32bits(f15)
+        if b15 == 1069547520:
+            npass = npass + 1
+        else:
+            println("[prove] t1b f32 got bits=" + str(b15))
+        // t2: u8/i16 encode sanity (0->0, 255->255.0 bits of 255.0)
+        total = total + 1
+        let b0: Int = float_to_f32bits(0.0)
+        let b255: Int = float_to_f32bits(255.0)
+        if b0 == 0 and b255 == 1132396544:
+            npass = npass + 1
+        else:
+            println("[prove] t2 enc b255=" + str(b255))
+        // t3: full file roundtrip — header as bytes via text bridge
+        total = total + 1
+        var hb: String = ""
+        // u32 helper values must ride bytes; build with text_chr codes
+        // field writer: len-i32 + name + typed value, all via text_chr
+        var hw: String = ""
+        hw = hw + text_chr(12) + text_chr(0) + text_chr(0) + text_chr(0) + "HEADER_START"
+        hw = hw + text_chr(6) + text_chr(0) + text_chr(0) + text_chr(0) + "nchans"
+        hw = hw + text_chr(16) + text_chr(0) + text_chr(0) + text_chr(0)
+        hw = hw + text_chr(5) + text_chr(0) + text_chr(0) + text_chr(0) + "nbits"
+        hw = hw + text_chr(32) + text_chr(0) + text_chr(0) + text_chr(0)
+        hw = hw + text_chr(4) + text_chr(0) + text_chr(0) + text_chr(0) + "nifs"
+        hw = hw + text_chr(1) + text_chr(0) + text_chr(0) + text_chr(0)
+        hw = hw + text_chr(5) + text_chr(0) + text_chr(0) + text_chr(0) + "tsamp"
+        // tsamp = 2.0 -> f64 bits hi=0x40000000 lo=0
+        hw = hw + text_chr(0) + text_chr(0) + text_chr(0) + text_chr(0)
+        hw = hw + text_chr(0) + text_chr(0) + text_chr(0) + text_chr(64)
+        hw = hw + text_chr(10) + text_chr(0) + text_chr(0) + text_chr(0) + "HEADER_END"
+        hb = hw
+        // data: 4 spectra x 16 chans f32 ramp v = t*16+c as f32 bits
+        var t3: Int = 0
+        while t3 < 4:
+            var c3: Int = 0
+            while c3 < 16:
+                let bits3: Int = float_to_f32bits((t3 * 16 + c3) as Float)
+                hb = hb + text_chr(bits3 % 256) + text_chr((bits3 / 256) % 256) + text_chr((bits3 / 65536) % 256) + text_chr((bits3 / 16777216) % 256)
+                c3 = c3 + 1
+            t3 = t3 + 1
+        fs_write_text(scratch, hb)
+        // NOTE: fs_write_text is a TEXT bridge — bytes >= 128 may not
+        // survive UTF-8. Prove data uses small values (ramp 0..63 -> f32
+        // bytes stay < 128 except exponent byte 0x42/0x43...). If the
+        // bridge mangles it, t3 fails HONESTLY and we fall back to
+        // kernel32-written prove files. Watch the receipt.
+        let h3: ptr<Void> = k_open_read(scratch)
+        var t3ok: Int = 0
+        if k_handle_bad(h3) == 0:
+            let fsz3: Int = k_size(h3)
+            // header len = 16+10+9+9+9+12+14 = parse: walk it
+            let mut abuf: ptr<Byte> = alloc_zeroed(512, "Byte")
+            let mut ns3: ptr<Int> = alloc_zeroed(1, "Int")
+            let got3: Int = k_read_at(h3, ns3, 0, abuf, 512)
+            if got3 > 100:
+                // walk fields
+                var off3: Int = 0
+                var nc3: Int = -1
+                var nb3: Int = -1
+                var ni3: Int = -1
+                var ts3: Float = 0.0
+                var hlen3: Int = -1
+                var guard3: Int = 0
+                while off3 + 4 <= got3 and guard3 < 16:
+                    guard3 = guard3 + 1
+                    let fl3: Int = u32le(abuf, off3)
+                    off3 = off3 + 4
+                    if fl3 <= 0 or fl3 > 64 or off3 + fl3 > got3:
+                        break
+                    var nm3: Array<Int> = []
+                    var fx3: Int = 0
+                    while fx3 < fl3:
+                        push(nm3, bref(abuf, off3 + fx3))
+                        fx3 = fx3 + 1
+                    let nms3: String = text_from_byte_array(nm3)
+                    off3 = off3 + fl3
+                    if nms3 == "HEADER_START":
+                        continue
+                    if nms3 == "HEADER_END":
+                        hlen3 = off3
+                        break
+                    if nms3 == "nchans" or nms3 == "nbits" or nms3 == "nifs":
+                        let vv3: Int = u32le(abuf, off3)
+                        off3 = off3 + 4
+                        if nms3 == "nchans":
+                            nc3 = vv3
+                        elif nms3 == "nbits":
+                            nb3 = vv3
+                        else:
+                            ni3 = vv3
+                    elif nms3 == "tsamp":
+                        let lo3: Int = u32le(abuf, off3)
+                        let hi3: Int = u32le(abuf, off3 + 4)
+                        off3 = off3 + 8
+                        ts3 = f64_decode(hi3, lo3)
+                if nc3 == 16 and nb3 == 32 and ni3 == 1 and hlen3 > 0 and ts3 > 1.9 and ts3 < 2.1:
+                    // read spectrum 2, chan 5 -> expect 2*16+5 = 37.0
+                    let mut rbuf: ptr<Byte> = alloc_zeroed(64 + SLACK, "Byte")
+                    let roff3: Int = hlen3 + 2 * 16 * 4
+                    let gotr3: Int = k_read_at(h3, ns3, roff3, rbuf, 64)
+                    if gotr3 == 64:
+                        let b37: Int = u32le(rbuf, 5 * 4)
+                        let f37: Float = f32bits_to_float(b37, pp2)
+                        if f37 > 36.9 and f37 < 37.1:
+                            t3ok = 1
+                    decay rbuf
+            decay abuf
+            decay ns3
+            let _c3: Int = k_CloseHandle(h3)
+        fs_remove_file(scratch)
+        if t3ok == 1:
+            npass = npass + 1
+        else:
+            println("[prove] t3 roundtrip FAIL (bridge or parse — see note)")
+        println("[prove] " + str(npass) + "/" + str(total))
+        var pcode: Int = EXIT_OK
+        if npass != total:
+            pcode = EXIT_HELP
+        if pcode == EXIT_OK:
+            println("receipt=PASS prove=" + str(npass) + "/" + str(total))
+        else:
+            println("receipt=FAIL prove=" + str(npass) + "/" + str(total))
+        decay pp2
+        return pcode
+
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+    if in_path != "":
+        if data_dir != "":
+            if find_from(in_path, ":", 0) < 0:
+                if len(in_path) > 0:
+                    if char_at(in_path, 0) != "/":
+                        in_path = data_dir + "/" + in_path
+    if in_path == "":
+        println("fil_reader: no input. usage: fil_reader --in <fil> [--out x.f32]")
+        return EXIT_ERROR
+
+    let h: ptr<Void> = k_open_read(in_path)
+    if k_handle_bad(h) == 1:
+        println("fil_reader: open fail err=" + str(k_GetLastError()) + ": " + in_path)
+        return EXIT_ERROR
+    let fsize: Int = k_size(h)
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut habuf: ptr<Byte> = alloc_zeroed(HEAD_ARENA + SLACK, "Byte")
+    let got: Int = k_read_at(h, nslot, 0, habuf, HEAD_ARENA)
+    if got < 64:
+        println("fil_reader: short read on header")
+        let _c: Int = k_CloseHandle(h)
+        return EXIT_ERROR
+
+    // ── header walk ──
+    var off: Int = 0
+    var nchans: Int = -1
+    var nifs: Int = -1
+    var nbits: Int = -1
+    var datatype: Int = -1
+    var tsamp: Float = 0.0
+    var fch1: Float = 0.0
+    var foff: Float = 0.0
+    var tstart: Float = 0.0
+    var src_raj: Float = 0.0
+    var src_dej: Float = 0.0
+    var src_name: String = ""
+    var hlen: Int = -1
+    var bad_field: String = ""
+    var guard: Int = 0
+    while off + 4 <= got and guard < 64:
+        guard = guard + 1
+        let flen: Int = u32le(habuf, off)
+        off = off + 4
+        if flen <= 0 or flen > 64 or off + flen > got:
+            bad_field = "TRUNCATED"
+            break
+        var nb: Array<Int> = []
+        var fx: Int = 0
+        while fx < flen:
+            push(nb, bref(habuf, off + fx))
+            fx = fx + 1
+        let fname: String = text_from_byte_array(nb)
+        off = off + flen
+        if fname == "HEADER_START":
+            continue
+        if fname == "HEADER_END":
+            hlen = off
+            break
+        if fname == "telescope_id" or fname == "machine_id" or fname == "data_type" or fname == "barycentric" or fname == "pulsarcentric" or fname == "nbits" or fname == "nchans" or fname == "nifs" or fname == "scan_number" or fname == "nbeams" or fname == "ibeam":
+            if off + 4 > got:
+                bad_field = fname
+                break
+            let vv: Int = u32le(habuf, off)
+            off = off + 4
+            if fname == "nchans":
+                nchans = vv
+            elif fname == "nifs":
+                nifs = vv
+            elif fname == "nbits":
+                nbits = vv
+            elif fname == "data_type":
+                datatype = vv
+        elif fname == "tstart" or fname == "tsamp" or fname == "fch1" or fname == "foff" or fname == "refdm" or fname == "az_start" or fname == "za_start" or fname == "src_raj" or fname == "src_dej" or fname == "period":
+            if off + 8 > got:
+                bad_field = fname
+                break
+            let dlo: Int = u32le(habuf, off)
+            let dhi: Int = u32le(habuf, off + 4)
+            off = off + 8
+            let dv: Float = f64_decode(dhi, dlo)
+            if fname == "tsamp":
+                tsamp = dv
+            elif fname == "fch1":
+                fch1 = dv
+            elif fname == "foff":
+                foff = dv
+            elif fname == "tstart":
+                tstart = dv
+            elif fname == "src_raj":
+                src_raj = dv
+            elif fname == "src_dej":
+                src_dej = dv
+        elif fname == "source_name" or fname == "rawdatafile":
+            if off + 4 > got:
+                bad_field = fname
+                break
+            let slen: Int = u32le(habuf, off)
+            off = off + 4
+            if slen < 0 or slen > 256 or off + slen > got:
+                bad_field = fname
+                break
+            var sb: Array<Int> = []
+            var sx: Int = 0
+            while sx < slen:
+                push(sb, bref(habuf, off + sx))
+                sx = sx + 1
+            off = off + slen
+            if fname == "source_name":
+                src_name = text_from_byte_array(sb)
+        else:
+            bad_field = fname
+            break
+
+    if len(bad_field) > 0:
+        println("fil_reader: QUARANTINE unknown/truncated header field: " + bad_field)
+        let _c2: Int = k_CloseHandle(h)
+        return EXIT_ERROR
+    if hlen < 0 or nchans <= 0 or nbits <= 0 or tsamp <= 0.0:
+        println("fil_reader: QUARANTINE incomplete header (nchans=" + str(nchans) + " nbits=" + str(nbits) + ")")
+        let _c3: Int = k_CloseHandle(h)
+        return EXIT_ERROR
+    if nifs != 1:
+        println("fil_reader: QUARANTINE nifs=" + str(nifs) + " (multi-feed lane not built)")
+        let _c4: Int = k_CloseHandle(h)
+        return EXIT_ERROR
+    var samp_bytes: Int = 4
+    if nbits == 8:
+        samp_bytes = 1
+    elif nbits == 16:
+        samp_bytes = 2
+    elif nbits == 32:
+        samp_bytes = 4
+    else:
+        println("fil_reader: QUARANTINE nbits=" + str(nbits) + " (need 8/16/32)")
+        let _c5: Int = k_CloseHandle(h)
+        return EXIT_ERROR
+    let row_bytes: Int = nchans * samp_bytes
+    let nspec: Int = (fsize - hlen) / row_bytes
+    var trunc_note: String = "exact"
+    if (fsize - hlen) % row_bytes != 0:
+        trunc_note = "TRUNCATED-tail"
+    if nspec <= 0:
+        println("fil_reader: QUARANTINE no spectra (fsize=" + str(fsize) + " hlen=" + str(hlen) + ")")
+        let _c6: Int = k_CloseHandle(h)
+        return EXIT_ERROR
+
+    decay habuf
+
+    // scaled-int display (str(Float) ban)
+    let tsamp_us: Int = (tsamp * 1000000.0) as Int
+    let fch1_x1e4: Int = (fch1 * 10000.0) as Int
+    let foff_hz_x1e3: Int = (foff * 1000000000.0) as Int
+    let tstart_x1e6: Int = (tstart * 1000000.0) as Int
+    let fs_hz: Float = 1.0 / tsamp
+    let fs_s: String = format_1dp(fs_hz)
+
+    // ── probe-only (slice convention) ──
+    if out_path == "" and out_md == "" and csv_path == "":
+        println("fil_reader: " + in_path)
+        println("  source=" + src_name + " nchans=" + str(nchans) + " nbits=" + str(nbits) + " nspec=" + str(nspec) + " (" + trunc_note + ")")
+        println("  fch1_mhz_x1e4=" + str(fch1_x1e4) + " foff_hz_x1e3=" + str(foff_hz_x1e3) + " tsamp_us=" + str(tsamp_us) + " tstart_x1e6=" + str(tstart_x1e6))
+        println("  fs_hz=" + fs_s + " datatype=" + str(datatype) + " hlen=" + str(hlen))
+        println("  verdict=PROBED receipt=PASS")
+        let _c7: Int = k_CloseHandle(h)
+        return EXIT_OK
+
+    // ── extraction plan ──
+    // mode 0 = chan, 1 = band-mean, 2 = spec
+    var mode: Int = 0
+    var ex_chan: Int = want_chan
+    var ex_lo: Int = chan_lo
+    var ex_hi: Int = chan_hi
+    if want_spec >= 0:
+        mode = 2
+    elif do_mean == 1 or chan_lo >= 0 or chan_hi >= 0:
+        mode = 1
+        if ex_lo < 0:
+            ex_lo = 0
+        if ex_hi < 0:
+            ex_hi = nchans - 1
+    if mode == 0 and ex_chan < 0:
+        ex_chan = nchans / 2
+    if mode == 0:
+        if ex_chan < 0 or ex_chan >= nchans:
+            println("fil_reader: chan out of range 0.." + str(nchans - 1))
+            let _c8: Int = k_CloseHandle(h)
+            return EXIT_ERROR
+    if mode == 1:
+        if ex_lo < 0:
+            ex_lo = 0
+        if ex_hi >= nchans:
+            ex_hi = nchans - 1
+        if ex_lo > ex_hi:
+            println("fil_reader: chan-lo > chan-hi")
+            let _c9: Int = k_CloseHandle(h)
+            return EXIT_ERROR
+    if mode == 2:
+        if want_spec < 0 or want_spec >= nspec:
+            println("fil_reader: spec out of range 0.." + str(nspec - 1))
+            let _c10: Int = k_CloseHandle(h)
+            return EXIT_ERROR
+
+    var out_n: Int = nspec
+    if mode == 2:
+        out_n = nchans
+    let mut outbuf: ptr<Byte> = alloc_zeroed(out_n * 4 + SLACK, "Byte")
+    let mut rowbuf: ptr<Byte> = alloc_zeroed(row_bytes + SLACK, "Byte")
+
+    if mode == 0 or mode == 1:
+        var t: Int = 0
+        while t < nspec:
+            let roff: Int = hlen + t * row_bytes
+            let gotr: Int = k_read_at(h, nslot, roff, rowbuf, row_bytes)
+            if gotr < row_bytes:
+                println("fil_reader: short row t=" + str(t))
+                let _c11: Int = k_CloseHandle(h)
+                return EXIT_ERROR
+            if mode == 0:
+                var bits: Int = 0
+                if samp_bytes == 4:
+                    bits = u32le(rowbuf, ex_chan * 4)
+                elif samp_bytes == 1:
+                    bits = float_to_f32bits(bref(rowbuf, ex_chan) as Float)
+                else:
+                    bits = float_to_f32bits(i16le(rowbuf, ex_chan * 2) as Float)
+                store_u32le(outbuf, t * 4, bits)
+            else:
+                var acc: Float = 0.0
+                var cc: Int = ex_lo
+                while cc <= ex_hi:
+                    if samp_bytes == 4:
+                        acc = acc + f32bits_to_float(u32le(rowbuf, cc * 4), p2t)
+                    elif samp_bytes == 1:
+                        acc = acc + (bref(rowbuf, cc) as Float)
+                    else:
+                        acc = acc + (i16le(rowbuf, cc * 2) as Float)
+                    cc = cc + 1
+                let mean: Float = acc / ((ex_hi - ex_lo + 1) as Float)
+                store_u32le(outbuf, t * 4, float_to_f32bits(mean))
+            t = t + 1
+    else:
+        let sroff: Int = hlen + want_spec * row_bytes
+        let got2: Int = k_read_at(h, nslot, sroff, rowbuf, row_bytes)
+        if got2 < row_bytes:
+            println("fil_reader: short spec row")
+            let _c12: Int = k_CloseHandle(h)
+            return EXIT_ERROR
+        var c2: Int = 0
+        while c2 < nchans:
+            var b2: Int = 0
+            if samp_bytes == 4:
+                b2 = u32le(rowbuf, c2 * 4)
+            elif samp_bytes == 1:
+                b2 = float_to_f32bits(bref(rowbuf, c2) as Float)
+            else:
+                b2 = float_to_f32bits(i16le(rowbuf, c2 * 2) as Float)
+            store_u32le(outbuf, c2 * 4, b2)
+            c2 = c2 + 1
+
+    let _cl: Int = k_CloseHandle(h)
+
+    decay rowbuf
+
+    // ── write .f32 ──
+    let oh: ptr<Void> = k_open_write(out_path)
+    if k_handle_bad(oh) == 1:
+        println("fil_reader: write open fail err=" + str(k_GetLastError()) + ": " + out_path)
+        return EXIT_ERROR
+    let wrote: Int = k_write_all(oh, nslot, outbuf, out_n * 4)
+    decay outbuf
+    decay nslot
+    decay p2t
+    let _co: Int = k_CloseHandle(oh)
+    if wrote != out_n * 4:
+        println("fil_reader: short write")
+        return EXIT_ERROR
+
+    // ── tables (fs bridge, KBs) ──
+    var modeline: String = "chan=" + str(ex_chan)
+    if mode == 1:
+        modeline = "band " + str(ex_lo) + "-" + str(ex_hi) + " mean"
+    if mode == 2:
+        modeline = "spec=" + str(want_spec)
+    var md: String = "| file | source | nchans | nspec | mode | out_n | fs_hz | verdict |\n"
+    md = md + "|---|---|---|---|---|---|---|---|\n"
+    md = md + "| " + in_path + " | " + src_name + " | " + str(nchans) + " | " + str(nspec) + " | " + modeline + " | " + str(out_n) + " | " + fs_s + " | EXTRACTED-" + trunc_note + " |\n"
+    var csv: String = "file,source,nchans,nspec,mode,out_n,fs_hz,tsamp_us,fch1_x1e4,foff_hz_x1e3,verdict\n"
+    csv = csv + in_path + "," + src_name + "," + str(nchans) + "," + str(nspec) + "," + modeline + "," + str(out_n) + "," + fs_s + "," + str(tsamp_us) + "," + str(fch1_x1e4) + "," + str(foff_hz_x1e3) + ",EXTRACTED-" + trunc_note + "\n"
+    if out_md != "":
+        fs_write_text(out_md, md)
+        println("fil_reader: wrote " + out_md)
+    if csv_path != "":
+        fs_write_text(csv_path, csv)
+        println("fil_reader: wrote " + csv_path)
+    if json == 1:
+        print(md)
+    println("fil_reader: " + out_path + " n=" + str(out_n) + " fs_hz=" + fs_s + " receipt=PASS")
+    return EXIT_OK

@@ -282,9 +282,9 @@ scripts/memlog.exe <area> <type> "what changed and why" "path/one,path/two"
 ```
 
 It stamps the ISO date, seeds the header if the ledger is missing, and
-sanitizes tabs/newlines so a field can never break the TSV. **This repo is
-pure Kain + MarkScript** — never add a Python/other-language helper; write it
-in Kain (see `kain/_template/cli.kn` for the CLI pattern).
+sanitizes tabs/newlines so a field can never break the TSV. Prefer the Kain
+helper for repo tooling; Python glue is now allowed where it earns its keep
+(see **Python is allowed** below), but computation stays in Kain.
 
 ### `catalog.tsv` — the tool ledger
 
@@ -370,6 +370,7 @@ _tmp/        scratch, gitignored, nothing load-bearing
 docs/        spec.md + the vendored Kain baseline under docs/kain/
 _objective/  the mission (objective_1.md)
 scripts/     Kain helpers (memlog.kn — append a memory.tsv row)
+python/      Python orchestration layer (tk driver — wrap exes, unified scans)
 memory.tsv   append-only change log — EVERY file change gets a row
 catalog.tsv  TurboKain tool/artifact ledger (see the Ledgers section above)
 AGENTS.md    this file
@@ -418,10 +419,48 @@ side-by-side is easier to find, easier to delete, and keeps `.kain/` strictly
 for intermediate artifacts. Exact-build-location context matters when you are
 comparing tools or proving parity with the C/numpy lane next door.
 
-No Bazel in this repo. Repo code is **pure Kain + MarkScript** — helpers
-included. Python/C live next door in SetiYeti as the spec-truth lane; invoke
-them from there, never add a helper in another language here. The Kain toolchain lives
+No Bazel in this repo. The pipeline is **Kain-first**: `.kn` computes, `.md`
+orchestrates, helpers included. Python is now sanctioned as the orchestration
+layer under `python/` (see **Python is allowed** below). C and everything else
+still live next door in SetiYeti as the spec-truth lane; invoke them from
+there, never add a helper in another language here. The Kain toolchain lives
 outside this repo (warm) — `kain` is on PATH.
+
+---
+
+## Python is allowed (orchestration, not detection)
+
+Python is **chill now**. The repo is still Kain-first — detectors and the
+pipeline are `.kn` → native `.exe` — but Python is sanctioned as the
+**orchestration layer**: wrapping those exes, running the unified sweep,
+harvesting receipts, catalog tooling — glue, not signal processing.
+
+The line is simple: **Python drives the exes; it never re-implements a lane.**
+A new detector kernel is Kain. Python may parse a log, assemble argv,
+fingerprint an input, chain stages, and write a manifest.
+
+The sanctioned home is `python/` (stdlib only — no venv, no pip):
+
+```bash
+python python/tk.py list            # driveable exes + catalog status
+python python/tk.py prove           # run every built-in self-test
+python python/tk.py scan <raw|f32>  # unified sweep -> reports/<date>_<tag>_scan/
+python python/tk.py run TOOL [args] # pass-through exec (inherit stdio)
+python python/tk.py doctor          # env vars + registry drift
+```
+
+- `python/turbokain/registry.py` is the **one place** that knows each exe's
+  CLI contract. Add a `Tool(...)` row when you add an exe; add it to
+  `F32_DETECTORS` if it rides the default scan bundle.
+- `tk scan` writes `manifest.json` (provenance: input fingerprint, git rev,
+  argv, host) + `summary.tsv` (per-stage exit/time/receipt/verdicts). A scan
+  is not done until those exist.
+- Rules that did **not** move: thresholds are data, never baked into the
+  wrapper; no hardcoded drive letters (registry is repo-relative, data paths
+  come from `--data-dir` / `$SETIYETI_DATA`); the veto stays human-fed;
+  Python records verdicts, it never decides dispositions.
+- If you reach for a third-party dependency, stop and ask whether the job
+  belongs in Kain instead. Stdlib-only is the default for a reason.
 
 ---
 
@@ -508,14 +547,60 @@ outside this repo (warm) — `kain` is on PATH.
 - **`use std::audio::dsp` doesn't build on this snapshot** (its source binds
   `half`, now reserved — likely version skew, not a bug) — hand-roll the
   small FFT/DFT you need, rewire on refresh.
+- **One `decay` per arena per `fn` (validator joins branch states).** Two
+  `decay X` in one function fail `check` even with `return` between them
+  (fil_reader 2026-09-22: prove-block + later decay flagged twice).
+  Fix: prove blocks own their tables (own name, single decay, single
+  `pcode` return); error paths LEAK (OS reclaims on exit — slice.kn does
+  this too); exactly one decay site per arena on the success path.
+  `build` tolerates what `check` flags (pre-existing double `decay hbi`
+  in fold_sum built fine) — but keep `check` green anyway.
+- **Every detector takes `--fs` (M7, no exceptions).** fold_sum hardcoded
+  `FS_HZ` and silently ignored `--fs`, mis-decimating filterbank input
+  and mislabeling every Hz (Sgr B2: phantom "1585.87 Hz"). Caught by
+  cross-lane check (fam bins + python rfft said 25.00), fixed live.
+  Any new lane gets `--fs` on day one; audit old ones per regime.
+- **boxcar_bank blows up on quantized integer power data (G5).** A 6-level
+  ramp fires 23.6σ, flat constant is CLEAN — periodic-quantized input
+  nulls a sub-band (≈zero MAD → division blowup; Sgr B2 ch1363 phantom
+  149σ at raw z≤2). Voltage floats unaffected. Required: MAD floor
+  before robust-z (same family as xeno's floored ladder division).
+- **gpuspec HDF5: `import hdf5plugin` (bitshuffle) + axes are
+  (time, feed, freq) despite labels claiming (freq, feed, time).**
+  Verify axis identity against `nchans` before any dump.
+- **Never shadow an arena name with a same-named local (lag_hunt repro).**
+  A `var vlag: Int` inside a loop body shadowing the `ptr<Int> vlag`
+  arena corrupts ownership tracking: `check` passes silently, then a
+  deterministic exit-127 crash lands on `decay vlag` — misdiagnosed for
+  an hour as heap corruption (bisected 35 decays to find it). Grep for
+  `var <arena-name>` before trusting any decay crash.
+- **`share` needs a heap region owned by the sharing fn.** A parameter
+  pointer is a stack region to the checker (`share is not supported for
+  local_alloca`) — inline the `share`/`fanout` lanes into the fn that
+  owns the arenas (fold_sum pattern), never behind a helper call.
+- **Strong signals poison global noise units (lag_hunt repro).** A carrier
+  inflates candidate-MAD and crushes every other peak (corr 0.80 scored
+  z 1.7). z must be *local* contrast over the *theoretical* moment unit
+  `sqrt(m4/(M·m2²))`, never over a measured global MAD — and moments must
+  be winsorized (|w| cap) or the signal inflates its own unit (AM gate
+  z 3.7 raw → ~11 capped).
+- **Fold at phase, not index.** `bin = (i % lag) * nb / lag` — `i * nb /
+  lag` piles the whole series into the last bin and mints fake fold-z
+  (lag_hunt: 8448 bogus → 4.8 honest).
+- **`kain -c` trig probes lie (unresolved).** `-c 'sin(pi/2)'` prints 0
+  while file-compiled trig demonstrably works (frame_hunt FFT 9/9,
+  lag_hunt BPSK carrier recovered at z 139). Do not trust `-c` for
+  trig; verify in file code. Repro owed to the compiler owner.
 
 ---
 
 ## Status
 
-Baseline scaffolded. No TurboKain exes yet. SetiYeti remains the truth. First
-targets, in order: boxcar/fold sieve → power sieve → evidence journal → the
-MarkScript campaign layer. See `docs/spec.md`.
+Baseline scaffolded. SetiYeti remains the truth. A Python orchestration layer
+(`python/tk.py`) now wraps the exes for unified scans (list / prove / run /
+scan / doctor / catalog), stdlib-only. First targets, in order: boxcar/fold
+sieve → power sieve → evidence journal → the MarkScript campaign layer. See
+`docs/spec.md`.
 
 ---
 

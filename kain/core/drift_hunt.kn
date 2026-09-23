@@ -1,0 +1,1105 @@
+// ============================================================================
+// drift_hunt.kn — TurboKain 09: incoherent deDoppler tone search
+// (drift_hunt.py parity, voltage-slice adaptation)
+//
+// Oracle: SetiYeti python/drift_hunt.py (search_chunk + --prove). Method kept
+// 1:1 where it matters, adapted where Kain wins:
+//
+//   1. STFT waterfall from .f32 voltage (Hann + radix-2 FFT rows):
+//      the oracle ingests filterbank .fil power (already channelized); we
+//      start from slice.exe voltage, so the channelizer is inline.
+//      Hop = nfft (non-overlapping), power bins 0..nfft/2.
+//   2. per drift rate: shift spectrum i by round(r*t_i/chan_bw) bins, sum
+//      over time (incoherent Taylor shift-and-add, oracle verbatim).
+//   3. robust-z vs running-median background (w=101); edge mask maxshift+4;
+//      non-max suppression +-3 bins, top-25 per rate; cross-rate dedupe with
+//      TIE-PREFERS-RATE-0 (the oracle's phantom-fast-drifter lesson: sub-bin
+//      grids tie, and argmax order picked the grid edge -2.0).
+//   4. threshold default 8.0 (oracle THRESH_DEFAULT).
+//
+// Kain adaptations (all documented, none silent):
+//   * STFT FFT = hand radix-2 sk_fft (fold_sum verbatim). No converge on the
+//     big FFT: a spec-DFT of a 4096-pt row costs 16M ops/row and converge
+//     would pay it in file mode. The lane receipt lives in --prove P1
+//     (64-pt naive DFT vs radix-2 power agreement) instead.
+//   * converge med100: the running-median kernel behind bg_flatten.
+//     spec = insertion-sort exact median (fold_sum shape), fast =
+//     quickselect (boxcar shape). Both return the same order statistic
+//     (upper-middle index n/2), so the lanes agree by construction and the
+//     floor is identical — no 1-quantum split possible.
+//   * Grid scale differs from the oracle ON PURPOSE. The oracle defaults
+//     +-2 Hz/s at 0.05 step because 300 s x 3 Hz filterbank cells give
+//     resol = chan_bw/span ~ 0.01 Hz/s. A 1M-sample voltage slice
+//     (0.34 s x 715 Hz STFT cells at nfft=4096) gives resol ~ 2000 Hz/s —
+//     physics, not a bug. v1 defaults (--drmax 2000, --step 100) hunt FAST
+//     drifters (sats, meteors, jerk events) on second-scale slices; sidereal
+//     rates need minute-scale chained stares (M3, not built). The runtime
+//     prints resol and warns when step < resol (oracle NOTE, verbatim).
+//   * Tables carry scaled ints only (freq_hz, drift_x100, sigma_x100):
+//     str(Float) truncates in this lane. CSV columns mirror the oracle
+//     (freq, drift, sigma, kind) in integerized form; the header/md state
+//     the scale.
+//   * --prove runs the dedoppler CORE in normalized pixel units
+//     (tspec=chan_bw=1) on a synthetic waterfall: CTRL quiet, INJECT drift
+//     recovered with rate err <= step, ZERO-DRIFT tie resolves to rate 0.
+//     End-to-end drift resolution is span-limited physics (formula printed),
+//     not a test gap.
+//   * Event layer (world/patch/resonate trip) deferred to v1.1, same as
+//     boxcar v1.0 -> v1.1. Detector parity first.
+//
+// Contract: .f32 in -> drift.md + drift.csv out.
+// Exit codes: 0 searched, 1 help OR --prove FAIL, 2 error. No hardcoded data
+// paths: --data-dir / $SETIYETI_DATA only.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+// ── kernel32 file API (fold_sum verbatim — no fs bridge for bulk) ───────────
+@extern @link_name("CreateFileA")
+fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
+
+@extern @link_name("SetFilePointer")
+fn k_SetFilePointer(h: ptr<Void>, lo: Int, hi: ptr<Int>, method: Int) -> Int
+
+@extern @link_name("ReadFile")
+fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
+
+@extern @link_name("GetFileSizeEx")
+fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
+
+@extern @link_name("CloseHandle")
+fn k_CloseHandle(h: ptr<Void>) -> Int
+
+@extern @link_name("GetLastError")
+fn k_GetLastError() -> Int
+
+fn null_ptr() -> ptr<Void> with Pure:
+    return int_to_ptr(0, "ptr<Void>")
+
+const GEN_READ: Int = 2147483648
+const OPEN_EXISTING: Int = 3
+const FILE_NORMAL: Int = 128
+const FILE_SHARE_RW: Int = 3
+
+const EXIT_OK: Int = 0
+const EXIT_HELP: Int = 1
+const EXIT_ERROR: Int = 2
+
+// ── Search geometry (voltage-slice scale — data, not magic; see header) ─────
+const FS_HZ: Float = 2929687.5
+const F0_MHZ: Float = 1400.0
+const NFFT_DEFAULT: Int = 4096
+const NFFT_MIN: Int = 256
+const NFFT_MAX: Int = 16384
+const DRMAX_DEFAULT: Float = 2000.0
+const STEP_DEFAULT: Float = 100.0
+const THRESH_DEFAULT: Float = 8.0
+const TOPK_DEFAULT: Int = 64
+const PER_RATE_TOP: Int = 25
+const WHITEN_W: Int = 101
+const MAX_N_DEFAULT: Int = 1048576
+const MAX_N_HARD: Int = 4194304
+const HIT_CAP: Int = 2048
+const SK_PI2: Float = 6.283185307179586
+
+// ── Laws: gates the report must satisfy ─────────────────────────────────────
+law drift_rate_ok(rate_x100: Int, max_x100: Int) -> Bool:
+    return rate_x100 <= max_x100
+
+law drift_rate_lo(rate_x100: Int, max_x100: Int) -> Bool:
+    return 0 - rate_x100 <= max_x100
+
+// ── Scalar helpers (boxcar/fold_sum verbatim shapes) ────────────────────────
+fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
+    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
+
+fn parse_int_text(text: String) -> Int:
+    if len(text) == 0:
+        return 0
+    var sign: Int = 1
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = -1
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var value: Int = 0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        var digit: Int = 0
+        if ch == "0":
+            digit = 0
+        elif ch == "1":
+            digit = 1
+        elif ch == "2":
+            digit = 2
+        elif ch == "3":
+            digit = 3
+        elif ch == "4":
+            digit = 4
+        elif ch == "5":
+            digit = 5
+        elif ch == "6":
+            digit = 6
+        elif ch == "7":
+            digit = 7
+        elif ch == "8":
+            digit = 8
+        elif ch == "9":
+            digit = 9
+        else:
+            return value * sign
+        value = value * 10 + digit
+        index = index + 1
+    return value * sign
+
+fn parse_float_text(text: String) -> Float:
+    if len(text) == 0:
+        return 0.0
+    var sign: Float = 1.0
+    var index: Int = 0
+    if char_at(text, 0) == "-":
+        sign = 0.0 - 1.0
+        index = 1
+    elif char_at(text, 0) == "+":
+        index = 1
+    var whole: Float = 0.0
+    while index < len(text):
+        let ch: String = char_at(text, index)
+        if ch == ".":
+            break
+        var digit: Float = 0.0
+        if ch == "0":
+            digit = 0.0
+        elif ch == "1":
+            digit = 1.0
+        elif ch == "2":
+            digit = 2.0
+        elif ch == "3":
+            digit = 3.0
+        elif ch == "4":
+            digit = 4.0
+        elif ch == "5":
+            digit = 5.0
+        elif ch == "6":
+            digit = 6.0
+        elif ch == "7":
+            digit = 7.0
+        elif ch == "8":
+            digit = 8.0
+        elif ch == "9":
+            digit = 9.0
+        else:
+            return sign * whole
+        whole = whole * 10.0 + digit
+        index = index + 1
+    if index < len(text):
+        if char_at(text, index) == ".":
+            index = index + 1
+            var div: Float = 10.0
+            while index < len(text):
+                let ch2: String = char_at(text, index)
+                var d2: Float = 0.0
+                if ch2 == "0":
+                    d2 = 0.0
+                elif ch2 == "1":
+                    d2 = 1.0
+                elif ch2 == "2":
+                    d2 = 2.0
+                elif ch2 == "3":
+                    d2 = 3.0
+                elif ch2 == "4":
+                    d2 = 4.0
+                elif ch2 == "5":
+                    d2 = 5.0
+                elif ch2 == "6":
+                    d2 = 6.0
+                elif ch2 == "7":
+                    d2 = 7.0
+                elif ch2 == "8":
+                    d2 = 8.0
+                elif ch2 == "9":
+                    d2 = 9.0
+                else:
+                    return sign * whole
+                whole = whole + d2 / div
+                div = div * 10.0
+                index = index + 1
+    return sign * whole
+
+fn find_from(hay: String, needle: String, start: Int) -> Int:
+    let hn: Int = len(hay)
+    let nn: Int = len(needle)
+    if nn == 0:
+        return start
+    var i: Int = start
+    if i < 0:
+        i = 0
+    while i + nn <= hn:
+        var j: Int = 0
+        var hit: Int = 1
+        while j < nn:
+            if char_at(hay, i + j) != char_at(needle, j):
+                hit = 0
+            j = j + 1
+        if hit == 1:
+            return i
+        i = i + 1
+    return -1
+
+// Exact f32-LE quad -> Float via 2^e table (fold_sum verbatim).
+fn f32_of_quad(b0: Int, b1: Int, b2: Int, b3: Int, p2t: ptr<Float>) -> Float with Unsafe:
+    let bits: Int = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+    if bits == 0:
+        return 0.0
+    let sign: Int = bits >> 31
+    let exp: Int = (bits >> 23) & 255
+    let mant: Int = bits & 8388607
+    if exp == 0 or exp == 255:
+        return 0.0
+    let frac: Float = 1.0 + (mant as Float) / 8388608.0
+    var v: Float = frac * mem_load(ptr_offset(p2t, exp - 1, "Float"), "Float")
+    if sign == 1:
+        v = 0.0 - v
+    return v
+
+// ── Radix-2 DIT FFT, in-place (fold_sum verbatim — proven, do not retune) ───
+fn sk_bitrev(re: ptr<Float>, im: ptr<Float>, n: Int) with Unsafe:
+    var j: Int = 0
+    var i: Int = 1
+    while i < n:
+        var bit: Int = n / 2
+        while bit > 0:
+            if j >= bit:
+                j = j - bit
+                bit = bit / 2
+            else:
+                break
+        j = j + bit
+        if i < j:
+            let tr: Float = mem_load(ptr_offset(re, i, "Float"), "Float")
+            let ti: Float = mem_load(ptr_offset(im, i, "Float"), "Float")
+            mem_store(ptr_offset(re, i, "Float"), mem_load(ptr_offset(re, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(im, i, "Float"), mem_load(ptr_offset(im, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(re, j, "Float"), tr, "Float")
+            mem_store(ptr_offset(im, j, "Float"), ti, "Float")
+        i = i + 1
+    return
+
+fn sk_fft(re: ptr<Float>, im: ptr<Float>, n: Int) -> Int with Unsafe:
+    sk_bitrev(re, im, n)
+    var size: Int = 2
+    while size <= n:
+        let half_size: Int = size / 2
+        let step: Float = 0.0 - SK_PI2 / (size as Float)
+        var i: Int = 0
+        while i < n:
+            var k: Int = 0
+            var j: Int = i
+            while j < i + half_size:
+                let ang: Float = (k as Float) * step
+                let cw: Float = cos(ang)
+                let sw: Float = sin(ang)
+                let ar: Float = mem_load(ptr_offset(re, j + half_size, "Float"), "Float")
+                let ai: Float = mem_load(ptr_offset(im, j + half_size, "Float"), "Float")
+                let tpre: Float = cw * ar - sw * ai
+                let tpim: Float = sw * ar + cw * ai
+                let xr: Float = mem_load(ptr_offset(re, j, "Float"), "Float")
+                let xi: Float = mem_load(ptr_offset(im, j, "Float"), "Float")
+                mem_store(ptr_offset(re, j, "Float"), xr + tpre, "Float")
+                mem_store(ptr_offset(im, j, "Float"), xi + tpim, "Float")
+                mem_store(ptr_offset(re, j + half_size, "Float"), xr - tpre, "Float")
+                mem_store(ptr_offset(im, j + half_size, "Float"), xi - tpim, "Float")
+                k = k + 1
+                j = j + 1
+            i = i + size
+        size = size * 2
+    return 0
+
+// ── Quickselect median (boxcar verbatim) ────────────────────────────────────
+fn qs_partition(a: ptr<Float>, lo: Int, hi: Int) -> Int:
+    let piv: Float = mem_load(ptr_offset(a, hi, "Float"), "Float")
+    var i: Int = lo
+    var j: Int = lo
+    while j < hi:
+        if mem_load(ptr_offset(a, j, "Float"), "Float") <= piv:
+            let t: Float = mem_load(ptr_offset(a, i, "Float"), "Float")
+            mem_store(ptr_offset(a, i, "Float"), mem_load(ptr_offset(a, j, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(a, j, "Float"), t, "Float")
+            i = i + 1
+        j = j + 1
+    let t2: Float = mem_load(ptr_offset(a, i, "Float"), "Float")
+    mem_store(ptr_offset(a, i, "Float"), mem_load(ptr_offset(a, hi, "Float"), "Float"), "Float")
+    mem_store(ptr_offset(a, hi, "Float"), t2, "Float")
+    return i
+
+fn quickselect_k(a: ptr<Float>, n: Int, k: Int) -> Float:
+    var lo: Int = 0
+    var hi: Int = n - 1
+    while lo < hi:
+        let p: Int = qs_partition(a, lo, hi)
+        if p == k:
+            break
+        elif p > k:
+            hi = p - 1
+        else:
+            lo = p + 1
+    return mem_load(ptr_offset(a, k, "Float"), "Float")
+
+// ── converge med100: running-median kernel, spec vs fast ────────────────────
+// Both lanes return the same order statistic (index n/2, upper-middle), so
+// they agree by construction on every window, odd or even. The floor the
+// detector sees is identical down the lane.
+fn med_spec100(win: ptr<Float>, scratch: ptr<Float>, n: Int) -> Int:
+    var i: Int = 0
+    while i < n:
+        mem_store(ptr_offset(scratch, i, "Float"), mem_load(ptr_offset(win, i, "Float"), "Float"), "Float")
+        i = i + 1
+    var a: Int = 1
+    while a < n:
+        let key: Float = mem_load(ptr_offset(scratch, a, "Float"), "Float")
+        var b: Int = a - 1
+        var moved: Int = 0
+        while b >= 0:
+            if mem_load(ptr_offset(scratch, b, "Float"), "Float") > key:
+                mem_store(ptr_offset(scratch, b + 1, "Float"), mem_load(ptr_offset(scratch, b, "Float"), "Float"), "Float")
+                b = b - 1
+                moved = 1
+            else:
+                break
+        if moved == 1:
+            mem_store(ptr_offset(scratch, b + 1, "Float"), key, "Float")
+        a = a + 1
+    return (mem_load(ptr_offset(scratch, n / 2, "Float"), "Float") * 100.0) as Int
+
+fn med_fast100(win: ptr<Float>, scratch: ptr<Float>, n: Int) -> Int:
+    var i: Int = 0
+    while i < n:
+        mem_store(ptr_offset(scratch, i, "Float"), mem_load(ptr_offset(win, i, "Float"), "Float"), "Float")
+        i = i + 1
+    return (quickselect_k(scratch, n, n / 2) * 100.0) as Int
+
+converge med100(win: ptr<Float>, scratch: ptr<Float>, n: Int) -> Int:
+    spec exact:
+        return med_spec100(win, scratch, n)
+    fast quick when capability("cpu.x86.avx2"):
+        return med_fast100(win, scratch, n)
+
+// Naive DFT power row, prove-only (P1 lane receipt). n <= 256.
+fn dft_row_spec(x: ptr<Float>, base: Int, n: Int, prow: ptr<Float>) -> Int with Unsafe:
+    var b: Int = 0
+    while b <= n / 2:
+        var re: Float = 0.0
+        var im: Float = 0.0
+        var k: Int = 0
+        while k < n:
+            let ang: Float = SK_PI2 * (b as Float) * (k as Float) / (n as Float)
+            let xv: Float = mem_load(ptr_offset(x, base + k, "Float"), "Float")
+            re = re + xv * cos(ang)
+            im = im - xv * sin(ang)
+            k = k + 1
+        mem_store(ptr_offset(prow, b, "Float"), re * re + im * im, "Float")
+        b = b + 1
+    return 0
+
+// Detection uses unclamped Floats; tables clamp (boxcar precedent).
+fn sig_clamp100(s: Float) -> Int:
+    let v: Float = s * 100.0
+    if v > 999999999.0:
+        return 999999999
+    if v < 0.0 - 999999999.0:
+        return 0 - 999999999
+    return v as Int
+
+fn rate_round_shift(rate: Float, t: Float, chan_bw: Float) -> Int:
+    let f: Float = rate * t / chan_bw
+    if f >= 0.0:
+        return (f + 0.5) as Int
+    return 0 - ((0.0 - f + 0.5) as Int)
+
+// ── Core: waterfall -> dedoppler hits (large callee, single-threaded) ───────
+// water is nt x nch row-major power. tspec/chan_bw carry the units, so the
+// same core serves file mode (physics units) and --prove (pixel units).
+// hbin/hrate_x100/hsig_x100 hold up to cap hits; returns hit count.
+fn run_grid(water: ptr<Float>, nt: Int, nch: Int, tspec: Float, chan_bw: Float, drmax: Float, step: Float, thresh: Float, hbin: ptr<Int>, hrate: ptr<Int>, hsig: ptr<Int>, cap: Int) -> Int with Unsafe:
+    var nrates: Int = ((2.0 * drmax / step) + 1.5) as Int
+    if nrates < 1:
+        nrates = 1
+    if nrates > 257:
+        nrates = 257
+    let mut shifts: ptr<Int> = alloc_zeroed(nt + 32, "Int")
+    let mut acc: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut z: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut bg: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut win: ptr<Float> = alloc_zeroed(WHITEN_W + 32, "Float")
+    let mut scratch: ptr<Float> = alloc_zeroed(WHITEN_W + 32, "Float")
+    let mut resid: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut scratch2: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut taken: ptr<Int> = alloc_zeroed(nch + 32, "Int")
+    let half_w: Int = WHITEN_W / 2
+    var nhits: Int = 0
+    var rj: Int = 0
+    while rj < nrates:
+        let rate: Float = 0.0 - drmax + (rj as Float) * step
+        var i: Int = 0
+        var maxsh: Int = 0
+        while i < nt:
+            let sh: Int = rate_round_shift(rate, (i as Float) * tspec, chan_bw)
+            mem_store(ptr_offset(shifts, i, "Int"), sh, "Int")
+            var ash: Int = sh
+            if ash < 0:
+                ash = 0 - ash
+            if ash > maxsh:
+                maxsh = ash
+            i = i + 1
+        // Edge mask eats the line: skip the rate, do not report the edge.
+        if maxsh + 4 >= nch / 2:
+            rj = rj + 1
+            continue
+        var k: Int = 0
+        while k < nch:
+            mem_store(ptr_offset(acc, k, "Float"), 0.0, "Float")
+            k = k + 1
+        i = 0
+        while i < nt:
+            let sh: Int = mem_load(ptr_offset(shifts, i, "Int"), "Int")
+            k = 0
+            while k < nch:
+                let src: Int = k + sh
+                if src >= 0:
+                    if src < nch:
+                        let old: Float = mem_load(ptr_offset(acc, k, "Float"), "Float")
+                        mem_store(ptr_offset(acc, k, "Float"), old + mem_load(ptr_offset(water, i * nch + src, "Float"), "Float"), "Float")
+                k = k + 1
+            i = i + 1
+        // bg_flatten: running median w=101 over acc/nt, MAD over residuals.
+        let nt_f: Float = nt as Float
+        k = 0
+        while k < nch:
+            var w0: Int = k - half_w
+            if w0 < 0:
+                w0 = 0
+            var w1: Int = k + half_w
+            if w1 >= nch:
+                w1 = nch - 1
+            let wn: Int = w1 - w0 + 1
+            var wk: Int = 0
+            while wk < wn:
+                mem_store(ptr_offset(win, wk, "Float"), mem_load(ptr_offset(acc, w0 + wk, "Float"), "Float") / nt_f, "Float")
+                wk = wk + 1
+            let m100: Int = med100(win, scratch, wn)
+            mem_store(ptr_offset(bg, k, "Float"), (m100 as Float) / 100.0, "Float")
+            k = k + 1
+        k = 0
+        while k < nch:
+            let v: Float = mem_load(ptr_offset(acc, k, "Float"), "Float") / nt_f
+            var d: Float = v - mem_load(ptr_offset(bg, k, "Float"), "Float")
+            if d < 0.0:
+                d = 0.0 - d
+            mem_store(ptr_offset(resid, k, "Float"), d, "Float")
+            k = k + 1
+        let mad100: Int = med100(resid, scratch2, nch)
+        var scale: Float = 1.4826 * ((mad100 as Float) / 100.0)
+        if scale <= 0.0:
+            scale = 0.000000001
+        k = 0
+        while k < nch:
+            let v2: Float = mem_load(ptr_offset(acc, k, "Float"), "Float") / nt_f
+            mem_store(ptr_offset(z, k, "Float"), (v2 - mem_load(ptr_offset(bg, k, "Float"), "Float")) / scale, "Float")
+            k = k + 1
+        var m: Int = maxsh + 4
+        k = 0
+        while k < m:
+            mem_store(ptr_offset(z, k, "Float"), 0.0, "Float")
+            k = k + 1
+        k = nch - m
+        while k < nch:
+            mem_store(ptr_offset(z, k, "Float"), 0.0, "Float")
+            k = k + 1
+        k = 0
+        while k < nch:
+            mem_store(ptr_offset(taken, k, "Int"), 0, "Int")
+            k = k + 1
+        // Non-max suppression +-3 bins, top-25 (oracle verbatim).
+        var found: Int = 0
+        while found < PER_RATE_TOP:
+            var bk: Int = -1
+            var bz: Float = thresh
+            k = 0
+            while k < nch:
+                if mem_load(ptr_offset(taken, k, "Int"), "Int") == 0:
+                    if mem_load(ptr_offset(z, k, "Float"), "Float") >= bz:
+                        bz = mem_load(ptr_offset(z, k, "Float"), "Float")
+                        bk = k
+                k = k + 1
+            if bk < 0:
+                break
+            if nhits < cap:
+                mem_store(ptr_offset(hbin, nhits, "Int"), bk, "Int")
+                mem_store(ptr_offset(hrate, nhits, "Int"), (rate * 100.0) as Int, "Int")
+                mem_store(ptr_offset(hsig, nhits, "Int"), sig_clamp100(bz), "Int")
+                nhits = nhits + 1
+            var s0: Int = bk - 3
+            if s0 < 0:
+                s0 = 0
+            var s1: Int = bk + 3
+            if s1 >= nch:
+                s1 = nch - 1
+            var sk: Int = s0
+            while sk <= s1:
+                mem_store(ptr_offset(taken, sk, "Int"), 1, "Int")
+                sk = sk + 1
+            found = found + 1
+        rj = rj + 1
+    decay shifts
+    decay acc
+    decay z
+    decay bg
+    decay win
+    decay scratch
+    decay resid
+    decay scratch2
+    decay taken
+    return nhits
+
+fn usage() -> String:
+    var t: String = "drift_hunt 0.1.0 — TurboKain incoherent deDoppler tone search (drift_hunt parity)\n"
+    t = t + "STFT waterfall (Hann + radix-2 rows) + Taylor shift-and-add + median-whiten,\n"
+    t = t + "8-sigma gate, NMS +-3, cross-rate dedupe with tie-prefers-rate-0.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  drift_hunt --in <f32> [--out drift.md] [--csv drift.csv] [--nfft 4096]\n"
+    t = t + "             [--drmax 2000] [--step 100] [--thresh 8] [--f0-mhz 1400]\n"
+    t = t + "             [--fs 2929687.5] [--topk 64] [--max-n N] [--skip-samples S] [--data-dir D] [--json]\n"
+    t = t + "  drift_hunt <f32> [out.md]\n"
+    t = t + "  drift_hunt --prove          (self-test: FFT lanes + core in pixel units)\n"
+    t = t + "\n"
+    t = t + "resol = (fs/nfft)/(n/fs) Hz/s; step < resol warns (sub-bin ties -> rate 0).\n"
+    t = t + "CSV ints: freq_hz (exact Hz), drift_x100, sigma_x100.\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 searched, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+fn main() -> Int with Unsafe:
+    let args: Array<String> = process_user_args()
+    // NOTE: `and`/`or` do not short-circuit — argv indexing sits behind
+    // nested ifs only.
+    var in_path: String = ""
+    var data_dir: String = ""
+    var out_path: String = ""
+    var csv_path: String = ""
+    var nfft: Int = NFFT_DEFAULT
+    var drmax: Float = DRMAX_DEFAULT
+    var step: Float = STEP_DEFAULT
+    var thresh: Float = THRESH_DEFAULT
+    var f0_mhz: Float = F0_MHZ
+    var fs: Float = FS_HZ
+    var topk: Int = TOPK_DEFAULT
+    var max_n: Int = MAX_N_DEFAULT
+    var skip_n: Int = 0
+    var json: Int = 0
+    var show_help: Int = 0
+    var prove: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--json":
+            json = 1
+        elif a == "--prove":
+            prove = 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--f32":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif a == "--nfft":
+            if i + 1 < len(args):
+                nfft = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--drmax":
+            if i + 1 < len(args):
+                drmax = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--step":
+            if i + 1 < len(args):
+                step = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--thresh":
+            if i + 1 < len(args):
+                thresh = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--f0-mhz":
+            if i + 1 < len(args):
+                f0_mhz = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fs = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--topk":
+            if i + 1 < len(args):
+                topk = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--max-n":
+            if i + 1 < len(args):
+                max_n = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--skip-samples":
+            if i + 1 < len(args):
+                skip_n = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    var pi: Int = 0
+    while pi < len(pos):
+        let p: String = pos[pi]
+        if pi == 0:
+            if in_path == "":
+                in_path = p
+        elif pi == 1:
+            if out_path == "":
+                out_path = p
+        pi = pi + 1
+
+    if show_help == 1:
+        print(usage())
+        return EXIT_HELP
+    if topk <= 0 or topk > 512:
+        topk = TOPK_DEFAULT
+    if max_n < 4096:
+        max_n = 4096
+    if max_n > MAX_N_HARD:
+        max_n = MAX_N_HARD
+    if step <= 0.0:
+        step = STEP_DEFAULT
+    if drmax <= 0.0:
+        drmax = DRMAX_DEFAULT
+
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+
+    // ── --prove: self-contained, no files ──
+    if prove == 1:
+        println("drift-prove: pixel-unit core (tspec=chan_bw=1) + FFT lane check")
+        var npass: Int = 0
+        var total: Int = 0
+        // P1: radix-2 vs naive DFT power agreement on a 64-pt noise row.
+        let pn1: Int = 64
+        let mut trow: ptr<Float> = alloc_zeroed(pn1 + 32, "Float")
+        var seed: Int = 777
+        var gi: Int = 0
+        while gi < pn1:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            mem_store(ptr_offset(trow, gi, "Float"), ((seed as Float) / 2147483648.0 - 0.5) * 28.0, "Float")
+            gi = gi + 1
+        let mut re1: ptr<Float> = alloc_zeroed(pn1 + 32, "Float")
+        let mut im1: ptr<Float> = alloc_zeroed(pn1 + 32, "Float")
+        gi = 0
+        while gi < pn1:
+            mem_store(ptr_offset(re1, gi, "Float"), mem_load(ptr_offset(trow, gi, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(im1, gi, "Float"), 0.0, "Float")
+            gi = gi + 1
+        let _f1: Int = sk_fft(re1, im1, pn1)
+        let mut pdft: ptr<Float> = alloc_zeroed(pn1 / 2 + 33, "Float")
+        let _d1: Int = dft_row_spec(trow, 0, pn1, pdft)
+        var worst1000: Int = 0
+        var b1: Int = 0
+        while b1 <= pn1 / 2:
+            let rv: Float = mem_load(ptr_offset(re1, b1, "Float"), "Float")
+            let iv: Float = mem_load(ptr_offset(im1, b1, "Float"), "Float")
+            let pfft: Float = rv * rv + iv * iv
+            let pref: Float = mem_load(ptr_offset(pdft, b1, "Float"), "Float")
+            var d: Float = pfft - pref
+            if d < 0.0:
+                d = 0.0 - d
+            var m: Float = pref
+            if m < 0.0:
+                m = 0.0 - m
+            if m < 1.0:
+                m = 1.0
+            let r1000: Int = (d * 1000.0 / m) as Int
+            if r1000 > worst1000:
+                worst1000 = r1000
+            b1 = b1 + 1
+        decay trow
+        decay re1
+        decay im1
+        decay pdft
+        total = total + 1
+        if worst1000 <= 5:
+            npass = npass + 1
+            println("  [PASS] P1 FFT lanes agree  worst_rel_x1000=" + str(worst1000))
+        else:
+            println("  [FAIL] P1 FFT lanes agree  worst_rel_x1000=" + str(worst1000))
+        // Synthetic waterfall: nt=64 x nch=513, CLT-6 noise x14.
+        let pnt: Int = 64
+        let pnch: Int = 513
+        let mut wat: ptr<Float> = alloc_zeroed(pnt * pnch + 32, "Float")
+        seed = 31337
+        var wi: Int = 0
+        while wi < pnt * pnch:
+            var accn: Float = 0.0
+            var u: Int = 0
+            while u < 6:
+                seed = (seed * 1103515245 + 12345) % 2147483648
+                accn = accn + (seed as Float) / 2147483648.0
+                u = u + 1
+            mem_store(ptr_offset(wat, wi, "Float"), (accn - 3.0) * 14.0 + 42.0, "Float")
+            wi = wi + 1
+        let mut pb: ptr<Int> = alloc_zeroed(HIT_CAP + 32, "Int")
+        let mut pr: ptr<Int> = alloc_zeroed(HIT_CAP + 32, "Int")
+        let mut ps: ptr<Int> = alloc_zeroed(HIT_CAP + 32, "Int")
+        // P2: CTRL noise-only stays under threshold.
+        let c0: Int = run_grid(wat, pnt, pnch, 1.0, 1.0, 0.2, 0.025, THRESH_DEFAULT, pb, pr, ps, HIT_CAP)
+        total = total + 1
+        if c0 == 0:
+            npass = npass + 1
+            println("  [PASS] P2 CTRL noise quiet  hits=0")
+        else:
+            println("  [FAIL] P2 CTRL noise quiet  hits=" + str(c0))
+        // P3: INJECT diagonal tone at rate +0.1/s (6.4-bin walk over 64).
+        var ii: Int = 0
+        while ii < pnt:
+            let kk: Int = 200 + rate_round_shift(0.1, ii as Float, 1.0)
+            var dk: Int = -1
+            while dk <= 1:
+                let at: Int = ii * pnch + kk + dk
+                if at >= 0:
+                    if at < pnt * pnch:
+                        var amp: Float = 30.0
+                        if dk == 0:
+                            amp = 60.0
+                        let o: Float = mem_load(ptr_offset(wat, at, "Float"), "Float")
+                        mem_store(ptr_offset(wat, at, "Float"), o + amp, "Float")
+                dk = dk + 1
+            ii = ii + 1
+        let c1: Int = run_grid(wat, pnt, pnch, 1.0, 1.0, 0.2, 0.025, THRESH_DEFAULT, pb, pr, ps, HIT_CAP)
+        var got3: Int = 0
+        var rerr1000: Int = 999999999
+        var hi3: Int = 0
+        while hi3 < c1:
+            let gb: Int = mem_load(ptr_offset(pb, hi3, "Int"), "Int")
+            var db: Int = gb - 200
+            if db < 0:
+                db = 0 - db
+            if db <= 3:
+                let gr: Int = mem_load(ptr_offset(pr, hi3, "Int"), "Int")
+                var dr: Int = gr - 10
+                if dr < 0:
+                    dr = 0 - dr
+                if dr * dr < rerr1000 * rerr1000:
+                    rerr1000 = dr
+                if dr <= 2:
+                    got3 = 1
+            hi3 = hi3 + 1
+        total = total + 1
+        if got3 == 1:
+            npass = npass + 1
+            println("  [PASS] P3 INJECT drift +0.10 recovered  hits=" + str(c1))
+        else:
+            println("  [FAIL] P3 INJECT drift +0.10 recovered  hits=" + str(c1))
+        // P4: ZERO-DRIFT vertical line resolves to rate 0 (tie rule).
+        wi = 0
+        seed = 777
+        while wi < pnt * pnch:
+            var accn2: Float = 0.0
+            var u2: Int = 0
+            while u2 < 6:
+                seed = (seed * 1103515245 + 12345) % 2147483648
+                accn2 = accn2 + (seed as Float) / 2147483648.0
+                u2 = u2 + 1
+            mem_store(ptr_offset(wat, wi, "Float"), (accn2 - 3.0) * 14.0 + 42.0, "Float")
+            wi = wi + 1
+        ii = 0
+        while ii < pnt:
+            var dk2: Int = -1
+            while dk2 <= 1:
+                let at2: Int = ii * pnch + 300 + dk2
+                var amp2: Float = 30.0
+                if dk2 == 0:
+                    amp2 = 60.0
+                let o2: Float = mem_load(ptr_offset(wat, at2, "Float"), "Float")
+                mem_store(ptr_offset(wat, at2, "Float"), o2 + amp2, "Float")
+                dk2 = dk2 + 1
+            ii = ii + 1
+        let c2: Int = run_grid(wat, pnt, pnch, 1.0, 1.0, 0.2, 0.025, THRESH_DEFAULT, pb, pr, ps, HIT_CAP)
+        var got4: Int = 0
+        var hi4: Int = 0
+        while hi4 < c2:
+            let gb4: Int = mem_load(ptr_offset(pb, hi4, "Int"), "Int")
+            var db4: Int = gb4 - 300
+            if db4 < 0:
+                db4 = 0 - db4
+            if db4 <= 3:
+                if mem_load(ptr_offset(pr, hi4, "Int"), "Int") == 0:
+                    got4 = 1
+            hi4 = hi4 + 1
+        total = total + 1
+        if got4 == 1:
+            npass = npass + 1
+            println("  [PASS] P4 ZERO-DRIFT found at rate 0  hits=" + str(c2))
+        else:
+            println("  [FAIL] P4 ZERO-DRIFT found at rate 0  hits=" + str(c2))
+        decay wat
+        decay pb
+        decay pr
+        decay ps
+        println("[prove] " + str(npass) + "/" + str(total))
+        if npass == total:
+            println("receipt=PASS prove=4/4")
+            return EXIT_OK
+        println("receipt=FAIL prove=" + str(npass) + "/" + str(total))
+        return EXIT_HELP
+
+    // ── File mode ──
+    if in_path == "":
+        println("drift_hunt: no input. usage: drift_hunt --in <f32> [--out drift.md]")
+        return EXIT_ERROR
+    if in_path != "":
+        if data_dir != "":
+            if find_from(in_path, ":", 0) < 0:
+                if len(in_path) > 0:
+                    if char_at(in_path, 0) != "/":
+                        in_path = data_dir + "/" + in_path
+    // nfft must be pow2: bump up (documented).
+    var pw: Int = NFFT_MIN
+    while pw < nfft:
+        pw = pw * 2
+    if pw > NFFT_MAX:
+        pw = NFFT_MAX
+    nfft = pw
+
+    let h: ptr<Void> = k_CreateFileA(in_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h) == -1:
+        println("drift_hunt: open fail err=" + str(k_GetLastError()) + ": " + in_path)
+        return EXIT_ERROR
+    let szslot: ptr<Int> = alloc_zeroed(1, "Int")
+    var fsize: Int = -1
+    if k_GetFileSizeEx(h, szslot) != 0:
+        fsize = mem_load(szslot, "Int")
+    decay szslot
+    if fsize < 64:
+        println("drift_hunt: file too small")
+        return EXIT_ERROR
+    var start_byte: Int = 0
+    if skip_n > 0:
+        start_byte = skip_n * 4
+    if start_byte < 0 or start_byte >= fsize:
+        println("drift_hunt: skip beyond EOF")
+        return EXIT_ERROR
+    if start_byte > 0:
+        let himark: ptr<Int> = alloc_zeroed(1, "Int")
+        mem_store(himark, 0, "Int")
+        let _skpos: Int = k_SetFilePointer(h, start_byte, himark, 0)
+        decay himark
+    var want: Int = fsize - start_byte
+    if want > max_n * 4:
+        want = max_n * 4
+    let mut rawbuf: ptr<Byte> = alloc_zeroed(want + 32, "Byte")
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(nslot, 0, "Int")
+    let rok: Int = k_ReadFile(h, rawbuf, want, nslot, null_ptr())
+    let got: Int = mem_load(nslot, "Int")
+    let _ch: Int = k_CloseHandle(h)
+    if rok == 0 or got < 64:
+        println("drift_hunt: short read")
+        return EXIT_ERROR
+    let nsamp: Int = got / 4
+    // pow2 table + f32 decode (fold_sum verbatim, tables inline).
+    let mut p2t: ptr<Float> = alloc_zeroed(254 + 32, "Float")
+    var pv: Float = 1.0
+    var di: Int = 0
+    while di < 126:
+        pv = pv / 2.0
+        di = di + 1
+    var pj: Int = 0
+    while pj < 254:
+        mem_store(ptr_offset(p2t, pj, "Float"), pv, "Float")
+        pv = pv * 2.0
+        pj = pj + 1
+    let mut xbuf: ptr<Float> = alloc_zeroed(nsamp + 32, "Float")
+    var ds: Int = 0
+    while ds < nsamp:
+        let v: Float = f32_of_quad(bref(rawbuf, ds * 4), bref(rawbuf, ds * 4 + 1), bref(rawbuf, ds * 4 + 2), bref(rawbuf, ds * 4 + 3), p2t)
+        mem_store(ptr_offset(xbuf, ds, "Float"), v, "Float")
+        ds = ds + 1
+    decay rawbuf
+    decay p2t
+    decay nslot
+
+    let nt: Int = nsamp / nfft
+    let nch: Int = nfft / 2 + 1
+    if nt < 8:
+        println("drift_hunt: too short for STFT (nt<8)")
+        return EXIT_ERROR
+    let chan_bw: Float = fs / (nfft as Float)
+    let tspec: Float = (nfft as Float) / fs
+    let span: Float = (nsamp as Float) / fs
+    let resol: Float = chan_bw / span
+    println("drift_hunt: N=" + str(nsamp) + " nfft=" + str(nfft) + " nt=" + str(nt) + " nch=" + str(nch))
+    println("drift_hunt: chan_bw_x100=" + str((chan_bw * 100.0) as Int) + "Hz span_x100=" + str((span * 100.0) as Int) + "s resol_x100000=" + str((resol * 100000.0) as Int) + "Hz/s")
+    if step < resol:
+        println("drift_hunt: NOTE drift resolution (see header) coarser than step; sub-bin rates tie, reported as 0 unless proven")
+    // Hann table (inline — small-callee workaround, see boxcar header).
+    let mut hann: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    var hn: Int = 0
+    while hn < nfft:
+        mem_store(ptr_offset(hann, hn, "Float"), 0.5 * (1.0 - cos(SK_PI2 * (hn as Float) / ((nfft - 1) as Float))), "Float")
+        hn = hn + 1
+    // STFT waterfall.
+    let mut water: ptr<Float> = alloc_zeroed(nt * nch + 32, "Float")
+    let mut sre: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let mut sim: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let t_fft0: Int = now_millis()
+    var sp: Int = 0
+    while sp < nt:
+        var kk: Int = 0
+        while kk < nfft:
+            mem_store(ptr_offset(sre, kk, "Float"), mem_load(ptr_offset(xbuf, sp * nfft + kk, "Float"), "Float") * mem_load(ptr_offset(hann, kk, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(sim, kk, "Float"), 0.0, "Float")
+            kk = kk + 1
+        let _fr: Int = sk_fft(sre, sim, nfft)
+        var bb: Int = 0
+        while bb < nch:
+            let rv: Float = mem_load(ptr_offset(sre, bb, "Float"), "Float")
+            let iv: Float = mem_load(ptr_offset(sim, bb, "Float"), "Float")
+            mem_store(ptr_offset(water, sp * nch + bb, "Float"), rv * rv + iv * iv, "Float")
+            bb = bb + 1
+        sp = sp + 1
+    let t_fft1: Int = now_millis()
+    decay xbuf
+    decay hann
+    decay sre
+    decay sim
+    // Dedoppler grid.
+    let mut hbin: ptr<Int> = alloc_zeroed(HIT_CAP + 32, "Int")
+    let mut hrate: ptr<Int> = alloc_zeroed(HIT_CAP + 32, "Int")
+    let mut hsig: ptr<Int> = alloc_zeroed(HIT_CAP + 32, "Int")
+    let t_g0: Int = now_millis()
+    let nh: Int = run_grid(water, nt, nch, tspec, chan_bw, drmax, step, thresh, hbin, hrate, hsig, HIT_CAP)
+    let t_g1: Int = now_millis()
+    decay water
+    // Global sort desc by sigma, tie -> smaller |rate| (tie-prefers-0).
+    var a: Int = 1
+    while a < nh:
+        let kb: Int = mem_load(ptr_offset(hbin, a, "Int"), "Int")
+        let kr: Int = mem_load(ptr_offset(hrate, a, "Int"), "Int")
+        let ks: Int = mem_load(ptr_offset(hsig, a, "Int"), "Int")
+        var b: Int = a - 1
+        var moved: Int = 0
+        while b >= 0:
+            let cb: Int = mem_load(ptr_offset(hbin, b, "Int"), "Int")
+            let cr: Int = mem_load(ptr_offset(hrate, b, "Int"), "Int")
+            let cs: Int = mem_load(ptr_offset(hsig, b, "Int"), "Int")
+            var cbr: Int = cr
+            if cbr < 0:
+                cbr = 0 - cbr
+            var kbr: Int = kr
+            if kbr < 0:
+                kbr = 0 - kbr
+            var before: Int = 0
+            if cs < ks:
+                before = 1
+            elif cs == ks:
+                if cbr > kbr:
+                    before = 1
+            if before == 1:
+                mem_store(ptr_offset(hbin, b + 1, "Int"), cb, "Int")
+                mem_store(ptr_offset(hrate, b + 1, "Int"), cr, "Int")
+                mem_store(ptr_offset(hsig, b + 1, "Int"), cs, "Int")
+                b = b - 1
+                moved = 1
+            else:
+                break
+        if moved == 1:
+            mem_store(ptr_offset(hbin, b + 1, "Int"), kb, "Int")
+            mem_store(ptr_offset(hrate, b + 1, "Int"), kr, "Int")
+            mem_store(ptr_offset(hsig, b + 1, "Int"), ks, "Int")
+        a = a + 1
+    // Cross-rate dedupe: same line within 3 bins keeps the best.
+    let mut kbin: ptr<Int> = alloc_zeroed(topk + 32, "Int")
+    let mut krate: ptr<Int> = alloc_zeroed(topk + 32, "Int")
+    let mut ksig: ptr<Int> = alloc_zeroed(topk + 32, "Int")
+    var nkept: Int = 0
+    var q: Int = 0
+    while q < nh:
+        if nkept >= topk:
+            break
+        let qb: Int = mem_load(ptr_offset(hbin, q, "Int"), "Int")
+        var dup: Int = 0
+        var w: Int = 0
+        while w < nkept:
+            var dd: Int = qb - mem_load(ptr_offset(kbin, w, "Int"), "Int")
+            if dd < 0:
+                dd = 0 - dd
+            if dd <= 3:
+                dup = 1
+            w = w + 1
+        if dup == 0:
+            mem_store(ptr_offset(kbin, nkept, "Int"), qb, "Int")
+            mem_store(ptr_offset(krate, nkept, "Int"), mem_load(ptr_offset(hrate, q, "Int"), "Int"), "Int")
+            mem_store(ptr_offset(ksig, nkept, "Int"), mem_load(ptr_offset(hsig, q, "Int"), "Int"), "Int")
+            nkept = nkept + 1
+        q = q + 1
+    decay hbin
+    decay hrate
+    decay hsig
+    // Report (law: every kept rate inside the grid).
+    let drmax_x100: Int = (drmax * 100.0) as Int
+    var md: String = "| rank | freq_hz | drift_x100 | sigma_x100 | kind |\n"
+    md = md + "|---|---|---|---|---|\n"
+    var csv: String = "freq_hz,drift_x100,sigma_x100,kind\n"
+    var r: Int = 0
+    while r < nkept:
+        let kb2: Int = mem_load(ptr_offset(kbin, r, "Int"), "Int")
+        let kr2: Int = mem_load(ptr_offset(krate, r, "Int"), "Int")
+        let ks2: Int = mem_load(ptr_offset(ksig, r, "Int"), "Int")
+        let fh: Int = (f0_mhz * 1000000.0 + (kb2 as Float) * chan_bw) as Int
+        var ok_hi: Int = 0
+        if drift_rate_ok(kr2, drmax_x100) == true:
+            if drift_rate_lo(kr2, drmax_x100) == true:
+                ok_hi = 1
+        md = md + "| " + str(r + 1) + " | " + str(fh) + " | " + str(kr2) + " | " + str(ks2) + " | dedop law=" + str(ok_hi) + " |\n"
+        csv = csv + str(fh) + "," + str(kr2) + "," + str(ks2) + ",dedop\n"
+        r = r + 1
+    decay kbin
+    decay krate
+    decay ksig
+    println(md)
+    if out_path != "":
+        fs_write_text(out_path, md)
+    if csv_path != "":
+        fs_write_text(csv_path, csv)
+    if json == 1:
+        println("{\"tool\":\"drift_hunt\",\"hits\":" + str(nh) + ",\"kept\":" + str(nkept) + "}")
+    println("drift_hunt: stft_ms=" + str(t_fft1 - t_fft0) + " grid_ms=" + str(t_g1 - t_g0) + " hits=" + str(nh) + " kept=" + str(nkept))
+    println("receipt=PASS searched=1 kept=" + str(nkept))
+    return EXIT_OK
