@@ -29,43 +29,36 @@
 use std::process
 use std::runtime
 use std::text
-
-// ── kernel32 file API (pure Kain FFI, no C, no headers) ─────────────────────
-@extern @link_name("CreateFileA")
-fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
-
-@extern @link_name("GetFileSizeEx")
-fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
-
-@extern @link_name("SetFilePointer")
-fn k_SetFilePointer(h: ptr<Void>, lo: Int, hi: ptr<Int>, method: Int) -> Int
-
-@extern @link_name("ReadFile")
-fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
-
-@extern @link_name("WriteFile")
-fn k_WriteFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
-
-@extern @link_name("CloseHandle")
-fn k_CloseHandle(h: ptr<Void>) -> Int
-
-@extern @link_name("GetLastError")
-fn k_GetLastError() -> Int
-
-fn null_ptr() -> ptr<Void> with Pure:
-    return int_to_ptr(0, "ptr<Void>")
-
-const GEN_READ: Int = 2147483648
-const GEN_WRITE: Int = 1073741824
-const OPEN_EXISTING: Int = 3
-const CREATE_ALWAYS: Int = 2
-const FILE_NORMAL: Int = 128
-const FILE_SHARE_RW: Int = 3
-
-// ── Exit codes ──────────────────────────────────────────────────────────────
-const EXIT_OK: Int = 0
-const EXIT_HELP: Int = 1
-const EXIT_ERROR: Int = 2
+use _common::k_CreateFileA
+use _common::k_GetFileSizeEx
+use _common::k_SetFilePointer
+use _common::k_ReadFile
+use _common::k_WriteFile
+use _common::k_CloseHandle
+use _common::k_GetLastError
+use _common::null_ptr
+use _common::GEN_READ
+use _common::GEN_WRITE
+use _common::OPEN_EXISTING
+use _common::CREATE_ALWAYS
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::k_open_read
+use _common::k_open_write
+use _common::k_handle_bad
+use _common::k_size
+use _common::k_seek
+use _common::k_read_at
+use _common::k_write_all
+use _common::bref
+use _common::bstore
+use _common::parse_int_text
+use _common::find_from
+use _common::extract_value_string
+use _common::is_all_digits
 
 // ── Scan bounds ─────────────────────────────────────────────────────────────
 const HEAD_SCAN_BYTES: Int = 24000
@@ -76,10 +69,10 @@ const BACKEND_WIN: Int = 16384
 const HLEN_MAX: Int = 65536
 
 // ── Arena budgets (bytes) ───────────────────────────────────────────────────
-const HEAD_ARENA: Int = 65536
+const SLICE_HEAD_ARENA: Int = 65536
 const PAYLOAD_ARENA: Int = 4194304
 const OUT_ARENA: Int = 4194304
-const SLACK: Int = 16
+const SLICE_SLACK: Int = 16
 
 // ── Slice streaming ─────────────────────────────────────────────────────────
 const AC_N: Int = 200000
@@ -113,167 +106,7 @@ law qrms_ok(q: Int) -> Bool:
 law diverse_ok(d: Int) -> Bool:
     return d >= DIV_MIN
 
-// ── Handle helpers (one open per file, seeks + ranged reads/writes) ─────────
-fn k_open_read(path: String) -> ptr<Void> with Unsafe:
-    return k_CreateFileA(path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
-
-fn k_open_write(path: String) -> ptr<Void> with Unsafe:
-    return k_CreateFileA(path, GEN_WRITE, FILE_SHARE_RW, null_ptr(), CREATE_ALWAYS, FILE_NORMAL, null_ptr())
-
-fn k_handle_bad(h: ptr<Void>) -> Int with Pure:
-    if ptr_to_int(h) == -1:
-        return 1
-    return 0
-
-fn k_size(h: ptr<Void>) -> Int with Unsafe:
-    let slot: ptr<Int> = alloc_zeroed(1, "Int")
-    let ok: Int = k_GetFileSizeEx(h, slot)
-    var sz: Int = -1
-    if ok != 0:
-        sz = mem_load(slot, "Int")
-    decay slot
-    return sz
-
-fn k_seek(h: ptr<Void>, off: Int) -> Int with Unsafe:
-    let hislot: ptr<Int> = alloc_zeroed(1, "Int")
-    mem_store(hislot, off / 4294967296, "Int")
-    let lo: Int = off % 4294967296
-    let r: Int = k_SetFilePointer(h, lo, hislot, 0)
-    decay hislot
-    return r
-
-fn k_read_at(h: ptr<Void>, nslot: ptr<Int>, off: Int, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
-    let _s: Int = k_seek(h, off)
-    mem_store(nslot, 0, "Int")
-    let ok: Int = k_ReadFile(h, buf, n, nslot, null_ptr())
-    if ok == 0:
-        return -1
-    return mem_load(nslot, "Int")
-
-fn k_write_all(h: ptr<Void>, nslot: ptr<Int>, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
-    mem_store(nslot, 0, "Int")
-    let ok: Int = k_WriteFile(h, buf, n, nslot, null_ptr())
-    if ok == 0:
-        return -1
-    return mem_load(nslot, "Int")
-
-// Byte value at arena byte-offset as Int (Int-window load & 255 — the value
-//-preserving read; mem_load "Byte" + `as Int` reinterprets the window).
-fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
-    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
-
-fn bstore(buf: ptr<Byte>, i: Int, v: Int) with Unsafe:
-    mem_store(ptr_offset(buf, i, "Byte"), v as Byte, "Byte")
-
-// ── Manual string-to-int ────────────────────────────────────────────────────
-fn parse_int_text(text: String) -> Int:
-    if len(text) == 0:
-        return 0
-    var sign: Int = 1
-    var index: Int = 0
-    if char_at(text, 0) == "-":
-        sign = -1
-        index = 1
-    elif char_at(text, 0) == "+":
-        index = 1
-    var value: Int = 0
-    while index < len(text):
-        let ch: String = char_at(text, index)
-        var digit: Int = 0
-        if ch == "0":
-            digit = 0
-        elif ch == "1":
-            digit = 1
-        elif ch == "2":
-            digit = 2
-        elif ch == "3":
-            digit = 3
-        elif ch == "4":
-            digit = 4
-        elif ch == "5":
-            digit = 5
-        elif ch == "6":
-            digit = 6
-        elif ch == "7":
-            digit = 7
-        elif ch == "8":
-            digit = 8
-        elif ch == "9":
-            digit = 9
-        else:
-            return value * sign
-        value = value * 10 + digit
-        index = index + 1
-    return value * sign
-
-fn is_all_digits(text: String) -> Int:
-    if len(text) == 0:
-        return 0
-    var i: Int = 0
-    while i < len(text):
-        let c: String = char_at(text, i)
-        if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
-            i = i + 1
-        elif c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
-            i = i + 1
-        else:
-            return 0
-    return 1
-
-fn find_from(hay: String, needle: String, start: Int) -> Int:
-    let hn: Int = len(hay)
-    let nn: Int = len(needle)
-    if nn == 0:
-        return start
-    var i: Int = start
-    if i < 0:
-        i = 0
-    while i + nn <= hn:
-        var j: Int = 0
-        var hit: Int = 1
-        while j < nn:
-            if char_at(hay, i + j) != char_at(needle, j):
-                hit = 0
-            j = j + 1
-        if hit == 1:
-            return i
-        i = i + 1
-    return -1
-
-fn extract_value_string(header: String, key: String) -> String:
-    let kp: Int = find_from(header, key, 0)
-    if kp < 0:
-        return ""
-    let ep: Int = find_from(header, "=", kp)
-    if ep < 0:
-        return ""
-    let hn: Int = len(header)
-    var s: Int = ep + 1
-    var skipping: Int = 1
-    while s < hn:
-        if skipping == 1:
-            if char_at(header, s) == " ":
-                s = s + 1
-            else:
-                skipping = 0
-        else:
-            break
-    var e: Int = s
-    var done: Int = 0
-    while e < hn:
-        if done == 0:
-            let c: String = char_at(header, e)
-            if c == " ":
-                done = 1
-            elif c == "/":
-                done = 1
-            else:
-                e = e + 1
-        else:
-            break
-    if e <= s:
-        return ""
-    return text_substring_string(header, s, e - s)
+// (kernel32 FFI, handle/exit consts, k_* helpers, bref/bstore, parse/string helpers now ride common.kn)
 
 // Header bytes [off, off+header_len) as text (small Array build, fast).
 fn header_text_via(h: ptr<Void>, nslot: ptr<Int>, habuf: ptr<Byte>, off: Int, header_len: Int) -> String with Unsafe:
@@ -473,7 +306,7 @@ fn hist_distinct(hist: ptr<Int>) -> Int:
         b = b + 1
     return distinct
 
-fn usage() -> String:
+pub fn slice_usage() -> String:
     var t: String = "slice 0.3.0 — TurboKain GUPPI slicer (C parity, kernel32 IO)\n"
     t = t + "Slice one chan/pol across block ranges to .f32 (float32 LE).\n"
     t = t + "Bulk IO rides kernel32 handles + Byte arenas (no fs bridge).\n"
@@ -489,8 +322,7 @@ fn usage() -> String:
     t = t + "EXIT CODES: 0 sliced/probed, 1 help, 2 error.\n"
     return t
 
-fn main() -> Int with Unsafe:
-    let args: Array<String> = process_user_args()
+pub fn slice_main(args: Array<String>) -> Int with Unsafe:
     // NOTE: `and`/`or` do not short-circuit — argv indexing sits behind
     // nested ifs only.
     var in_path: String = ""
@@ -581,7 +413,7 @@ fn main() -> Int with Unsafe:
         pi = pi + 1
 
     if show_help == 1:
-        print(usage())
+        print(slice_usage())
         return EXIT_HELP
 
     if data_dir == "":
@@ -611,7 +443,7 @@ fn main() -> Int with Unsafe:
         println("slice: open fail err=" + str(k_GetLastError()) + ": " + in_path)
         return EXIT_ERROR
 
-    let mut habuf: ptr<Byte> = alloc_zeroed(HEAD_ARENA, "Byte")
+    let mut habuf: ptr<Byte> = alloc_zeroed(SLICE_HEAD_ARENA, "Byte")
     let mut wbuf: ptr<Byte> = alloc_zeroed(BACKEND_WIN, "Byte")
     let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
     let fsize: Int = k_size(h)
@@ -640,7 +472,7 @@ fn main() -> Int with Unsafe:
     if blocsize0 > 0:
         est_blocks = fsize / (hlen0 + blocsize0)
 
-    let mut pbuf: ptr<Byte> = alloc_zeroed(PROBE_BYTES + SLACK, "Byte")
+    let mut pbuf: ptr<Byte> = alloc_zeroed(PROBE_BYTES + SLICE_SLACK, "Byte")
     let pn: Int = k_read_at(h, nslot, hlen0, pbuf, PROBE_BYTES)
     if pn <= 0:
         println("slice: empty payload probe")
@@ -754,7 +586,7 @@ fn main() -> Int with Unsafe:
             layout = 0
         else:
             let per_c: Int = gbs / nchan
-            let mut segbuf: ptr<Byte> = alloc_zeroed(65536 + SLACK, "Byte")
+            let mut segbuf: ptr<Byte> = alloc_zeroed(65536 + SLICE_SLACK, "Byte")
             var ac1: Float = 0.0
             var acN: Float = 0.0
             var den: Float = 0.0
@@ -859,7 +691,7 @@ fn main() -> Int with Unsafe:
     if k_handle_bad(oh) == 1:
         println("slice: out open fail err=" + str(k_GetLastError()) + ": " + out_path)
         return EXIT_ERROR
-    let mut paybuf: ptr<Byte> = alloc_zeroed(PAYLOAD_ARENA + SLACK, "Byte")
+    let mut paybuf: ptr<Byte> = alloc_zeroed(PAYLOAD_ARENA + SLICE_SLACK, "Byte")
     let mut oubuf: ptr<Byte> = alloc_zeroed(OUT_ARENA, "Byte")
 
     var sum: Float = 0.0

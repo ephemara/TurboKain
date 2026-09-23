@@ -39,42 +39,36 @@ use std::intent
 use std::machine
 
 // ── kernel32 file API (pure Kain FFI, no C, no headers — slice.kn pattern) ──
-@extern @link_name("CreateFileA")
-fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
-
-@extern @link_name("GetFileSizeEx")
-fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
-
-@extern @link_name("SetFilePointer")
-fn k_SetFilePointer(h: ptr<Void>, lo: Int, hi: ptr<Int>, method: Int) -> Int
-
-@extern @link_name("ReadFile")
-fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
-
-@extern @link_name("WriteFile")
-fn k_WriteFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
-
-@extern @link_name("CloseHandle")
-fn k_CloseHandle(h: ptr<Void>) -> Int
-
-@extern @link_name("GetLastError")
-fn k_GetLastError() -> Int
-
-fn null_ptr() -> ptr<Void> with Pure:
-    return int_to_ptr(0, "ptr<Void>")
-
-const GEN_READ: Int = 2147483648
-const GEN_WRITE: Int = 1073741824
-const OPEN_EXISTING: Int = 3
-const CREATE_ALWAYS: Int = 2
-const FILE_NORMAL: Int = 128
-const FILE_SHARE_RW: Int = 3
-const EXIT_OK: Int = 0
-const EXIT_HELP: Int = 1
-const EXIT_ERROR: Int = 2
+use _common::k_CreateFileA
+use _common::k_GetFileSizeEx
+use _common::k_SetFilePointer
+use _common::k_ReadFile
+use _common::k_WriteFile
+use _common::k_CloseHandle
+use _common::k_GetLastError
+use _common::null_ptr
+use _common::GEN_READ
+use _common::GEN_WRITE
+use _common::OPEN_EXISTING
+use _common::CREATE_ALWAYS
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::k_open_read
+use _common::k_open_write
+use _common::k_handle_bad
+use _common::k_size
+use _common::bref
+use _common::bstore
+use _common::iabs
+use _common::write_text_file
+use _common::parse_int_text
+use _common::find_from
 
 // ── Machine geometry (xvm_sandbox.c, do not tune — alien tier consts marked α)
-const MAXB: Int = 200000
+const XVM_MAXB: Int = 200000
 const SUB_BUDGET: Int = 200000
 const CA_W: Int = 256
 const CA_G: Int = 256
@@ -131,32 +125,7 @@ patch xvm_trip(auth: XvmAuthority, kind: Int, score_x100: Int) -> Int:
 resonate XvmAuthority.trip_count dampen 0 ms:
     XvmAuthority.served = XvmAuthority.served + 1
 
-// ── Handle helpers (one open per file — slice.kn verbatim) ──────────────────
-fn k_open_read(path: String) -> ptr<Void> with Unsafe:
-    return k_CreateFileA(path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
-
-fn k_open_write(path: String) -> ptr<Void> with Unsafe:
-    return k_CreateFileA(path, GEN_WRITE, FILE_SHARE_RW, null_ptr(), CREATE_ALWAYS, FILE_NORMAL, null_ptr())
-
-fn k_handle_bad(h: ptr<Void>) -> Int with Pure:
-    if ptr_to_int(h) == -1:
-        return 1
-    return 0
-
-fn k_size(h: ptr<Void>) -> Int with Unsafe:
-    let slot: ptr<Int> = alloc_zeroed(1, "Int")
-    let ok: Int = k_GetFileSizeEx(h, slot)
-    var sz: Int = -1
-    if ok != 0:
-        sz = mem_load(slot, "Int")
-    decay slot
-    return sz
-
-fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
-    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
-
-fn bstore(buf: ptr<Byte>, i: Int, v: Int) with Unsafe:
-    mem_store(ptr_offset(buf, i, "Byte"), v as Byte, "Byte")
+// (k_* helpers, bref/bstore now ride common.kn)
 
 fn getbit(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
     return (bref(buf, i / 8) >> (7 - (i % 8))) & 1
@@ -180,98 +149,10 @@ fn popcount8(v: Int) -> Int:
         k = k + 1
     return c
 
-fn iabs(v: Int) -> Int:
-    if v < 0:
-        return 0 - v
-    return v
-
-fn lcg_next(s: Int) -> Int:
+fn xvm_lcg_next(s: Int) -> Int:
     return (s * 1103515245 + 12345) % 2147483648
 
-fn write_text_file(path: String, s: String) -> Int with Unsafe:
-    let h: ptr<Void> = k_open_write(path)
-    if k_handle_bad(h) == 1:
-        return -1
-    let view: ByteSlice = bytes_from(s)
-    let arr: Array<Int> = bytes_array(view)
-    let nb: Int = len(arr)
-    let mut buf: ptr<Byte> = alloc_zeroed(nb + 8, "Byte")
-    var i: Int = 0
-    while i < nb:
-        bstore(buf, i, arr[i])
-        i = i + 1
-    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
-    mem_store(nslot, 0, "Int")
-    let ok: Int = k_WriteFile(h, buf, nb, nslot, null_ptr())
-    let wrote: Int = mem_load(nslot, "Int")
-    let _c: Int = k_CloseHandle(h)
-    decay buf
-    decay nslot
-    if ok == 0:
-        return -1
-    if wrote != nb:
-        return -1
-    return 0
-
-fn parse_int_text(text: String) -> Int:
-    if len(text) == 0:
-        return 0
-    var sign: Int = 1
-    var index: Int = 0
-    if char_at(text, 0) == "-":
-        sign = -1
-        index = 1
-    elif char_at(text, 0) == "+":
-        index = 1
-    var value: Int = 0
-    while index < len(text):
-        let ch: String = char_at(text, index)
-        var digit: Int = 0
-        if ch == "0":
-            digit = 0
-        elif ch == "1":
-            digit = 1
-        elif ch == "2":
-            digit = 2
-        elif ch == "3":
-            digit = 3
-        elif ch == "4":
-            digit = 4
-        elif ch == "5":
-            digit = 5
-        elif ch == "6":
-            digit = 6
-        elif ch == "7":
-            digit = 7
-        elif ch == "8":
-            digit = 8
-        elif ch == "9":
-            digit = 9
-        else:
-            return value * sign
-        value = value * 10 + digit
-        index = index + 1
-    return value * sign
-
-fn find_from(hay: String, needle: String, start: Int) -> Int:
-    let hn: Int = len(hay)
-    let nn: Int = len(needle)
-    if nn == 0:
-        return start
-    var i: Int = start
-    if i < 0:
-        i = 0
-    while i + nn <= hn:
-        var j: Int = 0
-        var hit: Int = 1
-        while j < nn:
-            if char_at(hay, i + j) != char_at(needle, j):
-                hit = 0
-            j = j + 1
-        if hit == 1:
-            return i
-        i = i + 1
-    return -1
+// (write_text_file, parse_int_text, find_from now ride common.kn)
 
 // ── Entropy gate (identical rule to vm_sandbox/xvm C) ───────────────────────
 fn entropy_gate(buf: ptr<Byte>, nb: Int, out2: ptr<Int>) with Unsafe:
@@ -1124,7 +1005,7 @@ fn mut_probe(buf: ptr<Byte>, nbits: Int, budget: Int, out2: ptr<Int>, skip: Stri
     mem_store(ptr_offset(out2, 0, "Int"), mloops, "Int")
     mem_store(ptr_offset(out2, 1, "Int"), mbmz, "Int")
 
-fn usage() -> String:
+pub fn xvm_sandbox_usage() -> String:
     var t: String = "xvm_sandbox 0.1.0 — TurboKain alien-code sandbox (xvm parity + TAG/JIT/MUT)\n"
     t = t + "Six C machines 1:1 (SUBLEQ/STACK/CA110/ACF/BM/RASTER) + TAG order probe\n"
     t = t + "+ JIT native-exec smoke + mutation robustness. Entropy gate first.\n"
@@ -1159,7 +1040,7 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
         let mut rnd: ptr<Byte> = alloc_zeroed(NB, "Byte")
         var bi: Int = 0
         while bi < NB:
-            seed = lcg_next(seed)
+            seed = xvm_lcg_next(seed)
             bstore(rnd, bi, (seed >> 16) & 255)
             bi = bi + 1
         let mut e2: ptr<Int> = alloc_zeroed(2, "Int")
@@ -1245,7 +1126,7 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
     var esd: Int = 3267000509 % 2147483648
     var ei: Int = 0
     while ei < NB:
-        esd = lcg_next(esd)
+        esd = xvm_lcg_next(esd)
         bstore(eng, ei, (esd >> 16) & 255)
         ei = ei + 1
     let mut prog5: ptr<Byte> = alloc_zeroed(5, "Byte")
@@ -1404,7 +1285,7 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
     var isd: Int = 305419896
     var ii2: Int = 0
     while ii2 < IW:
-        isd = lcg_next(isd)
+        isd = xvm_lcg_next(isd)
         if ((isd >> 16) & 1) == 1:
             setbit(im, ii2, 1)
         else:
@@ -1497,8 +1378,7 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
 // when CALLED (confirmed 2nd instance of the boxcar crash note) — inlined at
 // both call sites above. Do NOT re-extract it into a helper.
 
-fn main() -> Int with Unsafe:
-    let args: Array<String> = process_user_args()
+pub fn xvm_sandbox_main(args: Array<String>) -> Int with Unsafe:
     var in_path: String = ""
     var data_dir: String = ""
     var out_path: String = ""
@@ -1560,7 +1440,7 @@ fn main() -> Int with Unsafe:
                 out_path = p
         pi = pi + 1
     if show_help == 1:
-        print(usage())
+        print(xvm_sandbox_usage())
         return EXIT_HELP
     if data_dir == "":
         let envd: String = process_environment("SETIYETI_DATA")
@@ -1605,8 +1485,8 @@ fn main() -> Int with Unsafe:
         return EXIT_ERROR
     let nb: Int = fsize
     var nbits: Int = nb * 8
-    if nbits > MAXB:
-        nbits = MAXB
+    if nbits > XVM_MAXB:
+        nbits = XVM_MAXB
     let mut e2: ptr<Int> = alloc_zeroed(2, "Int")
     entropy_gate(rawbuf, nb, e2)
     let ones3: Int = mem_load(ptr_offset(e2, 0, "Int"), "Int")
@@ -1630,8 +1510,6 @@ fn main() -> Int with Unsafe:
             if write_text_file(csv_path, csv) != 0:
                 println("xvm_sandbox: csv write fail")
                 return EXIT_ERROR
-        decay rawbuf
-        decay nslot
         return EXIT_OK
     let t1: Int = now_millis()
     var sub: Int = 0

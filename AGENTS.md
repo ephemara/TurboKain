@@ -591,6 +591,20 @@ python python/tk.py doctor          # env vars + registry drift
   while file-compiled trig demonstrably works (frame_hunt FFT 9/9,
   lag_hunt BPSK carrier recovered at z 139). Do not trust `-c` for
   trig; verify in file code. Repro owed to the compiler owner.
+- **`kain/core/_common.kn` is the shared helper module (migrated across all 14 tools).**
+  The leading underscore ensures it sorts before `bitslice.kn`, `boxcar_bank.kn`,
+  etc., during `kain amalgamate --raw kain/core -o kain/core.kn`, so shared infrastructure
+  is declared before any tool references it. Tools import via `use _common::X`.
+  Each tool exposes `pub fn <tool>_usage()` and `pub fn <tool>_main(args: Array<String>)`.
+  `kain/core/dispatch.kn` provides the multi-call entry point (`main()`) dispatching
+  `core <tool> [args...]` or direct `<tool>.exe [args...]` via `GetCommandLineA`.
+  Building the portable core suite:
+  ```bash
+  kain amalgamate --raw kain/core -o kain/core.kn
+  kain build kain/core.kn --target llvm -o core.exe
+  ```
+  Windows shells default to cp1252: every Python file write needs `encoding='utf-8'`
+  or box-drawing comments corrupt the file.
 
 ---
 

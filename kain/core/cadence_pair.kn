@@ -40,6 +40,14 @@ use std::runtime
 use std::text
 use std::intent
 use std::os
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::parse_int_text
+use _common::find_from
+use _common::row_cells
+use _common::is_sep_row
+use _common::col_index
 
 component CadencePanel():
     render <panel title="cadence-pair" />
@@ -103,110 +111,7 @@ resonate OffScan.hot dampen 0 ms:
 pulse clock_driver every 8 ms jitter 1 ms:
     OnScan.ticks = OnScan.ticks + 1
 
-const EXIT_OK: Int = 0
-const EXIT_HELP: Int = 1
-const EXIT_ERROR: Int = 2
-
-fn parse_int_text(text: String) -> Int:
-    if len(text) == 0:
-        return 0
-    var sign: Int = 1
-    var index: Int = 0
-    if char_at(text, 0) == "-":
-        sign = -1
-        index = 1
-    elif char_at(text, 0) == "+":
-        index = 1
-    var value: Int = 0
-    while index < len(text):
-        let ch: String = char_at(text, index)
-        var digit: Int = 0
-        if ch == "0":
-            digit = 0
-        elif ch == "1":
-            digit = 1
-        elif ch == "2":
-            digit = 2
-        elif ch == "3":
-            digit = 3
-        elif ch == "4":
-            digit = 4
-        elif ch == "5":
-            digit = 5
-        elif ch == "6":
-            digit = 6
-        elif ch == "7":
-            digit = 7
-        elif ch == "8":
-            digit = 8
-        elif ch == "9":
-            digit = 9
-        else:
-            return value * sign
-        value = value * 10 + digit
-        index = index + 1
-    return value * sign
-
-fn find_from(hay: String, needle: String, start: Int) -> Int:
-    let hn: Int = len(hay)
-    let nn: Int = len(needle)
-    if nn == 0:
-        return start
-    var i: Int = start
-    if i < 0:
-        i = 0
-    while i + nn <= hn:
-        var j: Int = 0
-        var hit: Int = 1
-        while j < nn:
-            if char_at(hay, i + j) != char_at(needle, j):
-                hit = 0
-            j = j + 1
-        if hit == 1:
-            return i
-        i = i + 1
-    return -1
-
-// Split a | table row into trimmed cells (drops empties from edge pipes).
-fn row_cells(row: String) -> Array<String>:
-    let parts: Array<String> = text_split_string(row, "|")
-    var cells: Array<String> = []
-    var i: Int = 0
-    while i < len(parts):
-        let c: String = text_trim_string(parts[i])
-        if len(c) > 0:
-            push(cells, c)
-        i = i + 1
-    return cells
-
-fn is_sep_row(row: String) -> Int:
-    // separator rows are cells of only '-' (after trim, pipes dropped).
-    let cells: Array<String> = row_cells(row)
-    if len(cells) == 0:
-        return 1
-    var i: Int = 0
-    while i < len(cells):
-        let c: String = cells[i]
-        var k: Int = 0
-        var alldash: Int = 1
-        if len(c) == 0:
-            alldash = 0
-        while k < len(c):
-            if char_at(c, k) != "-":
-                alldash = 0
-            k = k + 1
-        if alldash == 0:
-            return 0
-        i = i + 1
-    return 1
-
-fn col_index(header: Array<String>, name: String) -> Int:
-    var i: Int = 0
-    while i < len(header):
-        if header[i] == name:
-            return i
-        i = i + 1
-    return -1
+// (kernel32 FFI, handle/exit consts, text/table helpers now ride common.kn)
 
 // Returns flagged (0/1) + detail string via parallel out-cells trick is
 // unsupported, so detail rides a second pass fn. Kind: 1=sk 2=fold 3=pulse.
@@ -299,7 +204,7 @@ fn table_best(lines: Array<String>, header: Array<String>, kind: Int) -> Int:
         r = r + 1
     return best
 
-fn usage() -> String:
+pub fn cadence_pair_usage() -> String:
     var t: String = "cadence_pair 0.1.0 — TurboKain ON/OFF gate (WATCH logic)\n"
     t = t + "ON-only + structured → WATCH. Common-mode → COMMON (scored,\n"
     t = t + "never blocked). Else CLEAN. CANDIDATE needs persistence (v2).\n"
@@ -313,8 +218,7 @@ fn usage() -> String:
     t = t + "EXIT CODES: 0 gated, 1 help, 2 error/guard failure.\n"
     return t
 
-fn main() -> Int:
-    let args: Array<String> = process_user_args()
+pub fn cadence_pair_main(args: Array<String>) -> Int:
     var on_path: String = ""
     var off_path: String = ""
     var data_dir: String = ""
@@ -392,7 +296,7 @@ fn main() -> Int:
         pi = pi + 1
 
     if show_help == 1:
-        print(usage())
+        print(cadence_pair_usage())
         return EXIT_HELP
 
     if data_dir == "":

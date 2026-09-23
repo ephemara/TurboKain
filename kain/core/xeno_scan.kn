@@ -15,7 +15,7 @@
 //           -slope (high-freq first) = +1 NORMAL plasma, +slope = -1 EXOTIC
 //   impuls  max-z > 8.0 OR tail-excess > 3.0
 //   kurt/tailx time-domain excess kurtosis + 4-sigma tail vs 6.33e-5 null
-// STFT: SEG 4096 / HOP 2048 / NB 2049, cap 512 segs, min 8 (below that the
+// STFT: XENO_SEG 4096 / XENO_HOP 2048 / XENO_NB 2049, cap 512 segs, min 8 (below that the
 // STFT markers stay zeroed and time-domain carries the verdict — like C).
 //
 // Kain adaptations (documented):
@@ -50,39 +50,36 @@ use std::runtime
 use std::text
 
 // ── kernel32 file API (no fs bridge for bulk) ───────────────────────────────
-@extern @link_name("CreateFileA")
-fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
-
-@extern @link_name("ReadFile")
-fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
-
-@extern @link_name("GetFileSizeEx")
-fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
-
-@extern @link_name("CloseHandle")
-fn k_CloseHandle(h: ptr<Void>) -> Int
-
-@extern @link_name("GetLastError")
-fn k_GetLastError() -> Int
-
-fn null_ptr() -> ptr<Void> with Pure:
-    return int_to_ptr(0, "ptr<Void>")
-
-const GEN_READ: Int = 2147483648
-const OPEN_EXISTING: Int = 3
-const FILE_NORMAL: Int = 128
-const FILE_SHARE_RW: Int = 3
-
-const EXIT_OK: Int = 0
-const EXIT_HELP: Int = 1
-const EXIT_ERROR: Int = 2
+use _common::k_CreateFileA
+use _common::k_ReadFile
+use _common::k_GetFileSizeEx
+use _common::k_CloseHandle
+use _common::k_GetLastError
+use _common::null_ptr
+use _common::GEN_READ
+use _common::OPEN_EXISTING
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::SK_PI2
+use _common::bref
+use _common::parse_int_text
+use _common::parse_float_text
+use _common::find_from
+use _common::f32_of_quad
+use _common::sk_bitrev
+use _common::sk_fft
+use _common::qs_partition
+use _common::quickselect_k
 
 // ── Battery geometry (xeno_scan.c, calibrated — not tuned) ──────────────────
-const SEG: Int = 4096
-const HOP: Int = 2048
-const NB: Int = 2049
-const SEGS_CAP: Int = 512
-const SEGS_MIN: Int = 8
+const XENO_SEG: Int = 4096
+const XENO_HOP: Int = 2048
+const XENO_NB: Int = 2049
+const XENO_SEGS_CAP: Int = 512
+const XENO_SEGS_MIN: Int = 8
 const SK_DEV: Float = 0.5
 const SK_FRAC: Float = 0.02
 const COH_FLAG: Float = 6.0
@@ -90,215 +87,11 @@ const LADDER_FLAG: Float = 20.0
 const DM_NSB: Int = 8
 const DM_R2_MIN: Float = 0.8
 const DM_SPAN_MIN: Float = 4.0
-const SK_PI2: Float = 6.283185307179586
 const LN_NEG69: Float = -69.0776
 const TAIL_NULL: Float = 0.0000633
 
-fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
-    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
+// (bref, parse_int_text, parse_float_text, find_from, f32_of_quad, sk_fft, quickselect now ride common.kn)
 
-fn parse_int_text(text: String) -> Int:
-    if len(text) == 0:
-        return 0
-    var sign: Int = 1
-    var index: Int = 0
-    if char_at(text, 0) == "-":
-        sign = -1
-        index = 1
-    elif char_at(text, 0) == "+":
-        index = 1
-    var value: Int = 0
-    while index < len(text):
-        let ch: String = char_at(text, index)
-        var digit: Int = 0
-        if ch == "0":
-            digit = 0
-        elif ch == "1":
-            digit = 1
-        elif ch == "2":
-            digit = 2
-        elif ch == "3":
-            digit = 3
-        elif ch == "4":
-            digit = 4
-        elif ch == "5":
-            digit = 5
-        elif ch == "6":
-            digit = 6
-        elif ch == "7":
-            digit = 7
-        elif ch == "8":
-            digit = 8
-        elif ch == "9":
-            digit = 9
-        else:
-            return value * sign
-        value = value * 10 + digit
-        index = index + 1
-    return value * sign
-
-fn parse_float_text(text: String) -> Float:
-    var t: String = text_trim_string(text)
-    if len(t) == 0:
-        return 0.0
-    var sign: Float = 1.0
-    var i: Int = 0
-    if char_at(t, 0) == "-":
-        sign = -1.0
-        i = 1
-    elif char_at(t, 0) == "+":
-        i = 1
-    var intpart: Float = 0.0
-    while i < len(t):
-        let c: String = char_at(t, i)
-        if c == ".":
-            break
-        if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
-            intpart = intpart * 10.0 + (parse_int_text(c) as Float)
-        elif c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
-            intpart = intpart * 10.0 + (parse_int_text(c) as Float)
-        else:
-            break
-        i = i + 1
-    var frac: Float = 0.0
-    var div: Float = 1.0
-    if i < len(t) and char_at(t, i) == ".":
-        i = i + 1
-        while i < len(t):
-            let c: String = char_at(t, i)
-            var dd: Int = -1
-            if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
-                dd = parse_int_text(c)
-            elif c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
-                dd = parse_int_text(c)
-            else:
-                break
-            div = div * 10.0
-            frac = frac + (dd as Float) / div
-            i = i + 1
-    return sign * (intpart + frac)
-
-fn find_from(hay: String, needle: String, start: Int) -> Int:
-    let hn: Int = len(hay)
-    let nn: Int = len(needle)
-    if nn == 0:
-        return start
-    var i: Int = start
-    if i < 0:
-        i = 0
-    while i + nn <= hn:
-        var j: Int = 0
-        var hit: Int = 1
-        while j < nn:
-            if char_at(hay, i + j) != char_at(needle, j):
-                hit = 0
-            j = j + 1
-        if hit == 1:
-            return i
-        i = i + 1
-    return -1
-
-// Exact f32-LE quad → Float via 2^e table.
-fn f32_of_quad(b0: Int, b1: Int, b2: Int, b3: Int, p2t: ptr<Float>) -> Float with Unsafe:
-    let bits: Int = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
-    if bits == 0:
-        return 0.0
-    let sign: Int = bits >> 31
-    let exp: Int = (bits >> 23) & 255
-    let mant: Int = bits & 8388607
-    if exp == 0 or exp == 255:
-        return 0.0
-    let frac: Float = 1.0 + (mant as Float) / 8388608.0
-    var v: Float = frac * mem_load(ptr_offset(p2t, exp - 1, "Float"), "Float")
-    if sign == 1:
-        v = 0.0 - v
-    return v
-
-// ── Radix-2 DIT FFT, in-place (vendored) ────────────────────────────────────
-fn sk_bitrev(re: ptr<Float>, im: ptr<Float>, n: Int) with Unsafe:
-    var j: Int = 0
-    var i: Int = 1
-    while i < n:
-        var bit: Int = n / 2
-        while bit > 0:
-            if j >= bit:
-                j = j - bit
-                bit = bit / 2
-            else:
-                break
-        j = j + bit
-        if i < j:
-            let tr: Float = mem_load(ptr_offset(re, i, "Float"), "Float")
-            let ti: Float = mem_load(ptr_offset(im, i, "Float"), "Float")
-            mem_store(ptr_offset(re, i, "Float"), mem_load(ptr_offset(re, j, "Float"), "Float"), "Float")
-            mem_store(ptr_offset(im, i, "Float"), mem_load(ptr_offset(im, j, "Float"), "Float"), "Float")
-            mem_store(ptr_offset(re, j, "Float"), tr, "Float")
-            mem_store(ptr_offset(im, j, "Float"), ti, "Float")
-        i = i + 1
-    return
-
-fn sk_fft(re: ptr<Float>, im: ptr<Float>, n: Int) -> Int with Unsafe:
-    sk_bitrev(re, im, n)
-    var size: Int = 2
-    while size <= n:
-        let half_size: Int = size / 2
-        let step: Float = 0.0 - SK_PI2 / (size as Float)
-        var i: Int = 0
-        while i < n:
-            var k: Int = 0
-            var j: Int = i
-            while j < i + half_size:
-                let ang: Float = (k as Float) * step
-                let cw: Float = cos(ang)
-                let sw: Float = sin(ang)
-                let ar: Float = mem_load(ptr_offset(re, j + half_size, "Float"), "Float")
-                let ai: Float = mem_load(ptr_offset(im, j + half_size, "Float"), "Float")
-                let tpre: Float = cw * ar - sw * ai
-                let tpim: Float = sw * ar + cw * ai
-                let xr: Float = mem_load(ptr_offset(re, j, "Float"), "Float")
-                let xi: Float = mem_load(ptr_offset(im, j, "Float"), "Float")
-                mem_store(ptr_offset(re, j, "Float"), xr + tpre, "Float")
-                mem_store(ptr_offset(im, j, "Float"), xi + tpim, "Float")
-                mem_store(ptr_offset(re, j + half_size, "Float"), xr - tpre, "Float")
-                mem_store(ptr_offset(im, j + half_size, "Float"), xi - tpim, "Float")
-                k = k + 1
-                j = j + 1
-            i = i + size
-        size = size * 2
-    return 0
-
-// ── Quickselect (upper-middle) + even-averaging median ──────────────────────
-fn qs_partition(a: ptr<Float>, lo: Int, hi: Int) -> Int with Unsafe:
-    let piv: Float = mem_load(ptr_offset(a, hi, "Float"), "Float")
-    var i: Int = lo
-    var j: Int = lo
-    while j < hi:
-        if mem_load(ptr_offset(a, j, "Float"), "Float") <= piv:
-            let t: Float = mem_load(ptr_offset(a, i, "Float"), "Float")
-            mem_store(ptr_offset(a, i, "Float"), mem_load(ptr_offset(a, j, "Float"), "Float"), "Float")
-            mem_store(ptr_offset(a, j, "Float"), t, "Float")
-            i = i + 1
-        j = j + 1
-    let t2: Float = mem_load(ptr_offset(a, i, "Float"), "Float")
-    mem_store(ptr_offset(a, i, "Float"), mem_load(ptr_offset(a, hi, "Float"), "Float"), "Float")
-    mem_store(ptr_offset(a, hi, "Float"), t2, "Float")
-    return i
-
-fn quickselect_k(a: ptr<Float>, n: Int, k: Int) -> Float with Unsafe:
-    var lo: Int = 0
-    var hi: Int = n - 1
-    while lo < hi:
-        let p: Int = qs_partition(a, lo, hi)
-        if p == k:
-            break
-        elif p > k:
-            hi = p - 1
-        else:
-            lo = p + 1
-    return mem_load(ptr_offset(a, k, "Float"), "Float")
-
-// sy_median mirror: odd → middle, even → average of two middles (needs a
-// scratch arena of n slots; second select on reordered array is valid).
 fn median_avg(a: ptr<Float>, scratch: ptr<Float>, n: Int) -> Float with Unsafe:
     if n <= 0:
         return 0.0
@@ -316,10 +109,10 @@ fn median_avg(a: ptr<Float>, scratch: ptr<Float>, n: Int) -> Float with Unsafe:
     return 0.5 * (va + vb)
 
 // ── LCG stream (own seeds; same SHAPES as C selftest, not bit-identical) ────
-fn lcg_next(state: Int) -> Int:
+fn xeno_lcg_next(state: Int) -> Int:
     return ((state * 1103515245) + 12345) & 2147483647
 
-fn usage() -> String:
+pub fn xeno_scan_usage() -> String:
     var t: String = "xeno_scan 0.1.0 — TurboKain microscopic battery (xeno parity + lattice)\n"
     t = t + "SK + coherence + cepstral ladder + DM-order + impulsivity + nongauss,\n"
     t = t + "plus corroboration lattice (SK+IMP, COH+LADDER, DM-EXOTIC...).\n"
@@ -332,8 +125,7 @@ fn usage() -> String:
     t = t + "EXIT CODES: 0 scanned, 1 help OR --selftest FAIL, 2 error.\n"
     return t
 
-fn main() -> Int with Unsafe:
-    let args: Array<String> = process_user_args()
+pub fn xeno_scan_main(args: Array<String>) -> Int with Unsafe:
     var in_path: String = ""
     var data_dir: String = ""
     var out_path: String = ""
@@ -396,7 +188,7 @@ fn main() -> Int with Unsafe:
         pi = pi + 1
 
     if show_help == 1:
-        print(usage())
+        print(xeno_scan_usage())
         return EXIT_HELP
     // (fs accepted for CLI parity; markers are fs-free like C.)
 
@@ -579,32 +371,32 @@ fn analyze_file(x: ptr<Float>, nx: Int) -> XenoResult with Unsafe:
         coh = 0.0
     if coh >= COH_FLAG:
         cohflag = 1
-    // ---- STFT power (SEG 4096 / HOP 2048, cap 512, min 8) ----
+    // ---- STFT power (XENO_SEG 4096 / XENO_HOP 2048, cap 512, min 8) ----
     var nseg_full: Int = 0
-    if nx >= SEG:
-        nseg_full = (nx - SEG) / HOP + 1
+    if nx >= XENO_SEG:
+        nseg_full = (nx - XENO_SEG) / XENO_HOP + 1
     var nseg: Int = nseg_full
-    if nseg > SEGS_CAP:
-        nseg = SEGS_CAP
-    if nseg >= SEGS_MIN:
-        let mut s1a: ptr<Float> = alloc_zeroed(NB, "Float")
-        let mut s2a: ptr<Float> = alloc_zeroed(NB, "Float")
-        let mut bf: ptr<Float> = alloc_zeroed(DM_NSB * SEGS_CAP, "Float")
-        let mut re: ptr<Float> = alloc_zeroed(SEG, "Float")
-        let mut im: ptr<Float> = alloc_zeroed(SEG, "Float")
-        let span: Int = (NB - 2) / DM_NSB
+    if nseg > XENO_SEGS_CAP:
+        nseg = XENO_SEGS_CAP
+    if nseg >= XENO_SEGS_MIN:
+        let mut s1a: ptr<Float> = alloc_zeroed(XENO_NB, "Float")
+        let mut s2a: ptr<Float> = alloc_zeroed(XENO_NB, "Float")
+        let mut bf: ptr<Float> = alloc_zeroed(DM_NSB * XENO_SEGS_CAP, "Float")
+        let mut re: ptr<Float> = alloc_zeroed(XENO_SEG, "Float")
+        let mut im: ptr<Float> = alloc_zeroed(XENO_SEG, "Float")
+        let span: Int = (XENO_NB - 2) / DM_NSB
         var t: Int = 0
         while t < nseg:
-            let base: Int = t * HOP
+            let base: Int = t * XENO_HOP
             var k: Int = 0
-            while k < SEG:
+            while k < XENO_SEG:
                 mem_store(ptr_offset(re, k, "Float"), mem_load(ptr_offset(x, base + k, "Float"), "Float"), "Float")
                 mem_store(ptr_offset(im, k, "Float"), 0.0, "Float")
                 k = k + 1
-            let frc: Int = sk_fft(re, im, SEG)
+            let frc: Int = sk_fft(re, im, XENO_SEG)
             if frc == 0:
                 var b: Int = 0
-                while b < NB:
+                while b < XENO_NB:
                     let rv: Float = mem_load(ptr_offset(re, b, "Float"), "Float")
                     let iv: Float = mem_load(ptr_offset(im, b, "Float"), "Float")
                     let pw: Float = rv * rv + iv * iv
@@ -616,7 +408,7 @@ fn analyze_file(x: ptr<Float>, nx: Int) -> XenoResult with Unsafe:
                     if bk > DM_NSB - 1:
                         bk = DM_NSB - 1
                     if b >= 2:
-                        mem_store(ptr_offset(bf, bk * SEGS_CAP + t, "Float"), mem_load(ptr_offset(bf, bk * SEGS_CAP + t, "Float"), "Float") + pw, "Float")
+                        mem_store(ptr_offset(bf, bk * XENO_SEGS_CAP + t, "Float"), mem_load(ptr_offset(bf, bk * XENO_SEGS_CAP + t, "Float"), "Float") + pw, "Float")
                     b = b + 1
             t = t + 1
         decay re
@@ -628,7 +420,7 @@ fn analyze_file(x: ptr<Float>, nx: Int) -> XenoResult with Unsafe:
         var bad: Int = 0
         var nb: Int = 0
         var bb: Int = 2
-        while bb < NB:
+        while bb < XENO_NB:
             let s1: Float = mem_load(ptr_offset(s1a, bb, "Float"), "Float")
             let s2: Float = mem_load(ptr_offset(s2a, bb, "Float"), "Float")
             nb = nb + 1
@@ -647,33 +439,33 @@ fn analyze_file(x: ptr<Float>, nx: Int) -> XenoResult with Unsafe:
         if skfrac >= SK_FRAC:
             skflag = 1
         // ---- cepstral ladder ----
-        let mut lavg: ptr<Float> = alloc_zeroed(NB, "Float")
+        let mut lavg: ptr<Float> = alloc_zeroed(XENO_NB, "Float")
         var lb: Int = 0
-        while lb < NB:
+        while lb < XENO_NB:
             mem_store(ptr_offset(lavg, lb, "Float"), mem_load(ptr_offset(s1a, lb, "Float"), "Float") / M, "Float")
             lb = lb + 1
-        let mut lmed: ptr<Float> = alloc_zeroed(NB, "Float")
+        let mut lmed: ptr<Float> = alloc_zeroed(XENO_NB, "Float")
         lb = 0
-        while lb < NB:
+        while lb < XENO_NB:
             mem_store(ptr_offset(lmed, lb, "Float"), mem_load(ptr_offset(lavg, lb, "Float"), "Float"), "Float")
             lb = lb + 1
-        // C: median over avg[2..NB-1) (NB-3 values) — DC + bin 1 EXCLUDED
+        // C: median over avg[2..XENO_NB-1) (XENO_NB-3 values) — DC + bin 1 EXCLUDED
         // (DC dominates and inflates the floor ~20x if included).
-        let mut lmed2: ptr<Float> = alloc_zeroed(NB, "Float")
+        let mut lmed2: ptr<Float> = alloc_zeroed(XENO_NB, "Float")
         lb = 0
-        while lb < NB - 3:
+        while lb < XENO_NB - 3:
             mem_store(ptr_offset(lmed2, lb, "Float"), mem_load(ptr_offset(lavg, lb + 2, "Float"), "Float"), "Float")
             lb = lb + 1
-        let smed: Float = median_avg(lmed2, lmed, NB - 3)
+        let smed: Float = median_avg(lmed2, lmed, XENO_NB - 3)
         decay lmed2
         var smedv: Float = smed
         if smedv <= 0.0:
             smedv = 1.0
-        let mut lr: ptr<Float> = alloc_zeroed(SEG, "Float")
-        let mut li: ptr<Float> = alloc_zeroed(SEG, "Float")
+        let mut lr: ptr<Float> = alloc_zeroed(XENO_SEG, "Float")
+        let mut li: ptr<Float> = alloc_zeroed(XENO_SEG, "Float")
         let NC: Int = 2048
         var lq: Int = 0
-        while lq < SEG:
+        while lq < XENO_SEG:
             if lq < NC:
                 let vv2: Float = mem_load(ptr_offset(lavg, lq, "Float"), "Float") / smedv
                 if vv2 > 0.0:
@@ -684,7 +476,7 @@ fn analyze_file(x: ptr<Float>, nx: Int) -> XenoResult with Unsafe:
                 mem_store(ptr_offset(lr, lq, "Float"), 0.0, "Float")
             mem_store(ptr_offset(li, lq, "Float"), 0.0, "Float")
             lq = lq + 1
-        let fr2: Int = sk_fft(lr, li, SEG)
+        let fr2: Int = sk_fft(lr, li, XENO_SEG)
         if fr2 == 0:
             let mut cc: ptr<Float> = alloc_zeroed(1025, "Float")
             var ci: Int = 0
@@ -747,7 +539,7 @@ fn analyze_file(x: ptr<Float>, nx: Int) -> XenoResult with Unsafe:
             var b0: Int = 2 + dkk * span
             var b1: Int = b0 + span
             if dkk == DM_NSB - 1:
-                b1 = NB
+                b1 = XENO_NB
             var bt: Float = 0.0
             var bi: Int = 0
             var dt: Int = 0
@@ -755,7 +547,7 @@ fn analyze_file(x: ptr<Float>, nx: Int) -> XenoResult with Unsafe:
                 var pp: Float = 0.0
                 var db: Int = b0
                 while db < b1:
-                    pp = pp + mem_load(ptr_offset(bf, dkk * SEGS_CAP + dt, "Float"), "Float")
+                    pp = pp + mem_load(ptr_offset(bf, dkk * XENO_SEGS_CAP + dt, "Float"), "Float")
                     db = db + 1
                 if pp > bt:
                     bt = pp
@@ -875,11 +667,11 @@ fn run_selftest() -> Int with Unsafe:
     var i: Int = 0
     // 1. matched noise: everything quiet.
     while i < N:
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         var u1: Float = (rs as Float) / 2147483648.0
         if u1 <= 0.0:
             u1 = 0.0000000001
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         let u2: Float = (rs as Float) / 2147483648.0
         mem_store(ptr_offset(x, i, "Float"), 14.0 * sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2), "Float")
         i = i + 1
@@ -893,11 +685,11 @@ fn run_selftest() -> Int with Unsafe:
     rs = 222
     i = 0
     while i < N:
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         var u1: Float = (rs as Float) / 2147483648.0
         if u1 <= 0.0:
             u1 = 0.0000000001
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         let u2: Float = (rs as Float) / 2147483648.0
         let gate: Float = if (i % 6000) < 512: 4.0 else: 1.0
         mem_store(ptr_offset(x, i, "Float"), 14.0 * sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2) * gate, "Float")
@@ -917,11 +709,11 @@ fn run_selftest() -> Int with Unsafe:
     rs = 333
     i = 0
     while i < N:
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         var u1: Float = (rs as Float) / 2147483648.0
         if u1 <= 0.0:
             u1 = 0.0000000001
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         let u2: Float = (rs as Float) / 2147483648.0
         let t: Float = (i as Float) / 2929687.5
         var s: Float = 0.0
@@ -941,11 +733,11 @@ fn run_selftest() -> Int with Unsafe:
     rs = 444
     i = 0
     while i < N:
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         var u1: Float = (rs as Float) / 2147483648.0
         if u1 <= 0.0:
             u1 = 0.0000000001
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         let u2: Float = (rs as Float) / 2147483648.0
         let sq: Float = if (i % 64) < 32: 20.0 else: -20.0
         mem_store(ptr_offset(x, i, "Float"), sq + sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2), "Float")
@@ -960,11 +752,11 @@ fn run_selftest() -> Int with Unsafe:
     rs = 555
     i = 0
     while i < N:
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         var u1: Float = (rs as Float) / 2147483648.0
         if u1 <= 0.0:
             u1 = 0.0000000001
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         let u2: Float = (rs as Float) / 2147483648.0
         let fi: Float = i as Float
         let ph: Float = SK_PI2 * (1400000.0 * fi / 2929687.5 - 1300000.0 * fi * fi / (2.0 * (N as Float) * 2929687.5))
@@ -980,11 +772,11 @@ fn run_selftest() -> Int with Unsafe:
     rs = 666
     i = 0
     while i < N:
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         var u1: Float = (rs as Float) / 2147483648.0
         if u1 <= 0.0:
             u1 = 0.0000000001
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         let u2: Float = (rs as Float) / 2147483648.0
         let fi: Float = i as Float
         let ph: Float = SK_PI2 * (100000.0 * fi / 2929687.5 + 1300000.0 * fi * fi / (2.0 * (N as Float) * 2929687.5))
@@ -1000,17 +792,17 @@ fn run_selftest() -> Int with Unsafe:
     rs = 777
     i = 0
     while i < N:
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         var u1: Float = (rs as Float) / 2147483648.0
         if u1 <= 0.0:
             u1 = 0.0000000001
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         let u2: Float = (rs as Float) / 2147483648.0
         mem_store(ptr_offset(x, i, "Float"), 14.0 * sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2), "Float")
         i = i + 1
     var s6: Int = 0
     while s6 < 40:
-        rs = lcg_next(rs)
+        rs = xeno_lcg_next(rs)
         let pos: Int = rs % N
         mem_store(ptr_offset(x, pos, "Float"), 280.0, "Float")
         s6 = s6 + 1

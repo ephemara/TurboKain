@@ -17,3 +17,4 @@ out/
 __pycache__/
 *.pyc
 /reports/2026-09-22_fullsweep
+/.cache

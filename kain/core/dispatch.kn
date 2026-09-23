@@ -1,0 +1,331 @@
+// ============================================================================
+// dispatch.kn — TurboKain unified core dispatcher (portable core.exe)
+//
+// Single entry point for all 14 core signal pipeline tools:
+//   core <tool> [args...]
+//   core help [tool]
+//   core prove
+//   core sweep <f32> [--out-dir D] [--fs HZ]
+//   OR invoked directly as <tool>.exe [args...] (BusyBox multi-call)
+//
+// Tools:
+//   slice         GUPPI raw -> .f32 channel/pol voltage slice
+//   fil_reader    Sigproc .fil -> .f32 voltage slice
+//   sk_gate       Spectral kurtosis RFI excision gate
+//   boxcar_bank   DM sweep + boxcar pulse search
+//   fold_sum      Coherent/incoherent sub-band epoch folder
+//   fam_god       3-decade cyclic spectral correlation hunter
+//   frame_hunt    Envelope periodogram + harmonic comb hunter
+//   drift_hunt    Dedoppler chirped carrier drift search
+//   lag_hunt      Long-lag direct autocorrelation hunter
+//   bitslice      f32 voltage -> alien-machine bitstreams
+//   xeno_scan     6-marker microscopic anomaly battery
+//   xvm_sandbox   Turing/post-Shannon symbolic execution sandbox
+//   cadence_pair  ON/OFF cadence corroboration gate
+//   config        Header/CLI/geometry parameter resolver
+// ============================================================================
+
+use std::process
+use std::text
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::bref
+
+@extern @link_name("GetCommandLineA")
+fn k_GetCommandLineA() -> ptr<Byte>
+
+fn usage() -> String:
+    var t: String = "================================================================================\n"
+    t = t + " TurboKain Core 0.1.0 — Unified Native Signal Processing Engine\n"
+    t = t + "================================================================================\n\n"
+    t = t + "USAGE:\n"
+    t = t + "  core <tool> [args...]             Run any instrument directly\n"
+    t = t + "  core help <tool>                  Detailed CLI help for a specific tool\n"
+    t = t + "  core prove                        Run all 9 formal prove batteries in-memory\n"
+    t = t + "  core sweep <f32> [options...]     Run full detector battery over a time series\n\n"
+    t = t + "INSTRUMENTS (14 total):\n"
+    t = t + "  [Ingest / Calibration]\n"
+    t = t + "    slice         GUPPI .raw -> .f32 channel/pol voltage slice (2/8-bit)\n"
+    t = t + "    fil_reader    Sigproc .fil -> .f32 voltage slice (8/16/32-bit)\n"
+    t = t + "    config        Header/CLI/preset geometry resolver (40 parameters)\n\n"
+    t = t + "  [Anomaly & RFI Screening]\n"
+    t = t + "    sk_gate       Spectral kurtosis excision gate (4096/2048 STFT)\n"
+    t = t + "    xeno_scan     Microscopic battery (SK, coherence, comb ladder, DM, tail)\n\n"
+    t = t + "  [Coherent / Periodic Detectors]\n"
+    t = t + "    boxcar_bank   Fast DM sweep + boxcar single-pulse matched filters\n"
+    t = t + "    fold_sum      Sub-band Hann/FFT harmonic folder (pulsar/periodic)\n"
+    t = t + "    fam_god       3-decade FFT accumulation method (baud/cyclostationary)\n"
+    t = t + "    frame_hunt    Envelope periodogram + subharmonic comb hunter\n"
+    t = t + "    drift_hunt    Taylor dedoppler chirped carrier drift search\n"
+    t = t + "    lag_hunt      Long-lag direct autocorrelation microscope (0.01ms - 10s)\n\n"
+    t = t + "  [Signal Structure & Alien Machinery]\n"
+    t = t + "    bitslice      .f32 voltage -> alien-machine bitstreams (sign/diff/mag)\n"
+    t = t + "    xvm_sandbox   Turing/subleq/cellular automata execution sandbox\n"
+    t = t + "    cadence_pair  ON/OFF cadence corroboration gate (WATCH logic)\n\n"
+    t = t + "PIPELINE PING-PONG WORKFLOW:\n"
+    t = t + "  raw -> [slice] -> .f32 -> [sk_gate/xeno] -> [fam_god] -> alpha baud\n"
+    t = t + "      -> [bitslice --alpha] -> bits.bin -> [xvm_sandbox] -> symbolic verdict\n"
+    t = t + "      -> [cadence_pair --on/--off] -> promotion disposition\n\n"
+    t = t + "Run 'core help <tool>' or 'core <tool> --help' for flags and math specifications.\n"
+    return t
+
+fn tool_help(tool: String) -> Int:
+    if tool == "slice":
+        print(slice_usage())
+    elif tool == "fil_reader" or tool == "fil":
+        print(fil_reader_usage())
+    elif tool == "sk_gate" or tool == "sk":
+        print(sk_gate_usage())
+    elif tool == "boxcar_bank" or tool == "boxcar":
+        print(boxcar_bank_usage())
+    elif tool == "fold_sum" or tool == "fold":
+        print(fold_sum_usage())
+    elif tool == "fam_god" or tool == "fam":
+        print(fam_god_usage())
+    elif tool == "frame_hunt" or tool == "frame":
+        print(frame_hunt_usage())
+    elif tool == "drift_hunt" or tool == "drift":
+        print(drift_hunt_usage())
+    elif tool == "lag_hunt" or tool == "lag":
+        print(lag_hunt_usage())
+    elif tool == "bitslice":
+        print(bitslice_usage())
+    elif tool == "xeno_scan" or tool == "xeno":
+        print(xeno_scan_usage())
+    elif tool == "xvm_sandbox" or tool == "xvm":
+        print(xvm_sandbox_usage())
+    elif tool == "cadence_pair" or tool == "cadence":
+        print(cadence_pair_usage())
+    elif tool == "config":
+        print(config_usage())
+    else:
+        println("core: unknown tool '" + tool + "'")
+        print(usage())
+        return EXIT_ERROR
+    return EXIT_OK
+
+fn sub_args(args: Array<String>) -> Array<String>:
+    var sub: Array<String> = []
+    var i: Int = 1
+    while i < len(args):
+        push(sub, args[i])
+        i = i + 1
+    return sub
+
+fn extract_exe_stem(cmdline: String) -> String:
+    var end_pos: Int = 0
+    var in_quotes: Int = 0
+    if len(cmdline) > 0 and char_at(cmdline, 0) == "\"":
+        in_quotes = 1
+        var k: Int = 1
+        while k < len(cmdline):
+            if char_at(cmdline, k) == "\"":
+                end_pos = k
+                break
+            k = k + 1
+    else:
+        var k: Int = 0
+        while k < len(cmdline):
+            if char_at(cmdline, k) == " ":
+                end_pos = k
+                break
+            k = k + 1
+        if end_pos == 0:
+            end_pos = len(cmdline)
+    var exe_path: String = ""
+    if in_quotes == 1:
+        exe_path = text_substring_string(cmdline, 1, end_pos - 1)
+    else:
+        exe_path = text_substring_string(cmdline, 0, end_pos)
+    var slash: Int = -1
+    var s: Int = 0
+    while s < len(exe_path):
+        let c: String = char_at(exe_path, s)
+        if c == "/" or c == "\\":
+            slash = s
+        s = s + 1
+    var base: String = exe_path
+    if slash >= 0:
+        base = text_substring_string(exe_path, slash + 1, len(exe_path) - slash - 1)
+    if len(base) > 4:
+        let ext: String = text_substring_string(base, len(base) - 4, 4)
+        if ext == ".exe" or ext == ".EXE":
+            base = text_substring_string(base, 0, len(base) - 4)
+    return base
+
+fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
+    if tool == "bitslice":
+        return bitslice_main(sub)
+    elif tool == "boxcar_bank" or tool == "boxcar":
+        return boxcar_bank_main(sub)
+    elif tool == "cadence_pair" or tool == "cadence":
+        return cadence_pair_main(sub)
+    elif tool == "config":
+        return config_main(sub)
+    elif tool == "drift_hunt" or tool == "drift":
+        return drift_hunt_main(sub)
+    elif tool == "fam_god" or tool == "fam":
+        return fam_god_main(sub)
+    elif tool == "fil_reader" or tool == "fil":
+        return fil_reader_main(sub)
+    elif tool == "fold_sum" or tool == "fold":
+        return fold_sum_main(sub)
+    elif tool == "frame_hunt" or tool == "frame":
+        return frame_hunt_main(sub)
+    elif tool == "lag_hunt" or tool == "lag":
+        return lag_hunt_main(sub)
+    elif tool == "sk_gate" or tool == "sk":
+        return sk_gate_main(sub)
+    elif tool == "slice":
+        return slice_main(sub)
+    elif tool == "xeno_scan" or tool == "xeno":
+        return xeno_scan_main(sub)
+    elif tool == "xvm_sandbox" or tool == "xvm":
+        return xvm_sandbox_main(sub)
+    else:
+        return -999
+
+fn run_prove_all() -> Int with Unsafe:
+    println("================================================================================")
+    println(" TurboKain Core Suite — Unified Native Prove Battery (9 instruments)")
+    println("================================================================================")
+    var failed: Int = 0
+
+    println("\n[1/9] bitslice --prove")
+    if bitslice_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[2/9] boxcar_bank --prove")
+    if boxcar_bank_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[3/9] config --prove")
+    if config_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[4/9] drift_hunt --prove")
+    if drift_hunt_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[5/9] fil_reader --prove")
+    if fil_reader_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[6/9] frame_hunt --prove")
+    if frame_hunt_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[7/9] lag_hunt --prove")
+    if lag_hunt_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[8/9] xeno_scan --selftest")
+    if xeno_scan_main(["--selftest"]) != 0: failed = failed + 1
+
+    println("\n[9/9] xvm_sandbox --selftest")
+    if xvm_sandbox_main(["--selftest"]) != 0: failed = failed + 1
+
+    println("\n================================================================================")
+    if failed == 0:
+        println(" Core Battery Receipt: ALL 9 PROVE BATTERIES PASSED (receipt=PASS)")
+        println("================================================================================")
+        return EXIT_OK
+    else:
+        println(" Core Battery Receipt: " + str(failed) + " FAILURES DETECTED (receipt=FAIL)")
+        println("================================================================================")
+        return EXIT_ERROR
+
+fn run_sweep(sub: Array<String>) -> Int with Unsafe:
+    if len(sub) == 0:
+        println("Usage: core sweep <file.f32> [--out-dir DIR] [--fs HZ]")
+        println("Runs full detector battery over a .f32 voltage series in a single pass.")
+        return EXIT_HELP
+    let f32_path: String = sub[0]
+    var out_dir: String = "reports/sweep"
+    var fs_hz: String = "2929687.5"
+    var i: Int = 1
+    while i < len(sub):
+        if sub[i] == "--out-dir" and i + 1 < len(sub):
+            out_dir = sub[i + 1]
+            i = i + 1
+        elif sub[i] == "--fs" and i + 1 < len(sub):
+            fs_hz = sub[i + 1]
+            i = i + 1
+        i = i + 1
+
+    println("================================================================================")
+    println(" TurboKain Unified Sweep Battery -> " + f32_path)
+    println(" Output Dir: " + out_dir + " | Sample Rate: " + fs_hz + " Hz")
+    println("================================================================================")
+
+    println("\n[Stage 1/7] sk_gate (RFI screening)")
+    let _sk: Int = sk_gate_main(["--in", f32_path, "--out", out_dir + "/sk.md", "--csv", out_dir + "/sk.csv"])
+
+    println("\n[Stage 2/7] xeno_scan (microscopic battery)")
+    let _xs: Int = xeno_scan_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/xeno.md", "--csv", out_dir + "/xeno.csv"])
+
+    println("\n[Stage 3/7] boxcar_bank (dispersed pulse search)")
+    let _bb: Int = boxcar_bank_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/pulse"])
+
+    println("\n[Stage 4/7] drift_hunt (Doppler drifter search)")
+    let _dh: Int = drift_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/drift.md", "--csv", out_dir + "/drift.csv"])
+
+    println("\n[Stage 5/7] frame_hunt (harmonic comb & periodogram)")
+    let _fh: Int = frame_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/frame.md", "--csv", out_dir + "/frame.csv"])
+
+    println("\n[Stage 6/7] lag_hunt (long-lag direct autocorrelation)")
+    let _lh: Int = lag_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/lag.md", "--csv", out_dir + "/lag.csv"])
+
+    println("\n[Stage 7/7] fam_god (cyclic spectral correlation)")
+    let _fg: Int = fam_god_main(["--in", f32_path, "--fs", fs_hz, "--segbank", "--out", out_dir + "/fam.md", "--csv", out_dir + "/fam.csv"])
+
+    println("\n================================================================================")
+    println(" Sweep complete. Review tables under " + out_dir)
+    println("================================================================================")
+    return EXIT_OK
+
+fn main() -> Int with Unsafe:
+    let p: ptr<Byte> = k_GetCommandLineA()
+    var arr: Array<Int> = []
+    var ci: Int = 0
+    while ci < 1000:
+        let b: Int = bref(p, ci)
+        if b == 0:
+            break
+        push(arr, b)
+        ci = ci + 1
+    let cmd: String = text_from_byte_array(arr)
+    let stem: String = extract_exe_stem(cmd)
+
+    let args: Array<String> = process_user_args()
+
+    // 1. If invoked as `<tool>.exe [args...]`:
+    if stem != "core" and stem != "core_main" and stem != "dispatch":
+        let rc: Int = run_tool_named(stem, args)
+        if rc != -999:
+            return rc
+
+    // 2. Invoked as `core.exe [tool] [args...]`:
+    if len(args) == 0:
+        print(usage())
+        return EXIT_HELP
+
+    let tool: String = args[0]
+    if tool == "--help" or tool == "-h":
+        print(usage())
+        return EXIT_OK
+
+    if tool == "help":
+        if len(args) > 1:
+            return tool_help(args[1])
+        print(usage())
+        return EXIT_OK
+
+    if tool == "prove":
+        return run_prove_all()
+
+    if tool == "sweep":
+        return run_sweep(sub_args(args))
+
+    let sub: Array<String> = sub_args(args)
+    let res: Int = run_tool_named(tool, sub)
+    if res != -999:
+        return res
+
+    println("core: unknown tool or command '" + tool + "'")
+    print(usage())
+    return EXIT_ERROR

@@ -36,51 +36,13 @@
 use std::fs
 use std::process
 use std::text
-
-const EXIT_OK: Int = 0
-const EXIT_HELP: Int = 1
-const EXIT_ERROR: Int = 2
-
-// ── text -> numbers ─────────────────────────────────────────────────────────
-fn parse_int_text(text: String) -> Int:
-    if len(text) == 0:
-        return 0
-    var sign: Int = 1
-    var index: Int = 0
-    if char_at(text, 0) == "-":
-        sign = -1
-        index = 1
-    elif char_at(text, 0) == "+":
-        index = 1
-    var value: Int = 0
-    while index < len(text):
-        let ch: String = char_at(text, index)
-        var digit: Int = 0
-        if ch == "0":
-            digit = 0
-        elif ch == "1":
-            digit = 1
-        elif ch == "2":
-            digit = 2
-        elif ch == "3":
-            digit = 3
-        elif ch == "4":
-            digit = 4
-        elif ch == "5":
-            digit = 5
-        elif ch == "6":
-            digit = 6
-        elif ch == "7":
-            digit = 7
-        elif ch == "8":
-            digit = 8
-        elif ch == "9":
-            digit = 9
-        else:
-            return value * sign
-        value = value * 10 + digit
-        index = index + 1
-    return value * sign
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::parse_int_text
+use _common::find_from
+use _common::extract_value_string
+use _common::format_1dp
 
 // Float with exponent (headers write TBIN as 3.41333334E-07; argv never
 // needs it, but the header derive does — boxcar's parser has no E form).
@@ -211,61 +173,7 @@ fn parse_float_exp(text: String) -> Float:
             return base * scale
     return base
 
-fn find_from(hay: String, needle: String, start: Int) -> Int:
-    let hn: Int = len(hay)
-    let nn: Int = len(needle)
-    if nn == 0:
-        return start
-    var i: Int = start
-    if i < 0:
-        i = 0
-    while i + nn <= hn:
-        var j: Int = 0
-        var hit: Int = 1
-        while j < nn:
-            if char_at(hay, i + j) != char_at(needle, j):
-                hit = 0
-            j = j + 1
-        if hit == 1:
-            return i
-        i = i + 1
-    return -1
-
-// GUPPI header card value (slice.kn extract, no dependency).
-fn extract_value_string(header: String, key: String) -> String:
-    let kp: Int = find_from(header, key, 0)
-    if kp < 0:
-        return ""
-    let ep: Int = find_from(header, "=", kp)
-    if ep < 0:
-        return ""
-    let hn: Int = len(header)
-    var s: Int = ep + 1
-    var skipping: Int = 1
-    while s < hn:
-        if skipping == 1:
-            if char_at(header, s) == " ":
-                s = s + 1
-            else:
-                skipping = 0
-        else:
-            break
-    var e: Int = s
-    var done: Int = 0
-    while e < hn:
-        if done == 0:
-            let c: String = char_at(header, e)
-            if c == " ":
-                done = 1
-            elif c == "/":
-                done = 1
-            else:
-                e = e + 1
-        else:
-            break
-    if e <= s:
-        return ""
-    return text_substring_string(header, s, e - s)
+// (find_from and extract_value_string now ride common.kn)
 
 // ASCII lowercase (manual — avoids unproven stdlib symbols in this lane).
 fn lower_ascii(s: String) -> String:
@@ -361,21 +269,9 @@ fn is_numeric_string(s: String) -> Int:
         i = i + 1
     return 1
 
-// FS float -> 1dp string via scaled ints (str(Float) truncates — never it).
-fn format_1dp(v: Float) -> String:
-    var neg: Int = 0
-    var x: Float = v
-    if v < 0.0:
-        neg = 1
-        x = 0.0 - v
-    let ip: Int = x as Int
-    let fp: Int = ((x - (ip as Float)) * 10.0) as Int
-    var r: String = str(ip) + "." + str(fp)
-    if neg == 1:
-        r = "-" + r
-    return r
+// (format_1dp now rides common.kn)
 
-fn usage() -> String:
+pub fn config_usage() -> String:
     var t: String = "config 0.1.0 — TurboKain preset resolver (M7)\n"
     t = t + "One preset drives every detector. Header geometry wins over the\n"
     t = t + "preset; CLI --set wins over everything. Unknown keys quarantined.\n"
@@ -400,9 +296,7 @@ fn usage() -> String:
     t = t + "EXIT CODES: 0 ok, 1 help / prove FAIL, 2 error.\n"
     return t
 
-fn main() -> Int:
-    let args: Array<String> = process_user_args()
-
+pub fn config_main(args: Array<String>) -> Int:
     // ── key table: 40 keys, parallel arrays (key/value/src/why) ──
     var keys: Array<String> = []
     var vals: Array<String> = []
@@ -696,7 +590,7 @@ fn main() -> Int:
             preset_path = pos[0]
 
     if show_help == 1:
-        print(usage())
+        print(config_usage())
         return EXIT_HELP
 
     // ── --prove: self-contained, no files ──

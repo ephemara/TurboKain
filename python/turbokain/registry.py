@@ -199,17 +199,17 @@ _TOOLS: list[Tool] = [
         fs_flag=None,
         note="Preset/header/CLI resolver (40 keys).",
     ),
-    # -- drivers ------------------------------------------------------------
+    # -- suite / portable core ----------------------------------------------
     Tool(
-        "pipeline",
-        "kain/pipeline/pipeline.exe",
-        "driver",
-        "raw",
+        "core",
+        "core.exe",
+        "suite",
+        "none",
         selftest=None,
         in_flag=None,
         out_flag=None,
         fs_flag=None,
-        note="Kain single entry point: `file <raw>` stage+guard, `analyze <dir>`.",
+        note="Portable core executable containing all 14 tools amalgamated.",
     ),
     # -- examples (kept wrapped so the prove battery is uniform) -----------
     Tool(
@@ -261,10 +261,34 @@ class Registry:
         )
 
 
+CORE_TOOLS: set[str] = {
+    "bitslice",
+    "boxcar_bank",
+    "cadence_pair",
+    "config",
+    "drift_hunt",
+    "fam_god",
+    "fil_reader",
+    "fold_sum",
+    "frame_hunt",
+    "lag_hunt",
+    "sk_gate",
+    "slice",
+    "xeno_scan",
+    "xvm_sandbox",
+}
+
+
 def load_registry(root: Path) -> Registry:
     reg = Registry(root=root)
+    core_exe = None
+    for cand in [root / "core.exe", root / "kain" / "core.exe", root / "kain" / "core" / "core.exe"]:
+        if cand.exists():
+            core_exe = cand
+            break
+
     for tool in _TOOLS:
-        if tool.resolve(root).exists():
+        if tool.resolve(root).exists() or (core_exe is not None and tool.name in CORE_TOOLS):
             reg.tools[tool.name] = tool
         else:
             reg.missing.append(tool.name)

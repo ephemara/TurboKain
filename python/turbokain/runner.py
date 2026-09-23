@@ -95,6 +95,13 @@ class RunResult:
         return "\n".join(lines[-n:])
 
 
+def find_core_exe(root: Path) -> Path | None:
+    for cand in [root / "core.exe", root / "kain" / "core.exe", root / "kain" / "core" / "core.exe"]:
+        if cand.exists():
+            return cand
+    return None
+
+
 def run_tool(
     tool: Tool,
     args: Sequence[str] = (),
@@ -106,12 +113,17 @@ def run_tool(
     expect_outputs: Sequence[Path] = (),
 ) -> RunResult:
     exe = tool.resolve(root)
-    if not exe.exists():
-        raise FileNotFoundError(
-            f"{tool.name}: exe missing at {exe} — build it first "
-            f"(cd {exe.parent} && kain build {exe.stem}.kn --target llvm)"
-        )
-    argv = [str(exe), *[str(a) for a in args]]
+    if exe.exists():
+        argv = [str(exe), *[str(a) for a in args]]
+    else:
+        core_exe = find_core_exe(root)
+        if core_exe is not None:
+            argv = [str(core_exe), tool.name, *[str(a) for a in args]]
+        else:
+            raise FileNotFoundError(
+                f"{tool.name}: exe missing at {exe} and core.exe not found — build it first "
+                f"(cd {exe.parent} && kain build {exe.stem}.kn --target llvm)"
+            )
     t0 = time.perf_counter()
     proc = subprocess.run(
         argv,
@@ -144,10 +156,15 @@ def run_passthrough(
 ) -> int:
     """Run a tool with inherited stdio (interactive / heavy scans)."""
     exe = tool.resolve(root)
-    if not exe.exists():
-        print(f"tk: {tool.name}: exe missing at {exe}", file=sys.stderr)
-        return 127
-    argv = [str(exe), *[str(a) for a in args]]
+    if exe.exists():
+        argv = [str(exe), *[str(a) for a in args]]
+    else:
+        core_exe = find_core_exe(root)
+        if core_exe is not None:
+            argv = [str(core_exe), tool.name, *[str(a) for a in args]]
+        else:
+            print(f"tk: {tool.name}: exe missing at {exe} and core.exe not found", file=sys.stderr)
+            return 127
     return subprocess.call(argv, cwd=str(root), env=tool_env(root, data_dir))
 
 

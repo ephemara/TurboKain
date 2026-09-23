@@ -35,95 +35,39 @@ use std::fs
 use std::process
 use std::runtime
 use std::text
+use _common::k_CreateFileA
+use _common::k_ReadFile
+use _common::k_WriteFile
+use _common::k_GetFileSizeEx
+use _common::k_SetFilePointer
+use _common::k_CloseHandle
+use _common::k_GetLastError
+use _common::null_ptr
+use _common::GEN_READ
+use _common::GEN_WRITE
+use _common::OPEN_EXISTING
+use _common::CREATE_ALWAYS
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::k_open_read
+use _common::k_open_write
+use _common::k_handle_bad
+use _common::k_size
+use _common::k_seek
+use _common::k_read_at
+use _common::k_write_all
+use _common::bref
+use _common::bstore
+use _common::f32bits_to_float
+use _common::parse_int_text
+use _common::find_from
+use _common::format_1dp
 
-// ── kernel32 file API (slice.kn pattern, no fs bridge for bulk) ────────────
-@extern @link_name("CreateFileA")
-fn k_CreateFileA(name: String, access: Int, sharemode: Int, sec: ptr<Void>, disp: Int, flags: Int, tmpl: ptr<Void>) -> ptr<Void>
-
-@extern @link_name("ReadFile")
-fn k_ReadFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
-
-@extern @link_name("WriteFile")
-fn k_WriteFile(h: ptr<Void>, buf: ptr<Byte>, n: Int, outn: ptr<Int>, ov: ptr<Void>) -> Int
-
-@extern @link_name("GetFileSizeEx")
-fn k_GetFileSizeEx(h: ptr<Void>, outsz: ptr<Int>) -> Int
-
-@extern @link_name("SetFilePointer")
-fn k_SetFilePointer(h: ptr<Void>, lo: Int, hi: ptr<Int>, method: Int) -> Int
-
-@extern @link_name("CloseHandle")
-fn k_CloseHandle(h: ptr<Void>) -> Int
-
-@extern @link_name("GetLastError")
-fn k_GetLastError() -> Int
-
-fn null_ptr() -> ptr<Void> with Pure:
-    return int_to_ptr(0, "ptr<Void>")
-
-const GEN_READ: Int = 2147483648
-const GEN_WRITE: Int = 1073741824
-const OPEN_EXISTING: Int = 3
-const CREATE_ALWAYS: Int = 2
-const FILE_NORMAL: Int = 128
-const FILE_SHARE_RW: Int = 3
-
-const EXIT_OK: Int = 0
-const EXIT_HELP: Int = 1
-const EXIT_ERROR: Int = 2
-
-const HEAD_ARENA: Int = 65536
-const SLACK: Int = 32
-
-fn k_open_read(path: String) -> ptr<Void> with Unsafe:
-    return k_CreateFileA(path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
-
-fn k_open_write(path: String) -> ptr<Void> with Unsafe:
-    return k_CreateFileA(path, GEN_WRITE, FILE_SHARE_RW, null_ptr(), CREATE_ALWAYS, FILE_NORMAL, null_ptr())
-
-fn k_handle_bad(h: ptr<Void>) -> Int with Pure:
-    if ptr_to_int(h) == -1:
-        return 1
-    return 0
-
-fn k_size(h: ptr<Void>) -> Int with Unsafe:
-    let slot: ptr<Int> = alloc_zeroed(1, "Int")
-    let ok: Int = k_GetFileSizeEx(h, slot)
-    var sz: Int = -1
-    if ok != 0:
-        sz = mem_load(slot, "Int")
-    decay slot
-    return sz
-
-fn k_seek(h: ptr<Void>, off: Int) -> Int with Unsafe:
-    let hislot: ptr<Int> = alloc_zeroed(1, "Int")
-    mem_store(hislot, off / 4294967296, "Int")
-    let lo: Int = off % 4294967296
-    let r: Int = k_SetFilePointer(h, lo, hislot, 0)
-    decay hislot
-    return r
-
-fn k_read_at(h: ptr<Void>, nslot: ptr<Int>, off: Int, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
-    let _s: Int = k_seek(h, off)
-    mem_store(nslot, 0, "Int")
-    let ok: Int = k_ReadFile(h, buf, n, nslot, null_ptr())
-    if ok == 0:
-        return -1
-    return mem_load(nslot, "Int")
-
-fn k_write_all(h: ptr<Void>, nslot: ptr<Int>, buf: ptr<Byte>, n: Int) -> Int with Unsafe:
-    mem_store(nslot, 0, "Int")
-    let ok: Int = k_WriteFile(h, buf, n, nslot, null_ptr())
-    if ok == 0:
-        return -1
-    return mem_load(nslot, "Int")
-
-// Int-window byte value (value-preserving; see slice.kn).
-fn bref(buf: ptr<Byte>, i: Int) -> Int with Unsafe:
-    return mem_load(ptr_offset(buf, i, "Byte"), "Int") & 255
-
-fn bstore(buf: ptr<Byte>, i: Int, v: Int) with Unsafe:
-    mem_store(ptr_offset(buf, i, "Byte"), v as Byte, "Byte")
+const FIL_HEAD_ARENA: Int = 65536
+const FIL_SLACK: Int = 32
 
 fn u32le(buf: ptr<Byte>, off: Int) -> Int with Unsafe:
     return bref(buf, off) + bref(buf, off + 1) * 256 + bref(buf, off + 2) * 65536 + bref(buf, off + 3) * 16777216
@@ -172,21 +116,7 @@ fn f64_decode(hi: Int, lo: Int) -> Float:
         return 0.0 - mag
     return mag
 
-// f32 bits -> Float via inline-built pow2 table (boxcar pattern: table is
-// built INLINE in main — small-callee crash workaround — and passed in).
-fn f32bits_to_float(bits: Int, p2: ptr<Float>) -> Float with Unsafe:
-    let exp: Int = (bits >> 23) & 255
-    let mant: Int = bits & 8388607
-    var mag: Float = 0.0
-    if exp == 0:
-        mag = (mant as Float) / 8388608.0 * mem_load(ptr_offset(p2, 1, "Float"), "Float")
-    elif exp == 255:
-        mag = 0.0
-    else:
-        mag = (1.0 + (mant as Float) / 8388608.0) * mem_load(ptr_offset(p2, exp, "Float"), "Float")
-    if ((bits >> 31) & 1) == 1:
-        return 0.0 - mag
-    return mag
+// (f32bits_to_float now rides common.kn)
 
 // Float -> f32 bits (u8/i16 lanes + band-mean output; subnormals flush).
 // No << operator (unproven in this lane) — shifts are multiplies.
@@ -212,81 +142,9 @@ fn float_to_f32bits(v: Float) -> Int:
     let mant: Int = ((x - 1.0) * 8388608.0) as Int
     return sign * 2147483648 + exp * 8388608 + mant
 
-fn parse_int_text(text: String) -> Int:
-    if len(text) == 0:
-        return 0
-    var sign: Int = 1
-    var index: Int = 0
-    if char_at(text, 0) == "-":
-        sign = -1
-        index = 1
-    elif char_at(text, 0) == "+":
-        index = 1
-    var value: Int = 0
-    while index < len(text):
-        let ch: String = char_at(text, index)
-        var digit: Int = 0
-        if ch == "0":
-            digit = 0
-        elif ch == "1":
-            digit = 1
-        elif ch == "2":
-            digit = 2
-        elif ch == "3":
-            digit = 3
-        elif ch == "4":
-            digit = 4
-        elif ch == "5":
-            digit = 5
-        elif ch == "6":
-            digit = 6
-        elif ch == "7":
-            digit = 7
-        elif ch == "8":
-            digit = 8
-        elif ch == "9":
-            digit = 9
-        else:
-            return value * sign
-        value = value * 10 + digit
-        index = index + 1
-    return value * sign
+// (parse_int_text, find_from, format_1dp now ride common.kn)
 
-fn find_from(hay: String, needle: String, start: Int) -> Int:
-    let hn: Int = len(hay)
-    let nn: Int = len(needle)
-    if nn == 0:
-        return start
-    var i: Int = start
-    if i < 0:
-        i = 0
-    while i + nn <= hn:
-        var j: Int = 0
-        var hit: Int = 1
-        while j < nn:
-            if char_at(hay, i + j) != char_at(needle, j):
-                hit = 0
-            j = j + 1
-        if hit == 1:
-            return i
-        i = i + 1
-    return -1
-
-// 1dp via scaled ints (str(Float) truncates — never it).
-fn format_1dp(v: Float) -> String:
-    var neg: Int = 0
-    var x: Float = v
-    if v < 0.0:
-        neg = 1
-        x = 0.0 - v
-    let ip: Int = x as Int
-    let fp: Int = ((x - (ip as Float)) * 10.0) as Int
-    var r: String = str(ip) + "." + str(fp)
-    if neg == 1:
-        r = "-" + r
-    return r
-
-fn usage() -> String:
+pub fn fil_reader_usage() -> String:
     var t: String = "fil_reader 0.1.0 — TurboKain Sigproc filterbank ingest\n"
     t = t + ".fil in -> .f32 LE time-series out (slice contract for spectra).\n"
     t = t + "nbits 32 copied verbatim; 8/16 encoded; nifs!=1 quarantines.\n"
@@ -302,8 +160,7 @@ fn usage() -> String:
     t = t + "EXIT CODES: 0 ok, 1 help / prove FAIL, 2 error.\n"
     return t
 
-fn main() -> Int with Unsafe:
-    let args: Array<String> = process_user_args()
+pub fn fil_reader_main(args: Array<String>) -> Int with Unsafe:
     var in_path: String = ""
     var data_dir: String = ""
     var out_path: String = ""
@@ -389,7 +246,7 @@ fn main() -> Int with Unsafe:
         pi = pi + 1
 
     if show_help == 1:
-        print(usage())
+        print(fil_reader_usage())
         return EXIT_HELP
 
     // ── pow2 table INLINE (small-callee crash workaround — never extract) ──
@@ -537,7 +394,7 @@ fn main() -> Int with Unsafe:
                         ts3 = f64_decode(hi3, lo3)
                 if nc3 == 16 and nb3 == 32 and ni3 == 1 and hlen3 > 0 and ts3 > 1.9 and ts3 < 2.1:
                     // read spectrum 2, chan 5 -> expect 2*16+5 = 37.0
-                    let mut rbuf: ptr<Byte> = alloc_zeroed(64 + SLACK, "Byte")
+                    let mut rbuf: ptr<Byte> = alloc_zeroed(64 + FIL_SLACK, "Byte")
                     let roff3: Int = hlen3 + 2 * 16 * 4
                     let gotr3: Int = k_read_at(h3, ns3, roff3, rbuf, 64)
                     if gotr3 == 64:
@@ -585,8 +442,8 @@ fn main() -> Int with Unsafe:
         return EXIT_ERROR
     let fsize: Int = k_size(h)
     let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
-    let mut habuf: ptr<Byte> = alloc_zeroed(HEAD_ARENA + SLACK, "Byte")
-    let got: Int = k_read_at(h, nslot, 0, habuf, HEAD_ARENA)
+    let mut habuf: ptr<Byte> = alloc_zeroed(FIL_HEAD_ARENA + FIL_SLACK, "Byte")
+    let got: Int = k_read_at(h, nslot, 0, habuf, FIL_HEAD_ARENA)
     if got < 64:
         println("fil_reader: short read on header")
         let _c: Int = k_CloseHandle(h)
@@ -774,8 +631,8 @@ fn main() -> Int with Unsafe:
     var out_n: Int = nspec
     if mode == 2:
         out_n = nchans
-    let mut outbuf: ptr<Byte> = alloc_zeroed(out_n * 4 + SLACK, "Byte")
-    let mut rowbuf: ptr<Byte> = alloc_zeroed(row_bytes + SLACK, "Byte")
+    let mut outbuf: ptr<Byte> = alloc_zeroed(out_n * 4 + FIL_SLACK, "Byte")
+    let mut rowbuf: ptr<Byte> = alloc_zeroed(row_bytes + FIL_SLACK, "Byte")
 
     if mode == 0 or mode == 1:
         var t: Int = 0
