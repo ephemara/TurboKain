@@ -71,3 +71,4 @@ date	area	type	description	file
 2026-09-23	docs	update	Updated AGENTS.md with Core Suite Amalgamation Architecture (SQLite/BusyBox doctrine), _common.kn, dispatch.kn, and future Yin-Yang development trajectory in core.kn	AGENTS.md
 2026-09-23	docs	update	Rewrote README.md with aerospace-grade radio technosignature research specification (Objective 1, SQLite doctrine, 14-tool DSP lattice, mathematical formulations, core.exe operations)	README.md
 2026-09-23	core	update	Supported turbokain_core.exe and turbokain.exe binary stems in dispatch.kn and python registry/runner	kain/core/dispatch.kn,kain/core.kn,python/turbokain/registry.py,python/turbokain/runner.py
+2026-09-23	repo	release	Published v0.1.0-alpha GitHub release with turbokain_core.exe (1.2 MB native binary, SHA256 verified, 14 amalgamated tools)	turbokain_core.exe,turbokain_core-windows-x86_64.zip,SHA256SUMS.txt
