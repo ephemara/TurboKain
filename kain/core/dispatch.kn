@@ -39,12 +39,12 @@ fn k_GetCommandLineA() -> ptr<Byte>
 
 fn usage() -> String:
     var t: String = "================================================================================\n"
-    t = t + " TurboKain Core (tkc) 0.1.0 — Unified Native Signal Processing Engine\n"
+    t = t + " TurboKain Core (tkc) 0.2.0 — Unified Native Signal Processing Engine\n"
     t = t + "================================================================================\n\n"
     t = t + "USAGE:\n"
     t = t + "  tkc <tool> [args...]             Run any instrument directly (shorthands work)\n"
     t = t + "  tkc help <tool>                  Detailed CLI help for a specific tool\n"
-    t = t + "  tkc prove                        Run all 15 formal prove batteries in-memory\n"
+    t = t + "  tkc prove                        Run all 16 formal prove batteries in-memory\n"
     t = t + "  tkc sweep <input> [options...]   Run full detector battery over .f32, .h5, .fil, or .raw\n\n"
     t = t + "BINARY ALIASES:  tkc / core / turbokain_core / turbokain are all identical\n\n"
     t = t + "TOOL SHORTHANDS:\n"

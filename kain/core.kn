@@ -3754,12 +3754,12 @@ fn k_GetCommandLineA() -> ptr<Byte>
 
 fn usage() -> String:
     var t: String = "================================================================================\n"
-    t = t + " TurboKain Core (tkc) 0.1.0 — Unified Native Signal Processing Engine\n"
+    t = t + " TurboKain Core (tkc) 0.2.0 — Unified Native Signal Processing Engine\n"
     t = t + "================================================================================\n\n"
     t = t + "USAGE:\n"
     t = t + "  tkc <tool> [args...]             Run any instrument directly (shorthands work)\n"
     t = t + "  tkc help <tool>                  Detailed CLI help for a specific tool\n"
-    t = t + "  tkc prove                        Run all 15 formal prove batteries in-memory\n"
+    t = t + "  tkc prove                        Run all 16 formal prove batteries in-memory\n"
     t = t + "  tkc sweep <input> [options...]   Run full detector battery over .f32, .h5, .fil, or .raw\n\n"
     t = t + "BINARY ALIASES:  tkc / core / turbokain_core / turbokain are all identical\n\n"
     t = t + "TOOL SHORTHANDS:\n"
@@ -16293,7 +16293,7 @@ const WF_TURBO_HEX: String = "30123b31154232184a341b51351e5836215f37236538266c39
 const WF_INFERNO_HEX: String = "00000300000400000601000701010901010b02010e02021003021204031404031605041806041b07051d08061f0906210a07230b07260d08280e082a0f092d10092f120a32130a34140b36160b39170b3b190b3e1a0b401c0c431d0c451f0c47200c4a220b4c240b4e260b50270b52290b542b0a562d0a582e0a5a300a5c32095d34095f3509603709613909623b09643c09653e0966400966410967430a68450a69460a69480b6a4a0b6a4b0c6b4d0c6b4f0d6c500d6c520e6c530e6d550f6d570f6d58106d5a116d5b116e5d126e5f126e60136e62146e63146e65156e66156e68166e6a176e6b176e6d186e6e186e70196e72196d731a6d751b6d761b6d781c6d7a1c6d7b1d6c7d1d6c7e1e6c801f6b811f6b83206b85206a86216a88216a8922698b22698d23698e24689024689125679325679526669626669827659928649b28649c29639e2963a02a62a12b61a32b61a42c60a62c5fa72d5fa92e5eab2e5dac2f5cae305baf315bb1315ab23259b43358b53357b73456b83556ba3655bb3754bd3753be3852bf3951c13a50c23b4fc43c4ec53d4dc73e4cc83e4bc93f4acb4049cc4148cd4247cf4446d04544d14643d24742d44841d54940d64a3fd74b3ed94d3dda4e3bdb4f3adc5039dd5238de5337df5436e05634e25733e35832e45a31e55b30e65c2ee65e2de75f2ce8612be9622aea6428eb6527ec6726ed6825ed6a23ee6c22ef6d21f06f1ff0701ef1721df2741cf2751af37719f37918f47a16f57c15f57e14f68012f68111f78310f7850ef8870df8880cf88a0bf98c09f98e08f99008fa9107fa9306fa9506fa9706fb9906fb9b06fb9d06fb9e07fba007fba208fba40afba60bfba80dfbaa0efbac10fbae12fbb014fbb116fbb318fbb51afbb71cfbb91efabb21fabd23fabf25fac128f9c32af9c52cf9c72ff8c931f8cb34f8cd37f7cf3af7d13cf6d33ff6d542f5d745f5d948f4db4bf4dc4ff3de52f3e056f3e259f2e45df2e660f1e864f1e968f1eb6cf1ed70f1ee74f1f079f1f27df2f381f2f485f3f689f4f78df5f891f6fa95f7fb99f9fc9dfafda0fcfea4"
 
 pub fn waterfall_usage() -> String:
-    var t: String = "waterfall 0.1.0 — TurboKain High-Density Scientific Waterfall Engine\n"
+    var t: String = "waterfall 0.2.0 — TurboKain High-Density Scientific Waterfall Engine\n"
     t = t + "Generates multi-panel 1920x1080 diagnostic PNG dashboard with dynamic spectrum,\n"
     t = t + "power spectrum, time envelope, spectral kurtosis, HUD telemetry, and candidate overlays.\n\n"
     t = t + "USAGE:\n"
