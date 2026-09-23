@@ -462,13 +462,15 @@ AGENTS.md    this file
 ```bash
 # 1. Amalgamate and build the portable core suite:
 kain amalgamate --raw kain/core -o kain/core.kn
-kain build kain/core.kn --target llvm -o core.exe
+kain build kain/core.kn --target llvm -o tkc.exe
+cp tkc.exe turbokain_core.exe
+cp tkc.exe core.exe
 
-# 2. Run tools via core:
-core <tool> [args...]
-core help <tool>
-core prove
-core sweep <file.f32>
+# 2. Run tools via tkc (or core / turbokain_core):
+tkc <tool> [args...]
+tkc help <tool>
+tkc prove
+tkc sweep <file.f32>
 
 # 3. Check individual modular source files during development:
 kain check kain/core/<tool>.kn

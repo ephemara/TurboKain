@@ -3741,13 +3741,22 @@ fn k_GetCommandLineA() -> ptr<Byte>
 
 fn usage() -> String:
     var t: String = "================================================================================\n"
-    t = t + " TurboKain Core 0.1.0 — Unified Native Signal Processing Engine\n"
+    t = t + " TurboKain Core (tkc) 0.1.0 — Unified Native Signal Processing Engine\n"
     t = t + "================================================================================\n\n"
     t = t + "USAGE:\n"
-    t = t + "  core <tool> [args...]             Run any instrument directly\n"
-    t = t + "  core help <tool>                  Detailed CLI help for a specific tool\n"
-    t = t + "  core prove                        Run all 9 formal prove batteries in-memory\n"
-    t = t + "  core sweep <f32> [options...]     Run full detector battery over a time series\n\n"
+    t = t + "  tkc <tool> [args...]             Run any instrument directly (shorthands work)\n"
+    t = t + "  tkc help <tool>                  Detailed CLI help for a specific tool\n"
+    t = t + "  tkc prove                        Run all 9 formal prove batteries in-memory\n"
+    t = t + "  tkc sweep <f32> [options...]     Run full detector battery over a time series\n\n"
+    t = t + "BINARY ALIASES:  tkc / core / turbokain_core / turbokain are all identical\n\n"
+    t = t + "TOOL SHORTHANDS:\n"
+    t = t + "  bitslice     -> bits              boxcar_bank  -> boxcar, bb\n"
+    t = t + "  cadence_pair -> cadence, cad      config       -> cfg\n"
+    t = t + "  drift_hunt   -> drift             fam_god      -> fam\n"
+    t = t + "  fil_reader   -> fil               fold_sum     -> fold\n"
+    t = t + "  frame_hunt   -> frame             lag_hunt     -> lag\n"
+    t = t + "  sk_gate      -> sk                xeno_scan    -> xeno\n"
+    t = t + "  xvm_sandbox  -> xvm               slice        -> slice\n\n"
     t = t + "INSTRUMENTS (14 total):\n"
     t = t + "  [Ingest / Calibration]\n"
     t = t + "    slice         GUPPI .raw -> .f32 channel/pol voltage slice (2/8-bit)\n"
@@ -3768,10 +3777,10 @@ fn usage() -> String:
     t = t + "    xvm_sandbox   Turing/subleq/cellular automata execution sandbox\n"
     t = t + "    cadence_pair  ON/OFF cadence corroboration gate (WATCH logic)\n\n"
     t = t + "PIPELINE PING-PONG WORKFLOW:\n"
-    t = t + "  raw -> [slice] -> .f32 -> [sk_gate/xeno] -> [fam_god] -> alpha baud\n"
-    t = t + "      -> [bitslice --alpha] -> bits.bin -> [xvm_sandbox] -> symbolic verdict\n"
-    t = t + "      -> [cadence_pair --on/--off] -> promotion disposition\n\n"
-    t = t + "Run 'core help <tool>' or 'core <tool> --help' for flags and math specifications.\n"
+    t = t + "  raw -> [slice] -> .f32 -> [sk/xeno] -> [fam] -> alpha baud\n"
+    t = t + "      -> [bits --alpha] -> bits.bin -> [xvm] -> symbolic verdict\n"
+    t = t + "      -> [cad --on/--off] -> promotion disposition\n\n"
+    t = t + "Run 'tkc help <tool>' or 'tkc <tool> --help' for flags and math specifications.\n"
     return t
 
 fn tool_help(tool: String) -> Int:
@@ -3781,7 +3790,7 @@ fn tool_help(tool: String) -> Int:
         print(fil_reader_usage())
     elif tool == "sk_gate" or tool == "sk":
         print(sk_gate_usage())
-    elif tool == "boxcar_bank" or tool == "boxcar":
+    elif tool == "boxcar_bank" or tool == "boxcar" or tool == "bb":
         print(boxcar_bank_usage())
     elif tool == "fold_sum" or tool == "fold":
         print(fold_sum_usage())
@@ -3793,15 +3802,15 @@ fn tool_help(tool: String) -> Int:
         print(drift_hunt_usage())
     elif tool == "lag_hunt" or tool == "lag":
         print(lag_hunt_usage())
-    elif tool == "bitslice":
+    elif tool == "bitslice" or tool == "bits":
         print(bitslice_usage())
     elif tool == "xeno_scan" or tool == "xeno":
         print(xeno_scan_usage())
     elif tool == "xvm_sandbox" or tool == "xvm":
         print(xvm_sandbox_usage())
-    elif tool == "cadence_pair" or tool == "cadence":
+    elif tool == "cadence_pair" or tool == "cadence" or tool == "cad":
         print(cadence_pair_usage())
-    elif tool == "config":
+    elif tool == "config" or tool == "cfg":
         print(config_usage())
     else:
         println("core: unknown tool '" + tool + "'")
@@ -3859,13 +3868,13 @@ fn extract_exe_stem(cmdline: String) -> String:
     return base
 
 fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
-    if tool == "bitslice":
+    if tool == "bitslice" or tool == "bits":
         return bitslice_main(sub)
-    elif tool == "boxcar_bank" or tool == "boxcar":
+    elif tool == "boxcar_bank" or tool == "boxcar" or tool == "bb":
         return boxcar_bank_main(sub)
-    elif tool == "cadence_pair" or tool == "cadence":
+    elif tool == "cadence_pair" or tool == "cadence" or tool == "cad":
         return cadence_pair_main(sub)
-    elif tool == "config":
+    elif tool == "config" or tool == "cfg":
         return config_main(sub)
     elif tool == "drift_hunt" or tool == "drift":
         return drift_hunt_main(sub)
@@ -3889,6 +3898,15 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return xvm_sandbox_main(sub)
     else:
         return -999
+
+fn is_suite_binary(stem: String) -> Int:
+    if stem == "core" or stem == "core_main" or stem == "dispatch":
+        return 1
+    if stem == "tkc" or stem == "tk-core" or stem == "tk_core":
+        return 1
+    if stem == "turbokain" or stem == "turbokain_core" or stem == "turbokain-core":
+        return 1
+    return 0
 
 fn run_prove_all() -> Int with Unsafe:
     println("================================================================================")
@@ -3998,7 +4016,7 @@ fn main() -> Int with Unsafe:
     let args: Array<String> = process_user_args()
 
     // 1. If invoked as `<tool>.exe [args...]`:
-    if stem != "core" and stem != "core_main" and stem != "dispatch" and stem != "turbokain" and stem != "turbokain_core" and stem != "turbokain-core":
+    if is_suite_binary(stem) == 0:
         let rc: Int = run_tool_named(stem, args)
         if rc != -999:
             return rc

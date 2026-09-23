@@ -108,7 +108,8 @@ kain build kain/core.kn --target llvm -o core.exe
 Every instrument contains mathematical self-tests verifying analytical bounds against synthetic Gaussian noise and injected reference signals. Run the full battery natively:
 
 ```bash
-core prove
+tkc prove
+# or: core prove
 ```
 
 Verification output demonstrates zero-divergence against analytical ground truths:
@@ -132,24 +133,26 @@ Verification output demonstrates zero-divergence against analytical ground truth
 
 ---
 
-## 6. Execution Modes
+## 6. Execution Modes (CLI: `tkc` / `core`)
+
+The binary is aliased as `tkc` (TurboKain Core), `core`, and `turbokain_core`. Tool shorthands (`fam`, `lag`, `boxcar`, `drift`, `frame`, `sk`, `xeno`, `xvm`, `bits`, `cad`, `cfg`, `fil`) are supported out of the box.
 
 ### 6.1 Interactive Command-Line Help
 ```bash
 # Master directory of all 14 tools and data flows
-core help
+tkc help
 
 # Detailed mathematical parameters, flags, and contracts for an instrument
-core help slice
-core help fam_god
-core help boxcar_bank
-core help xvm_sandbox
+tkc help slice
+tkc help fam
+tkc help boxcar
+tkc help xvm
 ```
 
-### 6.2 Automated Pipeline Sweep (`core sweep`)
+### 6.2 Automated Pipeline Sweep (`tkc sweep`)
 Execute the complete 7-stage screening and detection battery on a voltage slice in a single pass:
 ```bash
-core sweep <path_to_voltage.f32> --out-dir reports/target_sweep/ --fs 2929687.5
+tkc sweep <path_to_voltage.f32> --out-dir reports/target_sweep/ --fs 2929687.5
 ```
 This executes in sequence:
 1. `sk_gate` (Spectral kurtosis RFI screening)
@@ -160,23 +163,23 @@ This executes in sequence:
 6. `lag_hunt` (Direct time-domain autocorrelation lattice)
 7. `fam_god` (Cyclostationary spectral correlation density mapping)
 
-### 6.3 Direct Tool Invocation
+### 6.3 Direct Tool Invocation (with tool shorthands)
 Individual instruments execute directly with explicit argument contracts:
 ```bash
 # Ingest 128 blocks of channel 44 from a raw GUPPI baseband file
-core slice /data/raw/blc00_guppi.raw 44 /data/slices/ch44.f32 128 --pol 0
+tkc slice /data/raw/blc00_guppi.raw 44 /data/slices/ch44.f32 128 --pol 0
 
 # Run multi-decade cyclostationary baud rate estimation
-core fam_god --in /data/slices/ch44.f32 --fs 2929687.5 --segbank --out reports/fam.md
+tkc fam --in /data/slices/ch44.f32 --fs 2929687.5 --segbank --out reports/fam.md
 
 # Decimate and slice bits at detected baud rate
-core bitslice --in /data/slices/ch44.f32 --alpha 11090.0 --out /data/bits/ch44_b11090
+tkc bits --in /data/slices/ch44.f32 --alpha 11090.0 --out /data/bits/ch44_b11090
 
 # Evaluate computational complexity in the symbolic execution sandbox
-core xvm_sandbox --in /data/bits/ch44_b11090.head.sign.bin --out reports/xvm.md
+tkc xvm --in /data/bits/ch44_b11090.head.sign.bin --out reports/xvm.md
 
 # Gate spatial persistence against an off-target reference observation
-core cadence_pair --on reports/on_target.md --off reports/off_target.md --out reports/cadence.md
+tkc cad --on reports/on_target.md --off reports/off_target.md --out reports/cadence.md
 ```
 
 ---
