@@ -3,7 +3,13 @@
 ### High-Throughput Coherent Radio Technosignature & Bystander Traffic Pipeline
 *A native, formally verified signal processing engine for astronomical baseband recordings.*
 
->  **New to TurboKain?** Read the complete, hands-on **[User Guide (`docs/USER_GUIDE.md`)](docs/USER_GUIDE.md)** for plain-English walk-throughs of all 14 instruments, configuration presets, Python automation, and pipeline recipes.
+>  **New to TurboKain?** Read the complete, hands-on **[User Guide (`docs/USER_GUIDE.md`)](docs/USER_GUIDE.md)** for walk-throughs of all 21 instruments, configuration presets, Python automation, and pipeline recipes. Also check out the **[Waterfall Diagnostic Gallery (`docs/waterfall_examples/`)](docs/waterfall_examples/)** for full 1080p visualization examples.
+
+<p align="center">
+  <img src="docs/waterfall_examples/01_proxima_b_drifting_carrier_turbo.png" alt="TurboKain Scientific Waterfall & Diagnostic HUD" width="100%">
+  <br>
+  <em><strong>Figure 1:</strong> High-density 1920×1080 Multi-Panel Scientific Diagnostic Dashboard generated natively through Kain (<code>waterfall.kn</code>). Unifies 2D dynamic spectrum (Turbo colormap), frequency-aligned integrated bandpass P(f), time-domain power envelope P(t), spectral kurtosis SK(f) RFI excision, live mission telemetry HUD, 10-instrument verdict matrix, and candidate tracking vectors.</em>
+</p>
 
 ---
 
@@ -27,11 +33,11 @@ TurboKain applies the **SQLite / BusyBox doctrine** to high-performance astrophy
 
 ```
 kain/core/*.kn  ──►  kain amalgamate --raw kain/core -o kain/core.kn  ──►  kain build kain/core.kn  ──►  core.exe (~1.2 MB)
- (14 modules)                                                               (whole-program LLVM)          │
+ (21 instruments, 23 modules)                                               (whole-program LLVM)          │
                                                                                                         ├── core <tool> [args...]
                                                                                                         ├── core help <tool>
                                                                                                         ├── core prove
-                                                                                                        └── core sweep <f32>
+                                                                                                        └── core sweep <input>
 ```
 
 ### 2.1 Technical Advantages
@@ -44,24 +50,31 @@ kain/core/*.kn  ──►  kain amalgamate --raw kain/core -o kain/core.kn  ─�
 
 ## 3. Instrument Suite & Detection Lattice
 
-The core engine comprises 14 specialized instruments spanning the complete RF analysis chain:
+The core engine comprises 21 specialized instruments spanning the complete RF analysis and diagnostics chain:
 
 | Instrument | Module | Domain | Operational Contract | Sensitivity / Gate Floor |
 |------------|--------|--------|----------------------|---------------------------|
 | **`slice`** | `slice.kn` | Baseband Ingest | GUPPI `.raw` (2-bit / 8-bit) $\to$ `.f32` complex/power voltage | Layout-aware, 67M samples in 2.3 s |
 | **`fil_reader`** | `fil_reader.kn` | Spectral Ingest | Sigproc `.fil` (8/16/32-bit) $\to$ calibrated `.f32` | Header validation, band-mean extraction |
+| **`h5_reader`** | `h5_reader.kn` | Filterbank Ingest | Breakthrough Listen HDF5 (`.h5`) bitshuffle/gzip $\to$ `.f32` | Channel extraction, band-mean & spectrum |
 | **`config`** | `config.kn` | Geodesy / Config | Resolves 40 telemetry, RF geometry, and search bounds | CLI $\gt$ Header $\gt$ Preset arbitration |
 | **`sk_gate`** | `sk_gate.kn` | RFI Excision | Spectral Kurtosis ($SK$) estimator over 4096/2048 STFT | Excision threshold: $\vert SK - 1 \vert \ge 0.50$ |
 | **`xeno_scan`** | `xeno_scan.kn` | Anomaly Screening | 6-marker battery: SK, coherence, comb, dispersion, tail | $\ge 20.0$ ladder ratio, $6.0\sigma$ zero-crossing |
+| **`scint_pol`** | `scint_pol.kn` | Interstellar Medium | Diffractive scintillation decorrelation & pol coherence | $I_2 \to I_3$ interstellar promotion gate |
 | **`boxcar_bank`** | `boxcar_bank.kn` | Dispersed Pulses | $O(N)$ prefix-sum matched filtering over DM space | Threshold default: $14.0\sigma$ |
 | **`fold_sum`** | `fold_sum.kn` | Epoch Folding | Hann-windowed STFT + sub-band 8-harmonic folder | Multi-harmonic threshold: $16.0\sigma$ |
 | **`fam_god`** | `fam_god.kn` | Cyclostationary | 3-decade FFT Accumulation Method (SCD estimation) | Regularized Gamma $p$-value, FWE trials correction |
 | **`frame_hunt`** | `frame_hunt.kn` | Periodic Modulation | Envelope periodogram + 6-subharmonic comb search | Harmonic family acceptance within 5% |
 | **`drift_hunt`** | `drift_hunt.kn` | Chirped Carriers | Taylor dedoppler shift-and-add over $(\dot{f}, f)$ space | Sidereal and topocentric chirp acceleration |
+| **`jerk_track`** | `jerk_track.kn` | Non-Linear Doppler | Viterbi trellis dynamic programming orbital jerk tracker | High-agility exoplanetary acceleration |
 | **`lag_hunt`** | `lag_hunt.kn` | Autocorrelation | Direct lag microscope ($0.01\text{ ms} - 10\text{ s}$) | 4-lens lattice (phase/power/cadence/event) |
 | **`bitslice`** | `bitslice.kn` | Stream Conversion | Floating-point voltage $\to$ packed bitstreams (sign/diff/mag) | Coherent integrate-and-dump at baud rate $\alpha$ |
+| **`raster_hunt`** | `raster_hunt.kn` | 2D Payload Framing | Prime-factor 2D rastering & spatial autocorrelation | Semi-prime frame detection (Arecibo-style) |
 | **`xvm_sandbox`** | `xvm_sandbox.kn` | Symbolic Execution | Subleq, Rule 110 cellular automata, LZ/Berlekamp-Massey | Complexity threshold, TAG steps gate ($2200$) |
 | **`cadence_pair`** | `cadence_pair.kn` | Spatial Filtering | Pointing corroboration gate (ON vs. OFF beam triage) | Formal `law` gates: `WATCH`, `COMMON`, `CLEAN` |
+| **`stack`** | `stack.kn` | Coherent Integration | Incoherent multi-epoch ON/OFF power stacker | $\sqrt{N}$ sensitivity gain, RFI cancel |
+| **`unify`** | `unify.kn` | Campaign Report | Unifies multi-stage tables $\to$ `REPORT.md` + CSV + JSON | Structured citable synthesis of all detections |
+| **`waterfall`** | `waterfall.kn` | Visual Diagnostics | High-density 1920×1080 multi-panel diagnostic PNG engine | Native PNG, Turbo/Inferno colormaps, full HUD |
 
 ---
 
@@ -107,7 +120,7 @@ kain build kain/core.kn --target llvm -o core.exe
 ```
 
 ### 5.2 Formal Prove Battery
-Every instrument contains mathematical self-tests verifying analytical bounds against synthetic Gaussian noise and injected reference signals. Run the full battery natively:
+Every instrument contains mathematical self-tests verifying analytical bounds against synthetic Gaussian noise and injected reference signals. Run the full 16-instrument battery natively:
 
 ```bash
 tkc prove
@@ -117,19 +130,26 @@ tkc prove
 Verification output demonstrates zero-divergence against analytical ground truths:
 ```
 ================================================================================
- TurboKain Core Suite — Unified Native Prove Battery (9 instruments)
+ TurboKain Core Suite — Unified Native Prove Battery (16 instruments)
 ================================================================================
-[1/9] bitslice --prove      -> receipt=PASS prove=4/4
-[2/9] boxcar_bank --prove   -> receipt=PASS prove=4/4
-[3/9] config --prove        -> receipt=PASS prove=6/6
-[4/9] drift_hunt --prove    -> receipt=PASS prove=4/4
-[5/9] fil_reader --prove    -> receipt=PASS prove=4/4
-[6/9] frame_hunt --prove    -> receipt=PASS prove=9/9
-[7/9] lag_hunt --prove      -> receipt=PASS prove=9/9
-[8/9] xeno_scan --selftest  -> [selftest] ALL PASS
-[9/9] xvm_sandbox --selftest-> receipt=PASS selftest=24/24
+[1/16] bitslice --prove      -> receipt=PASS prove=4/4
+[2/16] boxcar_bank --prove   -> receipt=PASS prove=4/4
+[3/16] config --prove        -> receipt=PASS prove=6/6
+[4/16] drift_hunt --prove    -> receipt=PASS prove=4/4
+[5/16] fil_reader --prove    -> receipt=PASS prove=4/4
+[6/16] frame_hunt --prove    -> receipt=PASS prove=9/9
+[7/16] lag_hunt --prove      -> receipt=PASS prove=9/9
+[8/16] xeno_scan --selftest  -> [selftest] ALL PASS
+[9/16] xvm_sandbox --selftest-> receipt=PASS selftest=24/24
+[10/16] raster_hunt --prove  -> receipt=PASS prove=4/4
+[11/16] jerk_track --prove   -> receipt=PASS prove=4/4
+[12/16] scint_pol --prove    -> receipt=PASS prove=5/5
+[13/16] unify --prove        -> receipt=PASS prove=10/10
+[14/16] stack --prove        -> receipt=PASS prove=5/5
+[15/16] h5_reader --prove    -> receipt=PASS prove=4/4
+[16/16] waterfall --prove    -> receipt=PASS prove=5/5
 ================================================================================
- Core Battery Receipt: ALL 9 PROVE BATTERIES PASSED (receipt=PASS)
+ Core Battery Receipt: ALL 16 PROVE BATTERIES PASSED (receipt=PASS)
 ================================================================================
 ```
 
@@ -152,18 +172,22 @@ tkc help xvm
 ```
 
 ### 6.2 Automated Pipeline Sweep (`tkc sweep`)
-Execute the complete 7-stage screening and detection battery on a voltage slice in a single pass:
+Execute the complete 11-stage screening, detection, report, and visualization battery on a voltage slice in a single pass:
 ```bash
-tkc sweep <path_to_voltage.f32> --out-dir reports/target_sweep/ --fs 2929687.5
+tkc sweep <path_to_voltage.f32> --out-dir reports/target_sweep/ --fs 2929687.5 --target HIP-110750 --freq-mhz 1420.4057
 ```
 This executes in sequence:
 1. `sk_gate` (Spectral kurtosis RFI screening)
 2. `xeno_scan` (Statistical anomaly lattice)
 3. `boxcar_bank` (Transient dispersed pulse detection)
 4. `drift_hunt` (Chirped carrier dedoppler extraction)
-5. `frame_hunt` (Harmonic comb and periodicity identification)
-6. `lag_hunt` (Direct time-domain autocorrelation lattice)
-7. `fam_god` (Cyclostationary spectral correlation density mapping)
+5. `jerk_track` (Viterbi non-linear orbital jerk acceleration tracker)
+6. `frame_hunt` (Harmonic comb and periodicity identification)
+7. `lag_hunt` (Direct time-domain autocorrelation lattice)
+8. `fam_god` (Cyclostationary spectral correlation density mapping)
+9. `scint_pol` (Interstellar diffractive scintillation & pol coherence)
+10. `unify` (Campaign synthesis $\to$ `REPORT.md` + `evidence.csv` + `verdicts.json`)
+11. `waterfall` (Multi-panel 1920×1080 diagnostic PNG dashboard with candidate overlays $\to$ `waterfall.png`)
 
 ### 6.3 Direct Tool Invocation (with tool shorthands)
 Individual instruments execute directly with explicit argument contracts:
@@ -171,11 +195,20 @@ Individual instruments execute directly with explicit argument contracts:
 # Ingest 128 blocks of channel 44 from a raw GUPPI baseband file
 tkc slice /data/raw/blc00_guppi.raw 44 /data/slices/ch44.f32 128 --pol 0
 
+# Ingest Breakthrough Listen HDF5 filterbank data
+tkc h5 --in /data/gc/survey.h5 --chan 32 --pol 0 --out /data/slices/gc_ch32.f32
+
+# Generate a high-density 1920x1080 scientific diagnostic waterfall dashboard
+tkc waterfall --in /data/slices/ch44.f32 --out /data/slices/ch44_wf.png --cmap turbo
+
 # Run multi-decade cyclostationary baud rate estimation
 tkc fam --in /data/slices/ch44.f32 --fs 2929687.5 --segbank --out reports/fam.md
 
 # Decimate and slice bits at detected baud rate
 tkc bits --in /data/slices/ch44.f32 --alpha 11090.0 --out /data/bits/ch44_b11090
+
+# Search for 2D prime-factor payload framing and pictograms
+tkc raster --in /data/bits/ch44_b11090.head.sign.bin --out reports/raster.md
 
 # Evaluate computational complexity in the symbolic execution sandbox
 tkc xvm --in /data/bits/ch44_b11090.head.sign.bin --out reports/xvm.md
