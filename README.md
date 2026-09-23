@@ -3,6 +3,8 @@
 ### High-Throughput Coherent Radio Technosignature & Bystander Traffic Pipeline
 *A native, formally verified signal processing engine for astronomical baseband recordings.*
 
+>  **New to TurboKain?** Read the complete, hands-on **[User Guide (`docs/USER_GUIDE.md`)](docs/USER_GUIDE.md)** for plain-English walk-throughs of all 14 instruments, configuration presets, Python automation, and pipeline recipes.
+
 ---
 
 ## 1. Executive Summary & Observational Objective
