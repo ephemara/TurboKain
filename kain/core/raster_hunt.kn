@@ -1,0 +1,654 @@
+// ============================================================================
+// raster_hunt.kn — TurboKain 15: 2D Payload Framing & Spatial Pictogram Hunter
+// (Objective 1 §2.3 M8: Arecibo-class raster & semiprime message detection)
+//
+// WHY THIS EXISTS:
+// The pipeline extracts bitstreams (bitslice -> bits.bin) and tests if they
+// compute on abstract machines (xvm_sandbox -> SUBLEQ/STACK/Rule 110).
+// But interstellar payloads often encode PICTORIAL or GEOMETRIC data
+// (the 1974 Arecibo message: 1679 bits = 23 x 73 prime-factor raster; Pioneer
+// plaque; Voyager record; 2D mathematical tables).
+//
+// If a message is a picture, its 1D bitstream looks noise-like, but folded
+// into a 2D matrix (p x q), spatial correlation between neighboring pixels
+// explodes above random controls.
+//
+// THE MATHEMATICAL HOOKS:
+//   1. Semiprime Factorization: Searches for (p, q) such that p * q = N (p <= q,
+//      p >= pmin, default pmin = 5). Tests factors for candidate framing.
+//   2. 2D Fold & Spatial Autocorrelation: Folds bits into p x q matrix G in {-1, +1}.
+//      Calculates 2D horizontal neighbor agreement:
+//        Ah = 1/(p*(q-1)) * sum(G[r, c] * G[r, c+1])
+//      Calculates 2D vertical neighbor agreement:
+//        Av = 1/((p-1)*q) * sum(G[r, c] * G[r+1, c])
+//      Total agreement A = (Ah + Av) / 2.0.
+//   3. Permutation Control Monte-Carlo: Shuffles bits K times using xorshift64*.
+//      Calculates mean (mu) and std (sd) of random controls.
+//      Spatial z-score: sigma = (A - mu) / sd.
+//      Gate: sigma >= 5.0 indicates intentional 2D spatial clustering!
+//   4. Sync-Word / Preamble Hunter: Tests column folding for repeating k-bit
+//      framing words (k = 7..64).
+//   5. Visual ASCII Pictogram Rendering: Renders detected rasters (# for 1,
+//      . for 0) directly into raster.md for immediate human inspection!
+//
+// Contract: bits.bin (packed MSB or raw bytes) -> raster.md + raster.csv
+// Exit codes: 0 searched, 1 help OR prove fail, 2 error.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+use _common::k_CreateFileA
+use _common::k_SetFilePointer
+use _common::k_ReadFile
+use _common::k_GetFileSizeEx
+use _common::k_CloseHandle
+use _common::null_ptr
+use _common::GEN_READ
+use _common::OPEN_EXISTING
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::bref
+use _common::bstore
+use _common::parse_int_text
+use _common::parse_float_text
+use _common::write_text_file
+use _common::format_1dp
+use _common::sig_clamp100
+
+const RASTER_SIGMA_GATE: Float = 5.0
+const RASTER_PMIN_DEFAULT: Int = 5
+const RASTER_PMAX_DEFAULT: Int = 512
+const RASTER_SHUFFLE_N: Int = 16
+const RASTER_MAX_RENDER_W: Int = 120
+const RASTER_MAX_RENDER_H: Int = 120
+
+// ── Deterministic PRNG for Permutation Controls ─────────────────────────────
+fn raster_lcg_next(s: Int) -> Int:
+    var v: Int = (s * 1103515245 + 12345) % 2147483648
+    if v < 0:
+        v = 0 - v
+    return v
+
+// ── Bit Extraction Helpers ──────────────────────────────────────────────────
+// Returns bit at index pos from packed MSB buffer
+fn raster_get_bit_packed(buf: ptr<Byte>, pos: Int) -> Int with Unsafe:
+    let by: Int = bref(buf, pos / 8)
+    let shift: Int = 7 - (pos & 7)
+    return (by >> shift) & 1
+
+// ── Prime & Factorization Routines ──────────────────────────────────────────
+fn raster_is_prime(n: Int) -> Int:
+    if n <= 1:
+        return 0
+    if n <= 3:
+        return 1
+    if (n % 2) == 0:
+        return 0
+    if (n % 3) == 0:
+        return 0
+    var i: Int = 5
+    while i * i <= n:
+        if (n % i) == 0:
+            return 0
+        if (n % (i + 2)) == 0:
+            return 0
+        i = i + 6
+    return 1
+
+// ── 2D Fold Spatial Autocorrelation ─────────────────────────────────────────
+// Calculates neighbor agreement A for a p x q fold of bits in [0..p*q-1].
+// Bits must be array of 0s and 1s. Returns scaled Float agreement.
+fn raster_calc_agreement(bits: ptr<Int>, p: Int, q: Int) -> Float with Unsafe:
+    var sum_h: Int = 0
+    var count_h: Int = p * (q - 1)
+    var r: Int = 0
+    while r < p:
+        var c: Int = 0
+        while c < q - 1:
+            let b1: Int = mem_load(ptr_offset(bits, r * q + c, "Int"), "Int")
+            let b2: Int = mem_load(ptr_offset(bits, r * q + c + 1, "Int"), "Int")
+            // In {-1, +1}: b1*b2 = +1 if b1==b2, -1 if b1!=b2
+            if b1 == b2:
+                sum_h = sum_h + 1
+            else:
+                sum_h = sum_h - 1
+            c = c + 1
+        r = r + 1
+
+    var sum_v: Int = 0
+    var count_v: Int = (p - 1) * q
+    var r2: Int = 0
+    while r2 < p - 1:
+        var c2: Int = 0
+        while c2 < q:
+            let b1: Int = mem_load(ptr_offset(bits, r2 * q + c2, "Int"), "Int")
+            let b2: Int = mem_load(ptr_offset(bits, (r2 + 1) * q + c2, "Int"), "Int")
+            if b1 == b2:
+                sum_v = sum_v + 1
+            else:
+                sum_v = sum_v - 1
+            c2 = c2 + 1
+        r2 = r2 + 1
+
+    var ah: Float = 0.0
+    if count_h > 0:
+        ah = (sum_h as Float) / (count_h as Float)
+    var av: Float = 0.0
+    if count_v > 0:
+        av = (sum_v as Float) / (count_v as Float)
+
+    return (ah + av) / 2.0
+
+// Fisher-Yates shuffle on buffer; returns updated seed
+fn raster_shuffle(bits: ptr<Int>, n: Int, seed_in: Int) -> Int with Unsafe:
+    var s: Int = seed_in
+    var i: Int = n - 1
+    while i > 0:
+        s = raster_lcg_next(s)
+        let j: Int = s % (i + 1)
+        let ti: Int = mem_load(ptr_offset(bits, i, "Int"), "Int")
+        let tj: Int = mem_load(ptr_offset(bits, j, "Int"), "Int")
+        mem_store(ptr_offset(bits, i, "Int"), tj, "Int")
+        mem_store(ptr_offset(bits, j, "Int"), ti, "Int")
+        i = i - 1
+    return s
+
+// ── Sync-Word Preamble Search ───────────────────────────────────────────────
+// Evaluates periodicities k = 7..64. Returns best (score, k).
+fn raster_sync_search(bits: ptr<Int>, n: Int, out_k: ptr<Int>, out_score: ptr<Float>) -> Int with Unsafe:
+    var best_k: Int = 0
+    var best_score: Float = 0.0
+    var k: Int = 7
+    while k <= 64:
+        if k * 4 <= n:
+            let num_blocks: Int = n / k
+            var col_sum: Float = 0.0
+            var c: Int = 0
+            while c < k:
+                var s: Int = 0
+                var blk: Int = 0
+                while blk < num_blocks:
+                    let b: Int = mem_load(ptr_offset(bits, blk * k + c, "Int"), "Int")
+                    if b == 1:
+                        s = s + 1
+                    else:
+                        s = s - 1
+                    blk = blk + 1
+                var avg: Float = (s as Float) / (num_blocks as Float)
+                if avg < 0.0:
+                    avg = 0.0 - avg
+                col_sum = col_sum + avg
+                c = c + 1
+            let mean_sync: Float = col_sum / (k as Float)
+            var is_harmonic: Int = 0
+            if best_k > 0:
+                if (k % best_k) == 0:
+                    if best_score >= 0.50:
+                        is_harmonic = 1
+
+            if is_harmonic == 0 and mean_sync > best_score:
+                best_score = mean_sync
+                best_k = k
+            elif is_harmonic == 1 and mean_sync > best_score * 1.30:
+                best_score = mean_sync
+                best_k = k
+        k = k + 1
+
+    mem_store(out_k, best_k, "Int")
+    mem_store(out_score, best_score, "Float")
+    return 0
+
+// ── Render 2D Raster to ASCII ───────────────────────────────────────────────
+fn raster_render_ascii(bits: ptr<Int>, p: Int, q: Int) -> String with Unsafe:
+    var out_text: String = ""
+    var max_r: Int = p
+    if max_r > RASTER_MAX_RENDER_H:
+        max_r = RASTER_MAX_RENDER_H
+    var max_c: Int = q
+    if max_c > RASTER_MAX_RENDER_W:
+        max_c = RASTER_MAX_RENDER_W
+
+    var r: Int = 0
+    while r < max_r:
+        var c: Int = 0
+        var row_str: String = ""
+        while c < max_c:
+            let b: Int = mem_load(ptr_offset(bits, r * q + c, "Int"), "Int")
+            if b == 1:
+                row_str = row_str + "#"
+            else:
+                row_str = row_str + "."
+            c = c + 1
+        out_text = out_text + row_str + "\n"
+        r = r + 1
+    if p > max_r or q > max_c:
+        out_text = out_text + "... [truncated: original is " + str(p) + "x" + str(q) + "]\n"
+    return out_text
+
+// ── Prove Battery ───────────────────────────────────────────────────────────
+pub fn raster_hunt_prove() -> Int with Unsafe:
+    var ok: Int = 1
+    println("[prove] raster_hunt selftest battery starting...")
+
+    // P1: Prime factorization check
+    var p_ok: Int = 1
+    if raster_is_prime(23) != 1:
+        p_ok = 0
+    if raster_is_prime(73) != 1:
+        p_ok = 0
+    if raster_is_prime(1679) != 0:
+        p_ok = 0
+    if p_ok == 1:
+        println("  [PASS] P1: prime factorization (23 prime, 73 prime, 1679 semiprime)")
+    else:
+        println("  [FAIL] P1: prime factorization check failed")
+        ok = 0
+
+    // P2: Control Random Noise (1679 bits)
+    let n_test: Int = 1679
+    let bits_ctrl: ptr<Int> = alloc_zeroed(n_test + 32, "Int")
+    let bits_shuf: ptr<Int> = alloc_zeroed(n_test + 32, "Int")
+    var prng_seed: Int = 42424242
+    var i: Int = 0
+    while i < n_test:
+        prng_seed = raster_lcg_next(prng_seed)
+        let rb: Int = prng_seed % 2
+        mem_store(ptr_offset(bits_ctrl, i, "Int"), rb, "Int")
+        i = i + 1
+
+    let agree_ctrl: Float = raster_calc_agreement(bits_ctrl, 23, 73)
+    var sum_ctrl: Float = 0.0
+    var sum2_ctrl: Float = 0.0
+    var s_idx: Int = 0
+    while s_idx < RASTER_SHUFFLE_N:
+        var cpy: Int = 0
+        while cpy < n_test:
+            mem_store(ptr_offset(bits_shuf, cpy, "Int"), mem_load(ptr_offset(bits_ctrl, cpy, "Int"), "Int"), "Int")
+            cpy = cpy + 1
+        prng_seed = raster_shuffle(bits_shuf, n_test, prng_seed)
+        let sc: Float = raster_calc_agreement(bits_shuf, 23, 73)
+        sum_ctrl = sum_ctrl + sc
+        sum2_ctrl = sum2_ctrl + sc * sc
+        s_idx = s_idx + 1
+
+    let mu_ctrl: Float = sum_ctrl / (RASTER_SHUFFLE_N as Float)
+    var var_ctrl: Float = (sum2_ctrl / (RASTER_SHUFFLE_N as Float)) - mu_ctrl * mu_ctrl
+    if var_ctrl < 0.00000001:
+        var_ctrl = 0.00000001
+    let sd_ctrl: Float = sqrt(var_ctrl)
+    let z_noise: Float = (agree_ctrl - mu_ctrl) / sd_ctrl
+
+    if z_noise < RASTER_SIGMA_GATE:
+        println("  [PASS] P2: noise control quiet (z=" + format_1dp(z_noise) + " < " + format_1dp(RASTER_SIGMA_GATE) + ")")
+    else:
+        println("  [FAIL] P2: noise control false alarm z=" + format_1dp(z_noise))
+        ok = 0
+
+    // P3: Synthetic Arecibo-style 23x73 Injection
+    // Creates a 23x73 matrix with borders + crosshairs + interior structures
+    let bits_msg: ptr<Int> = alloc_zeroed(n_test + 32, "Int")
+    var r: Int = 0
+    while r < 23:
+        var c: Int = 0
+        while c < 73:
+            var b: Int = 0
+            if r == 0 or r == 22:
+                b = 1
+            elif c == 0 or c == 72:
+                b = 1
+            elif r == 11:
+                b = 1
+            elif c == 36:
+                b = 1
+            elif (r >= 4 and r <= 8) and (c >= 10 and c <= 20):
+                b = 1
+            elif (r >= 14 and r <= 18) and (c >= 50 and c <= 60):
+                b = 1
+            mem_store(ptr_offset(bits_msg, r * 73 + c, "Int"), b, "Int")
+            c = c + 1
+        r = r + 1
+
+    let agree_msg: Float = raster_calc_agreement(bits_msg, 23, 73)
+    var sum_msg: Float = 0.0
+    var sum2_msg: Float = 0.0
+    var sm_idx: Int = 0
+    while sm_idx < RASTER_SHUFFLE_N:
+        var cpy: Int = 0
+        while cpy < n_test:
+            mem_store(ptr_offset(bits_shuf, cpy, "Int"), mem_load(ptr_offset(bits_msg, cpy, "Int"), "Int"), "Int")
+            cpy = cpy + 1
+        prng_seed = raster_shuffle(bits_shuf, n_test, prng_seed)
+        let sc: Float = raster_calc_agreement(bits_shuf, 23, 73)
+        sum_msg = sum_msg + sc
+        sum2_msg = sum2_msg + sc * sc
+        sm_idx = sm_idx + 1
+
+    let mu_msg: Float = sum_msg / (RASTER_SHUFFLE_N as Float)
+    var var_msg: Float = (sum2_msg / (RASTER_SHUFFLE_N as Float)) - mu_msg * mu_msg
+    if var_msg < 0.00000001:
+        var_msg = 0.00000001
+    let sd_msg: Float = sqrt(var_msg)
+    let z_msg: Float = (agree_msg - mu_msg) / sd_msg
+
+    if z_msg >= RASTER_SIGMA_GATE:
+        println("  [PASS] P3: Arecibo 23x73 detected (z=" + format_1dp(z_msg) + " >= " + format_1dp(RASTER_SIGMA_GATE) + ", agree=" + format_1dp(agree_msg * 100.0) + "%)")
+    else:
+        println("  [FAIL] P3: Arecibo injection missed z=" + format_1dp(z_msg))
+        ok = 0
+
+    // P4: Sync-Word Preamble Detection
+    let n_sync: Int = 512
+    let bits_sync: ptr<Int> = alloc_zeroed(n_sync + 32, "Int")
+    let sync_pat_k: Int = 13
+    // Repeat 13-bit pattern with high coherence: 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1
+    var sync_idx: Int = 0
+    while sync_idx < n_sync:
+        let rem: Int = sync_idx % sync_pat_k
+        var b: Int = 0
+        if rem == 0 or rem == 1 or rem == 2 or rem == 3 or rem == 4 or rem == 7 or rem == 8 or rem == 10 or rem == 12:
+            b = 1
+        prng_seed = raster_lcg_next(prng_seed)
+        if (prng_seed % 20) == 0:
+            b = 1 - b
+        mem_store(ptr_offset(bits_sync, sync_idx, "Int"), b, "Int")
+        sync_idx = sync_idx + 1
+
+    let out_k_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let out_sc_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let _sync_ok1: Int = raster_sync_search(bits_sync, n_sync, out_k_slot, out_sc_slot)
+    let found_k: Int = mem_load(out_k_slot, "Int")
+    let found_sc: Float = mem_load(out_sc_slot, "Float")
+
+    if found_k == sync_pat_k and found_sc > 0.60:
+        println("  [PASS] P4: sync-word search recovered k=" + str(found_k) + " score=" + format_1dp(found_sc * 100.0) + "%")
+    else:
+        println("  [FAIL] P4: sync-word search failed found_k=" + str(found_k) + " sc=" + format_1dp(found_sc))
+        ok = 0
+
+    decay bits_ctrl
+    decay bits_shuf
+    decay bits_msg
+    decay bits_sync
+    decay out_k_slot
+    decay out_sc_slot
+
+    if ok == 1:
+        println("[prove] raster_hunt: ALL BATTERIES PASSED (4/4)")
+        return 0
+    println("[prove] raster_hunt: BATTERIES FAILED")
+    return 1
+
+// ── CLI Usage ───────────────────────────────────────────────────────────────
+pub fn raster_hunt_usage() -> String:
+    var t: String = "================================================================================\n"
+    t = t + " raster_hunt 0.1.0 — TurboKain 2D Payload Framing & Pictogram Hunter (M8)\n"
+    t = t + "================================================================================\n\n"
+    t = t + "Tests bitstreams for 2D prime-factor raster framing (Arecibo message model),\n"
+    t = t + "neighbor pixel spatial autocorrelation, and repeating sync-word preambles.\n\n"
+    t = t + "USAGE:\n"
+    t = t + "  tkc raster_hunt --in <bits.bin> [options...]\n"
+    t = t + "  tkc raster [options...]\n\n"
+    t = t + "OPTIONS:\n"
+    t = t + "  --in <path>        Input bitstream file (packed MSB-first or raw bytes)\n"
+    t = t + "  --out <stem>       Output file stem (default: reports/raster)\n"
+    t = t + "  --p <int>          Explicit height dimension (skips factor search)\n"
+    t = t + "  --q <int>          Explicit width dimension\n"
+    t = t + "  --pmin <int>       Minimum prime factor dimension (default: 5)\n"
+    t = t + "  --pmax <int>       Maximum prime factor dimension (default: 512)\n"
+    t = t + "  --sigma <float>    Spatial autocorrelation detection threshold (default: 5.0)\n"
+    t = t + "  --unpacked         Input is unpacked 1 byte per bit (default: packed 8 bits/byte)\n"
+    t = t + "  --render           Force render ASCII preview even if below threshold\n"
+    t = t + "  --prove            Run internal mathematical self-test battery (4/4)\n\n"
+    t = t + "OUTPUTS:\n"
+    t = t + "  <stem>.md          Markdown report + 2D ASCII pictogram preview\n"
+    t = t + "  <stem>.csv         CSV ledger: p, q, sigma_x100, agree_x100, sync_k, verdict\n"
+    return t
+
+// ── Main Entry Point ────────────────────────────────────────────────────────
+pub fn raster_hunt_main(args: Array<String>) -> Int with Unsafe:
+    let n_args: Int = len(args)
+    if n_args == 0:
+        print(raster_hunt_usage())
+        return EXIT_HELP
+
+    var in_path: String = ""
+    var out_stem: String = "reports/raster"
+    var p_arg: Int = 0
+    var q_arg: Int = 0
+    var pmin_arg: Int = RASTER_PMIN_DEFAULT
+    var pmax_arg: Int = RASTER_PMAX_DEFAULT
+    var sigma_gate: Float = RASTER_SIGMA_GATE
+    var unpacked_mode: Int = 0
+    var force_render: Int = 0
+    var do_prove: Int = 0
+
+    var idx: Int = 0
+    while idx < n_args:
+        let a: String = args[idx]
+        if a == "--help" or a == "-h":
+            print(raster_hunt_usage())
+            return EXIT_HELP
+        elif a == "--prove":
+            do_prove = 1
+        elif a == "--in":
+            if idx + 1 < n_args:
+                in_path = args[idx + 1]
+                idx = idx + 1
+        elif a == "--out":
+            if idx + 1 < n_args:
+                out_stem = args[idx + 1]
+                idx = idx + 1
+        elif a == "--p":
+            if idx + 1 < n_args:
+                p_arg = parse_int_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--q":
+            if idx + 1 < n_args:
+                q_arg = parse_int_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--pmin":
+            if idx + 1 < n_args:
+                pmin_arg = parse_int_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--pmax":
+            if idx + 1 < n_args:
+                pmax_arg = parse_int_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--sigma":
+            if idx + 1 < n_args:
+                sigma_gate = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--unpacked":
+            unpacked_mode = 1
+        elif a == "--render":
+            force_render = 1
+        elif len(in_path) == 0 and char_at(a, 0) != "-":
+            in_path = a
+        idx = idx + 1
+
+    if do_prove == 1:
+        return raster_hunt_prove()
+
+    if len(in_path) == 0:
+        println("raster_hunt: ERROR: no input bitstream specified. Use --in <file.bin> or --prove")
+        return EXIT_ERROR
+
+    // Read input bits from disk
+    let h_in: ptr<Void> = k_CreateFileA(in_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h_in) == -1:
+        println("raster_hunt: ERROR: cannot open input file " + in_path)
+        return EXIT_ERROR
+
+    let file_sz_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let ok_sz: Int = k_GetFileSizeEx(h_in, file_sz_slot)
+    let file_bytes: Int = mem_load(file_sz_slot, "Int")
+    decay file_sz_slot
+
+    if ok_sz == 0 or file_bytes <= 0:
+        println("raster_hunt: ERROR: invalid file size for " + in_path)
+        let _c: Int = k_CloseHandle(h_in)
+        return EXIT_ERROR
+
+    let raw_buf: ptr<Byte> = alloc_zeroed(file_bytes + 32, "Byte")
+    let nread_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let ok_read: Int = k_ReadFile(h_in, raw_buf, file_bytes, nread_slot, null_ptr())
+    let _c: Int = k_CloseHandle(h_in)
+    decay nread_slot
+
+    if ok_read == 0:
+        println("raster_hunt: ERROR: failed reading bytes from " + in_path)
+        return EXIT_ERROR
+
+    // Determine total bits
+    var total_bits: Int = 0
+    if unpacked_mode == 1:
+        total_bits = file_bytes
+    else:
+        total_bits = file_bytes * 8
+
+    if total_bits < 35:
+        println("raster_hunt: ERROR: bitstream too short (" + str(total_bits) + " bits)")
+        return EXIT_ERROR
+
+    // Unpack bits into Int arena
+    let bits_arena: ptr<Int> = alloc_zeroed(total_bits + 32, "Int")
+    let shuf_arena: ptr<Int> = alloc_zeroed(total_bits + 32, "Int")
+    var b_idx: Int = 0
+    while b_idx < total_bits:
+        var b_val: Int = 0
+        if unpacked_mode == 1:
+            let b_byte: Int = bref(raw_buf, b_idx)
+            if b_byte != 0:
+                b_val = 1
+        else:
+            b_val = raster_get_bit_packed(raw_buf, b_idx)
+        mem_store(ptr_offset(bits_arena, b_idx, "Int"), b_val, "Int")
+        b_idx = b_idx + 1
+
+    decay raw_buf
+
+    println("[raster_hunt] loaded " + str(total_bits) + " bits from " + in_path)
+
+    // Sync-word search
+    let sync_k_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let sync_sc_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let _sync_ok2: Int = raster_sync_search(bits_arena, total_bits, sync_k_slot, sync_sc_slot)
+    let sync_k: Int = mem_load(sync_k_slot, "Int")
+    let sync_sc: Float = mem_load(sync_sc_slot, "Float")
+    decay sync_k_slot
+    decay sync_sc_slot
+    println("[raster_hunt] preamble sync search: best k=" + str(sync_k) + " coherence=" + format_1dp(sync_sc * 100.0) + "%")
+
+    // Find candidate factorizations (p, q)
+    var best_p: Int = 0
+    var best_q: Int = 0
+    var best_z: Float = 0.0
+    var best_agree: Float = 0.0
+    var tested_folds: Int = 0
+
+    if p_arg > 0 and q_arg > 0:
+        // Manual override dimensions
+        if p_arg * q_arg <= total_bits:
+            tested_folds = 1
+            let agree: Float = raster_calc_agreement(bits_arena, p_arg, q_arg)
+            var sum_s: Float = 0.0
+            var sum2_s: Float = 0.0
+            var s_i: Int = 0
+            var shuf_seed: Int = 12345678
+            while s_i < RASTER_SHUFFLE_N:
+                var cpy: Int = 0
+                while cpy < p_arg * q_arg:
+                    mem_store(ptr_offset(shuf_arena, cpy, "Int"), mem_load(ptr_offset(bits_arena, cpy, "Int"), "Int"), "Int")
+                    cpy = cpy + 1
+                shuf_seed = raster_shuffle(shuf_arena, p_arg * q_arg, shuf_seed)
+                let sc: Float = raster_calc_agreement(shuf_arena, p_arg, q_arg)
+                sum_s = sum_s + sc
+                sum2_s = sum2_s + sc * sc
+                s_i = s_i + 1
+            let mu_s: Float = sum_s / (RASTER_SHUFFLE_N as Float)
+            var var_s: Float = (sum2_s / (RASTER_SHUFFLE_N as Float)) - mu_s * mu_s
+            if var_s < 0.00000001:
+                var_s = 0.00000001
+            best_z = (agree - mu_s) / sqrt(var_s)
+            best_agree = agree
+            best_p = p_arg
+            best_q = q_arg
+    else:
+        // Search semiprime factor splits
+        var p_cand: Int = pmin_arg
+        while p_cand <= pmax_arg and p_cand * p_cand <= total_bits:
+            if (total_bits % p_cand) == 0:
+                let q_cand: Int = total_bits / p_cand
+                tested_folds = tested_folds + 1
+                let agree: Float = raster_calc_agreement(bits_arena, p_cand, q_cand)
+                var sum_s: Float = 0.0
+                var sum2_s: Float = 0.0
+                var s_i: Int = 0
+                var shuf_seed: Int = 12345678 + p_cand
+                while s_i < RASTER_SHUFFLE_N:
+                    var cpy: Int = 0
+                    while cpy < p_cand * q_cand:
+                        mem_store(ptr_offset(shuf_arena, cpy, "Int"), mem_load(ptr_offset(bits_arena, cpy, "Int"), "Int"), "Int")
+                        cpy = cpy + 1
+                    shuf_seed = raster_shuffle(shuf_arena, p_cand * q_cand, shuf_seed)
+                    let sc: Float = raster_calc_agreement(shuf_arena, p_cand, q_cand)
+                    sum_s = sum_s + sc
+                    sum2_s = sum2_s + sc * sc
+                    s_i = s_i + 1
+                let mu_s: Float = sum_s / (RASTER_SHUFFLE_N as Float)
+                var var_s: Float = (sum2_s / (RASTER_SHUFFLE_N as Float)) - mu_s * mu_s
+                if var_s < 0.00000001:
+                    var_s = 0.00000001
+                let z: Float = (agree - mu_s) / sqrt(var_s)
+                println("  [fold] " + str(p_cand) + "x" + str(q_cand) + " -> agree=" + format_1dp(agree * 100.0) + "% z=" + format_1dp(z))
+                if z > best_z:
+                    best_z = z
+                    best_agree = agree
+                    best_p = p_cand
+                    best_q = q_cand
+            p_cand = p_cand + 1
+
+    var verdict: String = "NOISE"
+    if best_z >= sigma_gate:
+        verdict = "PICTORIAL-RASTER"
+    elif sync_sc >= 0.70:
+        verdict = "SYNC-FRAMED"
+
+    println("[raster_hunt] RESULT verdict=" + verdict + " p=" + str(best_p) + " q=" + str(best_q) + " z=" + format_1dp(best_z) + " sync_k=" + str(sync_k))
+
+    // Prepare Markdown report
+    var md: String = "# RASTER_HUNT REPORT — 2D Payload Framing\n\n"
+    md = md + "- **Input File:** `" + in_path + "`\n"
+    md = md + "- **Total Bits:** `" + str(total_bits) + "`\n"
+    md = md + "- **Verdict:** `" + verdict + "`\n"
+    md = md + "- **Best 2D Dimension:** `" + str(best_p) + " x " + str(best_q) + "`\n"
+    md = md + "- **Spatial Autocorrelation Excess:** `" + format_1dp(best_z) + " sigma` (gate: " + format_1dp(sigma_gate) + ")\n"
+    md = md + "- **Neighbor Agreement:** `" + format_1dp(best_agree * 100.0) + "%`\n"
+    md = md + "- **Repeating Preamble Sync:** `k=" + str(sync_k) + " (coherence " + format_1dp(sync_sc * 100.0) + "%)`\n\n"
+
+    if best_z >= sigma_gate or force_render == 1:
+        if best_p > 0 and best_q > 0:
+            md = md + "## Visual ASCII Pictogram Preview (" + str(best_p) + " x " + str(best_q) + ")\n\n"
+            md = md + "```\n"
+            md = md + raster_render_ascii(bits_arena, best_p, best_q)
+            md = md + "```\n\n"
+
+    // Prepare CSV
+    var csv: String = "p,q,sigma_x100,agree_x100,sync_k,sync_score_x100,verdict\n"
+    csv = csv + str(best_p) + "," + str(best_q) + "," + str(sig_clamp100(best_z)) + ","
+    csv = csv + str(sig_clamp100(best_agree)) + "," + str(sync_k) + "," + str(sig_clamp100(sync_sc)) + "," + verdict + "\n"
+
+    let _w1: Int = write_text_file(out_stem + ".md", md)
+    let _w2: Int = write_text_file(out_stem + ".csv", csv)
+    println("[raster_hunt] wrote " + out_stem + ".md and " + out_stem + ".csv")
+
+    decay bits_arena
+    decay shuf_arena
+
+    return EXIT_OK

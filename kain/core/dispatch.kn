@@ -42,7 +42,7 @@ fn usage() -> String:
     t = t + "USAGE:\n"
     t = t + "  tkc <tool> [args...]             Run any instrument directly (shorthands work)\n"
     t = t + "  tkc help <tool>                  Detailed CLI help for a specific tool\n"
-    t = t + "  tkc prove                        Run all 9 formal prove batteries in-memory\n"
+    t = t + "  tkc prove                        Run all 12 formal prove batteries in-memory\n"
     t = t + "  tkc sweep <f32> [options...]     Run full detector battery over a time series\n\n"
     t = t + "BINARY ALIASES:  tkc / core / turbokain_core / turbokain are all identical\n\n"
     t = t + "TOOL SHORTHANDS:\n"
@@ -50,26 +50,31 @@ fn usage() -> String:
     t = t + "  cadence_pair -> cadence, cad      config       -> cfg\n"
     t = t + "  drift_hunt   -> drift             fam_god      -> fam\n"
     t = t + "  fil_reader   -> fil               fold_sum     -> fold\n"
-    t = t + "  frame_hunt   -> frame             lag_hunt     -> lag\n"
-    t = t + "  sk_gate      -> sk                xeno_scan    -> xeno\n"
-    t = t + "  xvm_sandbox  -> xvm               slice        -> slice\n\n"
-    t = t + "INSTRUMENTS (14 total):\n"
+    t = t + "  frame_hunt   -> frame             jerk_track   -> jerk\n"
+    t = t + "  lag_hunt     -> lag               raster_hunt  -> raster\n"
+    t = t + "  scint_pol    -> scint, pol        sk_gate      -> sk\n"
+    t = t + "  xeno_scan    -> xeno              xvm_sandbox  -> xvm\n"
+    t = t + "  slice        -> slice\n\n"
+    t = t + "INSTRUMENTS (17 total):\n"
     t = t + "  [Ingest / Calibration]\n"
     t = t + "    slice         GUPPI .raw -> .f32 channel/pol voltage slice (2/8-bit)\n"
     t = t + "    fil_reader    Sigproc .fil -> .f32 voltage slice (8/16/32-bit)\n"
     t = t + "    config        Header/CLI/preset geometry resolver (40 parameters)\n\n"
     t = t + "  [Anomaly & RFI Screening]\n"
     t = t + "    sk_gate       Spectral kurtosis excision gate (4096/2048 STFT)\n"
-    t = t + "    xeno_scan     Microscopic battery (SK, coherence, comb ladder, DM, tail)\n\n"
+    t = t + "    xeno_scan     Microscopic battery (SK, coherence, comb ladder, DM, tail)\n"
+    t = t + "    scint_pol     Interstellar scintillation decorrelation & pol coherence (I2->I3)\n\n"
     t = t + "  [Coherent / Periodic Detectors]\n"
     t = t + "    boxcar_bank   Fast DM sweep + boxcar single-pulse matched filters\n"
     t = t + "    fold_sum      Sub-band Hann/FFT harmonic folder (pulsar/periodic)\n"
     t = t + "    fam_god       3-decade FFT accumulation method (baud/cyclostationary)\n"
     t = t + "    frame_hunt    Envelope periodogram + subharmonic comb hunter\n"
     t = t + "    drift_hunt    Taylor dedoppler chirped carrier drift search\n"
+    t = t + "    jerk_track    Viterbi non-linear Doppler & jerk acceleration tracker\n"
     t = t + "    lag_hunt      Long-lag direct autocorrelation microscope (0.01ms - 10s)\n\n"
     t = t + "  [Signal Structure & Alien Machinery]\n"
     t = t + "    bitslice      .f32 voltage -> alien-machine bitstreams (sign/diff/mag)\n"
+    t = t + "    raster_hunt   2D payload framing & pictogram spatial autocorrelation (M8)\n"
     t = t + "    xvm_sandbox   Turing/subleq/cellular automata execution sandbox\n"
     t = t + "    cadence_pair  ON/OFF cadence corroboration gate (WATCH logic)\n\n"
     t = t + "PIPELINE PING-PONG WORKFLOW:\n"
@@ -108,6 +113,12 @@ fn tool_help(tool: String) -> Int:
         print(cadence_pair_usage())
     elif tool == "config" or tool == "cfg":
         print(config_usage())
+    elif tool == "jerk_track" or tool == "jerk":
+        print(jerk_track_usage())
+    elif tool == "raster_hunt" or tool == "raster":
+        print(raster_hunt_usage())
+    elif tool == "scint_pol" or tool == "scint" or tool == "pol":
+        print(scint_pol_usage())
     else:
         println("core: unknown tool '" + tool + "'")
         print(usage())
@@ -192,6 +203,12 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return xeno_scan_main(sub)
     elif tool == "xvm_sandbox" or tool == "xvm":
         return xvm_sandbox_main(sub)
+    elif tool == "jerk_track" or tool == "jerk":
+        return jerk_track_main(sub)
+    elif tool == "raster_hunt" or tool == "raster":
+        return raster_hunt_main(sub)
+    elif tool == "scint_pol" or tool == "scint" or tool == "pol":
+        return scint_pol_main(sub)
     else:
         return -999
 
@@ -206,40 +223,49 @@ fn is_suite_binary(stem: String) -> Int:
 
 fn run_prove_all() -> Int with Unsafe:
     println("================================================================================")
-    println(" TurboKain Core Suite — Unified Native Prove Battery (9 instruments)")
+    println(" TurboKain Core Suite — Unified Native Prove Battery (12 instruments)")
     println("================================================================================")
     var failed: Int = 0
 
-    println("\n[1/9] bitslice --prove")
+    println("\n[1/12] bitslice --prove")
     if bitslice_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[2/9] boxcar_bank --prove")
+    println("\n[2/12] boxcar_bank --prove")
     if boxcar_bank_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[3/9] config --prove")
+    println("\n[3/12] config --prove")
     if config_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[4/9] drift_hunt --prove")
+    println("\n[4/12] drift_hunt --prove")
     if drift_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[5/9] fil_reader --prove")
+    println("\n[5/12] fil_reader --prove")
     if fil_reader_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[6/9] frame_hunt --prove")
+    println("\n[6/12] frame_hunt --prove")
     if frame_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[7/9] lag_hunt --prove")
+    println("\n[7/12] lag_hunt --prove")
     if lag_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[8/9] xeno_scan --selftest")
+    println("\n[8/12] xeno_scan --selftest")
     if xeno_scan_main(["--selftest"]) != 0: failed = failed + 1
 
-    println("\n[9/9] xvm_sandbox --selftest")
+    println("\n[9/12] xvm_sandbox --selftest")
     if xvm_sandbox_main(["--selftest"]) != 0: failed = failed + 1
+
+    println("\n[10/12] raster_hunt --prove")
+    if raster_hunt_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[11/12] jerk_track --prove")
+    if jerk_track_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[12/12] scint_pol --prove")
+    if scint_pol_main(["--prove"]) != 0: failed = failed + 1
 
     println("\n================================================================================")
     if failed == 0:
-        println(" Core Battery Receipt: ALL 9 PROVE BATTERIES PASSED (receipt=PASS)")
+        println(" Core Battery Receipt: ALL 12 PROVE BATTERIES PASSED (receipt=PASS)")
         println("================================================================================")
         return EXIT_OK
     else:
@@ -279,17 +305,23 @@ fn run_sweep(sub: Array<String>) -> Int with Unsafe:
     println("\n[Stage 3/7] boxcar_bank (dispersed pulse search)")
     let _bb: Int = boxcar_bank_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/pulse"])
 
-    println("\n[Stage 4/7] drift_hunt (Doppler drifter search)")
+    println("\n[Stage 4/9] drift_hunt (Linear Doppler drifter search)")
     let _dh: Int = drift_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/drift.md", "--csv", out_dir + "/drift.csv"])
 
-    println("\n[Stage 5/7] frame_hunt (harmonic comb & periodogram)")
+    println("\n[Stage 5/9] jerk_track (Non-linear Viterbi acceleration / orbital jerk search)")
+    let _jt: Int = jerk_track_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/jerk"])
+
+    println("\n[Stage 6/9] frame_hunt (harmonic comb & periodogram)")
     let _fh: Int = frame_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/frame.md", "--csv", out_dir + "/frame.csv"])
 
-    println("\n[Stage 6/7] lag_hunt (long-lag direct autocorrelation)")
+    println("\n[Stage 7/9] lag_hunt (long-lag direct autocorrelation)")
     let _lh: Int = lag_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/lag.md", "--csv", out_dir + "/lag.csv"])
 
-    println("\n[Stage 7/7] fam_god (cyclic spectral correlation)")
+    println("\n[Stage 8/9] fam_god (cyclic spectral correlation)")
     let _fg: Int = fam_god_main(["--in", f32_path, "--fs", fs_hz, "--segbank", "--out", out_dir + "/fam.md", "--csv", out_dir + "/fam.csv"])
+
+    println("\n[Stage 9/9] scint_pol (Interstellar scintillation & polarization coherence)")
+    let _sp: Int = scint_pol_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/scint"])
 
     println("\n================================================================================")
     println(" Sweep complete. Review tables under " + out_dir)

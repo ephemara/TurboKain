@@ -1,0 +1,774 @@
+// ============================================================================
+// jerk_track.kn — TurboKain 16: Non-Linear Doppler & Jerk Acceleration Tracker
+// (Objective 1 §3.5: Viterbi track-before-detect over curved orbital trajectories)
+//
+// WHY THIS EXISTS:
+// turboSETI-style and Taylor dedoppler (drift_hunt) assume a strictly linear
+// drift path (constant dnu/dt). An accelerating, jerking, tumbling, or
+// orbitally bound exoplanetary transmitter smears across frequency bins,
+// dropping below threshold.
+//
+// This is the Viterbi dynamic programming track-before-detect engine (ported
+// from SetiYeti c/jerk_track.c with identical kinematics and prove floors):
+//
+//   1. STFT Waterfall (Rectangular window: Hamming/Hann costs ~8 dB of coherent
+//      gain in this tracking path).
+//   2. Per-Row Robust Z-Score: Median and MAD per STFT row, winsorized to
+//      [-3.0, +6.0] so impulsive RFI cannot outvote a persistent carrier.
+//   3. Viterbi Dynamic Programming: Trellis search with +-k bins/row agility
+//      (accel/jerk-inclusive by construction), traceback to extract optimal path.
+//   4. Kinematic Motion Fitting: Solves 3x3 normal equations for quadratic
+//      trajectory f(t) = f0 + v*t + 0.5*a*t^2 (drift v in Hz/s, jerk a in Hz/s^2).
+//   5. Curvature Gain: Computes quadratic vs linear fit residuals in dB.
+//      gain_db > 3.0 proves genuine non-linear orbital/jerk acceleration!
+//   6. Sidereal Screen: Checks drift against Earth sidereal rotation bound
+//      (0.35 Hz/s at L-band 1407.7 MHz).
+//
+// Contract: .f32 voltage in -> jerk.md + jerk.csv out
+// Exit codes: 0 searched, 1 help OR prove fail, 2 error.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+use _common::k_CreateFileA
+use _common::k_SetFilePointer
+use _common::k_ReadFile
+use _common::k_GetFileSizeEx
+use _common::k_CloseHandle
+use _common::null_ptr
+use _common::GEN_READ
+use _common::OPEN_EXISTING
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::FS_HZ
+use _common::SK_PI2
+use _common::bref
+use _common::bstore
+use _common::parse_int_text
+use _common::parse_float_text
+use _common::f32_of_quad
+use _common::sk_bitrev
+use _common::sk_fft
+use _common::qs_partition
+use _common::quickselect_k
+use _common::median_of
+use _common::write_text_file
+use _common::format_1dp
+use _common::sig_clamp100
+
+const JERK_NFFT_DEFAULT: Int = 8192
+const JERK_HOP_DEFAULT: Int = 4096
+const JERK_K_DEFAULT: Int = 2
+const JERK_ZCAP: Float = 6.0
+const JERK_ZFLOOR: Float = 0.0 - 3.0
+const JERK_RMAX_CAP: Int = 1024
+
+// ── Deterministic PRNG for Prove Battery ────────────────────────────────────
+fn jerk_lcg_next(s: Int) -> Int:
+    var v: Int = (s * 1103515245 + 12345) % 2147483648
+    if v < 0:
+        v = 0 - v
+    return v
+
+fn jerk_rand_norm(s_in: Int, out_seed: ptr<Int>) -> Float with Unsafe:
+    var s: Int = s_in
+    s = jerk_lcg_next(s)
+    let u1_raw: Int = s
+    s = jerk_lcg_next(s)
+    let u2_raw: Int = s
+    mem_store(out_seed, s, "Int")
+
+    var u1: Float = (u1_raw as Float) / 2147483648.0
+    if u1 < 0.00000001:
+        u1 = 0.00000001
+    var u2: Float = (u2_raw as Float) / 2147483648.0
+
+    let r: Float = sqrt(0.0 - 2.0 * log(u1))
+    let theta: Float = SK_PI2 * u2
+    return r * cos(theta)
+
+// ── 3x3 Linear Equation Solver for Quadratic Kinematics ─────────────────────
+// Solves A * x = b for 3x3 matrix A and 3-vector b. Returns 1 if ok, 0 if singular.
+fn jerk_solve3(A00: Float, A01: Float, A02: Float,
+               A10: Float, A11: Float, A12: Float,
+               A20: Float, A21: Float, A22: Float,
+               b0: Float, b1: Float, b2: Float,
+               out_x: ptr<Float>) -> Int with Unsafe:
+    let M: ptr<Float> = alloc_zeroed(12 + 32, "Float")
+    mem_store(ptr_offset(M, 0, "Float"), A00, "Float")
+    mem_store(ptr_offset(M, 1, "Float"), A01, "Float")
+    mem_store(ptr_offset(M, 2, "Float"), A02, "Float")
+    mem_store(ptr_offset(M, 3, "Float"), b0, "Float")
+
+    mem_store(ptr_offset(M, 4, "Float"), A10, "Float")
+    mem_store(ptr_offset(M, 5, "Float"), A11, "Float")
+    mem_store(ptr_offset(M, 6, "Float"), A12, "Float")
+    mem_store(ptr_offset(M, 7, "Float"), b1, "Float")
+
+    mem_store(ptr_offset(M, 8, "Float"), A20, "Float")
+    mem_store(ptr_offset(M, 9, "Float"), A21, "Float")
+    mem_store(ptr_offset(M, 10, "Float"), A22, "Float")
+    mem_store(ptr_offset(M, 11, "Float"), b2, "Float")
+
+    var c: Int = 0
+    while c < 3:
+        var piv: Int = c
+        var max_v: Float = mem_load(ptr_offset(M, c * 4 + c, "Float"), "Float")
+        if max_v < 0.0:
+            max_v = 0.0 - max_v
+        var r: Int = c + 1
+        while r < 3:
+            var v: Float = mem_load(ptr_offset(M, r * 4 + c, "Float"), "Float")
+            if v < 0.0:
+                v = 0.0 - v
+            if v > max_v:
+                max_v = v
+                piv = r
+            r = r + 1
+
+        if max_v < 0.000000000000000001:
+            decay M
+            return 0
+
+        if piv != c:
+            var k: Int = c
+            while k < 4:
+                let tc: Float = mem_load(ptr_offset(M, c * 4 + k, "Float"), "Float")
+                let tp: Float = mem_load(ptr_offset(M, piv * 4 + k, "Float"), "Float")
+                mem_store(ptr_offset(M, c * 4 + k, "Float"), tp, "Float")
+                mem_store(ptr_offset(M, piv * 4 + k, "Float"), tc, "Float")
+                k = k + 1
+
+        let d: Float = mem_load(ptr_offset(M, c * 4 + c, "Float"), "Float")
+        var k2: Int = c
+        while k2 < 4:
+            let cur: Float = mem_load(ptr_offset(M, c * 4 + k2, "Float"), "Float")
+            mem_store(ptr_offset(M, c * 4 + k2, "Float"), cur / d, "Float")
+            k2 = k2 + 1
+
+        var r2: Int = 0
+        while r2 < 3:
+            if r2 != c:
+                let factor: Float = mem_load(ptr_offset(M, r2 * 4 + c, "Float"), "Float")
+                var k3: Int = c
+                while k3 < 4:
+                    let mk: Float = mem_load(ptr_offset(M, c * 4 + k3, "Float"), "Float")
+                    let prev_val: Float = mem_load(ptr_offset(M, r2 * 4 + k3, "Float"), "Float")
+                    mem_store(ptr_offset(M, r2 * 4 + k3, "Float"), prev_val - factor * mk, "Float")
+                    k3 = k3 + 1
+            r2 = r2 + 1
+        c = c + 1
+
+    mem_store(ptr_offset(out_x, 0, "Float"), mem_load(ptr_offset(M, 3, "Float"), "Float"), "Float")
+    mem_store(ptr_offset(out_x, 1, "Float"), mem_load(ptr_offset(M, 7, "Float"), "Float"), "Float")
+    mem_store(ptr_offset(out_x, 2, "Float"), mem_load(ptr_offset(M, 11, "Float"), "Float"), "Float")
+    decay M
+    return 1
+
+// ── Viterbi Trellis Search ──────────────────────────────────────────────────
+// Z is R x B winsorized z-scores. Returns mean path score.
+// path_out[0..R-1] receives optimal frequency bin indices.
+fn jerk_viterbi(Z: ptr<Float>, R: Int, B: Int, k: Int, path_out: ptr<Int>) -> Float with Unsafe:
+    let prev: ptr<Float> = alloc_zeroed(B + 32, "Float")
+    let nxt: ptr<Float> = alloc_zeroed(B + 32, "Float")
+    let sh: ptr<Byte> = alloc_zeroed(R * B + 32, "Byte")
+
+    var b: Int = 0
+    while b < B:
+        mem_store(ptr_offset(prev, b, "Float"), mem_load(ptr_offset(Z, b, "Float"), "Float"), "Float")
+        b = b + 1
+
+    let NEG_INF: Float = 0.0 - 1000000000.0
+
+    var r: Int = 1
+    while r < R:
+        let r_offset: Int = r * B
+        var b_idx: Int = 0
+        while b_idx < B:
+            var best_val: Float = NEG_INF
+            var best_shift: Int = 0
+            var s: Int = 0 - k
+            while s <= k:
+                let pred_b: Int = b_idx - s
+                if pred_b >= 0 and pred_b < B:
+                    let cand: Float = mem_load(ptr_offset(prev, pred_b, "Float"), "Float")
+                    if cand > best_val:
+                        best_val = cand
+                        best_shift = s
+                s = s + 1
+
+            // Store shift mapped to 0..2k
+            bstore(sh, r_offset + b_idx, best_shift + k)
+            let z_val: Float = mem_load(ptr_offset(Z, r_offset + b_idx, "Float"), "Float")
+            mem_store(ptr_offset(nxt, b_idx, "Float"), z_val + best_val, "Float")
+            b_idx = b_idx + 1
+
+        // Copy nxt -> prev for next row
+        var cp: Int = 0
+        while cp < B:
+            mem_store(ptr_offset(prev, cp, "Float"), mem_load(ptr_offset(nxt, cp, "Float"), "Float"), "Float")
+            cp = cp + 1
+        r = r + 1
+
+    // Traceback
+    var last_b: Int = 0
+    var best_final: Float = mem_load(ptr_offset(prev, 0, "Float"), "Float")
+    var tb: Int = 1
+    while tb < B:
+        let v: Float = mem_load(ptr_offset(prev, tb, "Float"), "Float")
+        if v > best_final:
+            best_final = v
+            last_b = tb
+        tb = tb + 1
+
+    let mean_score: Float = best_final / (R as Float)
+    mem_store(ptr_offset(path_out, R - 1, "Int"), last_b, "Int")
+
+    var tr: Int = R - 1
+    while tr > 0:
+        let cur_b: Int = mem_load(ptr_offset(path_out, tr, "Int"), "Int")
+        let stored_shift: Int = bref(sh, tr * B + cur_b) - k
+        var prev_b: Int = cur_b - stored_shift
+        if prev_b < 0:
+            prev_b = 0
+        if prev_b >= B:
+            prev_b = B - 1
+        mem_store(ptr_offset(path_out, tr - 1, "Int"), prev_b, "Int")
+        tr = tr - 1
+
+    decay prev
+    decay nxt
+    decay sh
+    return mean_score
+
+// ── Kinematic Motion Parameter Estimation ───────────────────────────────────
+fn jerk_fit_motion(path: ptr<Int>, R: Int, nfft: Int, hop: Int, fs: Float,
+                   out_f0: ptr<Float>, out_drift: ptr<Float>, out_jerk: ptr<Float>,
+                   out_gain_db: ptr<Float>) -> Int with Unsafe:
+    var S0: Float = R as Float
+    var S1: Float = 0.0
+    var S2: Float = 0.0
+    var S3: Float = 0.0
+    var S4: Float = 0.0
+
+    var T0: Float = 0.0
+    var T1: Float = 0.0
+    var T2: Float = 0.0
+
+    var r: Int = 0
+    while r < R:
+        let t: Float = ((r * hop) as Float) / fs
+        let bin_idx: Int = mem_load(ptr_offset(path, r, "Int"), "Int")
+        let f: Float = ((bin_idx as Float) * fs) / (nfft as Float)
+
+        let t2: Float = t * t
+        let t3: Float = t2 * t
+        let t4: Float = t3 * t
+
+        S1 = S1 + t
+        S2 = S2 + t2
+        S3 = S3 + t3
+        S4 = S4 + t4
+
+        T0 = T0 + f
+        T1 = T1 + f * t
+        T2 = T2 + f * t2
+        r = r + 1
+
+    let q_slot: ptr<Float> = alloc_zeroed(3 + 32, "Float")
+    let ok_solve: Int = jerk_solve3(S0, S1, S2,
+                                    S1, S2, S3,
+                                    S2, S3, S4,
+                                    T0, T1, T2, q_slot)
+
+    if ok_solve == 1:
+        let q0: Float = mem_load(ptr_offset(q_slot, 0, "Float"), "Float")
+        let q1: Float = mem_load(ptr_offset(q_slot, 1, "Float"), "Float")
+        let q2: Float = mem_load(ptr_offset(q_slot, 2, "Float"), "Float")
+
+        mem_store(out_f0, q0, "Float")
+        mem_store(out_drift, q1, "Float")
+        mem_store(out_jerk, 2.0 * q2, "Float")
+
+        // Closed-form linear fit
+        let dn: Float = S0 * S2 - S1 * S1
+        var l0: Float = 0.0
+        var l1: Float = 0.0
+        var abs_dn: Float = dn
+        if abs_dn < 0.0:
+            abs_dn = 0.0 - abs_dn
+        if abs_dn > 0.000000000000000001:
+            l1 = (S0 * T1 - S1 * T0) / dn
+            l0 = (T0 - l1 * S1) / S0
+
+        // Compute residuals
+        var r_quad: Float = 0.0
+        var r_lin: Float = 0.0
+        var ir: Int = 0
+        while ir < R:
+            let t: Float = ((ir * hop) as Float) / fs
+            let bin_idx: Int = mem_load(ptr_offset(path, ir, "Int"), "Int")
+            let f: Float = ((bin_idx as Float) * fs) / (nfft as Float)
+
+            let pq: Float = q0 + q1 * t + q2 * t * t
+            let pl: Float = l0 + l1 * t
+
+            let diff_q: Float = pq - f
+            let diff_l: Float = pl - f
+
+            r_quad = r_quad + diff_q * diff_q
+            r_lin = r_lin + diff_l * diff_l
+            ir = ir + 1
+
+        var gain_db: Float = 0.0
+        if r_quad < 0.00000001:
+            r_quad = 0.00000001
+        if r_lin < 0.00000001:
+            r_lin = 0.00000001
+        gain_db = 10.0 * (log(r_lin / r_quad) / 2.302585092994046)
+        mem_store(out_gain_db, gain_db, "Float")
+    else:
+        mem_store(out_f0, 0.0, "Float")
+        mem_store(out_drift, 0.0, "Float")
+        mem_store(out_jerk, 0.0, "Float")
+        mem_store(out_gain_db, 0.0, "Float")
+
+    decay q_slot
+    return 0
+
+// ── Full STFT & Track Analysis ──────────────────────────────────────────────
+fn jerk_analyze_buffer(x: ptr<Float>, nx: Int, fs: Float, nfft: Int, hop: Int, k: Int,
+                       freq_mhz: Float,
+                       out_score: ptr<Float>, out_drift: ptr<Float>, out_jerk: ptr<Float>,
+                       out_f0: ptr<Float>, out_gain_db: ptr<Float>, out_sid_anom: ptr<Int>) -> Int with Unsafe:
+    let B: Int = nfft / 2 + 1
+    var R: Int = (nx - nfft) / hop + 1
+    if R < 4:
+        return 0
+    if R > JERK_RMAX_CAP:
+        R = JERK_RMAX_CAP
+
+    let P_waterfall: ptr<Float> = alloc_zeroed(R * B + 32, "Float")
+    let re_buf: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let im_buf: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let tmp_sort: ptr<Float> = alloc_zeroed(B + 32, "Float")
+    let dev_sort: ptr<Float> = alloc_zeroed(B + 32, "Float")
+    let path: ptr<Int> = alloc_zeroed(R + 32, "Int")
+
+    // 1. Compute STFT Power & Row Winsorized Z-Score
+    var r: Int = 0
+    while r < R:
+        let start_sample: Int = r * hop
+        var i: Int = 0
+        while i < nfft:
+            mem_store(ptr_offset(re_buf, i, "Float"), mem_load(ptr_offset(x, start_sample + i, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(im_buf, i, "Float"), 0.0, "Float")
+            i = i + 1
+
+        let _fft_ok: Int = sk_fft(re_buf, im_buf, nfft)
+
+        // Compute power into row
+        var b: Int = 0
+        while b < B:
+            let rv: Float = mem_load(ptr_offset(re_buf, b, "Float"), "Float")
+            let iv: Float = mem_load(ptr_offset(im_buf, b, "Float"), "Float")
+            let pwr: Float = rv * rv + iv * iv
+            mem_store(ptr_offset(P_waterfall, r * B + b, "Float"), pwr, "Float")
+            mem_store(ptr_offset(tmp_sort, b, "Float"), pwr, "Float")
+            b = b + 1
+
+        // Robust median and MAD
+        let med: Float = quickselect_k(tmp_sort, B, B / 2)
+        var db: Int = 0
+        while db < B:
+            let val: Float = mem_load(ptr_offset(P_waterfall, r * B + db, "Float"), "Float")
+            var diff: Float = val - med
+            if diff < 0.0:
+                diff = 0.0 - diff
+            mem_store(ptr_offset(dev_sort, db, "Float"), diff, "Float")
+            db = db + 1
+
+        let mad: Float = quickselect_k(dev_sort, B, B / 2)
+        var s_scale: Float = 1.4826 * mad
+        if s_scale < 0.00000001:
+            s_scale = 0.00000001
+
+        // Winsorize row
+        var wb: Int = 0
+        while wb < B:
+            let raw_pwr: Float = mem_load(ptr_offset(P_waterfall, r * B + wb, "Float"), "Float")
+            var z: Float = (raw_pwr - med) / s_scale
+            if z > JERK_ZCAP:
+                z = JERK_ZCAP
+            elif z < JERK_ZFLOOR:
+                z = JERK_ZFLOOR
+            mem_store(ptr_offset(P_waterfall, r * B + wb, "Float"), z, "Float")
+            wb = wb + 1
+        r = r + 1
+
+    decay re_buf
+    decay im_buf
+    decay tmp_sort
+    decay dev_sort
+
+    // 2. Run Viterbi Trellis
+    let score: Float = jerk_viterbi(P_waterfall, R, B, k, path)
+    mem_store(out_score, score, "Float")
+
+    // 3. Fit Kinematic Parameters
+    jerk_fit_motion(path, R, nfft, hop, fs, out_f0, out_drift, out_jerk, out_gain_db)
+
+    // 4. Sidereal Screening
+    let drift_val: Float = mem_load(out_drift, "Float")
+    var abs_drift: Float = drift_val
+    if abs_drift < 0.0:
+        abs_drift = 0.0 - abs_drift
+    let bound: Float = 0.35 * (freq_mhz / 1407.7)
+    if abs_drift > bound:
+        mem_store(out_sid_anom, 1, "Int")
+    else:
+        mem_store(out_sid_anom, 0, "Int")
+
+    decay P_waterfall
+    decay path
+    return R
+
+// ── Prove Battery ───────────────────────────────────────────────────────────
+pub fn jerk_track_prove() -> Int with Unsafe:
+    var ok: Int = 1
+    println("[prove] jerk_track selftest battery starting...")
+
+    let N: Int = 2097152
+    let fs: Float = FS_HZ
+    let nfft: Int = 8192
+    let hop: Int = 4096
+    let k: Int = 2
+    let freq_mhz: Float = 1407.7
+
+    let x: ptr<Float> = alloc_zeroed(N + 32, "Float")
+    let score_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let drift_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let jerk_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let f0_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let gain_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let sid_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let rng_seed_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(rng_seed_slot, 123456789, "Int")
+
+    // P1: Bounded noise control
+    var i: Int = 0
+    while i < N:
+        let cur_seed: Int = mem_load(rng_seed_slot, "Int")
+        let nr: Float = jerk_rand_norm(cur_seed, rng_seed_slot)
+        mem_store(ptr_offset(x, i, "Float"), 14.0 * nr, "Float")
+        i = i + 1
+
+    let _r1: Int = jerk_analyze_buffer(x, N, fs, nfft, hop, k, freq_mhz,
+                                       score_slot, drift_slot, jerk_slot, f0_slot, gain_slot, sid_slot)
+    let n_score: Float = mem_load(score_slot, "Float")
+
+    if n_score > 0.0 and n_score < 20.0:
+        println("  [PASS] P1: noise control bounded (score=" + format_1dp(n_score) + " < 20.0)")
+    else:
+        println("  [FAIL] P1: noise score abnormal: " + format_1dp(n_score))
+        ok = 0
+
+    let thresh: Float = n_score * 1.30
+
+    // P2: Linear Chirp Injection (v = 2000 Hz/s)
+    mem_store(rng_seed_slot, 987654321, "Int")
+    var i2: Int = 0
+    while i2 < N:
+        let t: Float = (i2 as Float) / fs
+        let cur_seed: Int = mem_load(rng_seed_slot, "Int")
+        let nr: Float = jerk_rand_norm(cur_seed, rng_seed_slot)
+        let ph: Float = SK_PI2 * (500000.0 * t + 0.5 * 2000.0 * t * t)
+        let sig: Float = 14.0 * nr + 8.0 * cos(ph)
+        mem_store(ptr_offset(x, i2, "Float"), sig, "Float")
+        i2 = i2 + 1
+
+    let _r2: Int = jerk_analyze_buffer(x, N, fs, nfft, hop, k, freq_mhz,
+                                       score_slot, drift_slot, jerk_slot, f0_slot, gain_slot, sid_slot)
+    let lin_score: Float = mem_load(score_slot, "Float")
+    let lin_drift: Float = mem_load(drift_slot, "Float")
+    var drift_err: Float = lin_drift - 2000.0
+    if drift_err < 0.0:
+        drift_err = 0.0 - drift_err
+
+    if lin_score > thresh and drift_err < 900.0:
+        println("  [PASS] P2: linear chirp detected (score=" + format_1dp(lin_score) + " > " + format_1dp(thresh) + ", drift=" + format_1dp(lin_drift) + " Hz/s)")
+    else:
+        println("  [FAIL] P2: linear chirp missed score=" + format_1dp(lin_score) + " drift=" + format_1dp(lin_drift))
+        ok = 0
+
+    // P3: Parabolic / Accelerating Chirp Injection (a = 4000 Hz/s^2, v = 500 Hz/s)
+    mem_store(rng_seed_slot, 555666777, "Int")
+    var i3: Int = 0
+    while i3 < N:
+        let t: Float = (i3 as Float) / fs
+        let cur_seed: Int = mem_load(rng_seed_slot, "Int")
+        let nr: Float = jerk_rand_norm(cur_seed, rng_seed_slot)
+        let ph: Float = SK_PI2 * (700000.0 * t + 0.5 * 500.0 * t * t + (1.0 / 6.0) * 4000.0 * t * t * t)
+        let sig: Float = 14.0 * nr + 9.0 * cos(ph)
+        mem_store(ptr_offset(x, i3, "Float"), sig, "Float")
+        i3 = i3 + 1
+
+    let _r3: Int = jerk_analyze_buffer(x, N, fs, nfft, hop, k, freq_mhz,
+                                       score_slot, drift_slot, jerk_slot, f0_slot, gain_slot, sid_slot)
+    let j_score: Float = mem_load(score_slot, "Float")
+    let j_jerk: Float = mem_load(jerk_slot, "Float")
+    let j_gain: Float = mem_load(gain_slot, "Float")
+    let j_sid: Int = mem_load(sid_slot, "Int")
+
+    var abs_jerk: Float = j_jerk
+    if abs_jerk < 0.0:
+        abs_jerk = 0.0 - abs_jerk
+
+    if j_score > thresh and abs_jerk > 500.0:
+        println("  [PASS] P3: jerk acceleration recovered (a=" + format_1dp(j_jerk) + " Hz/s^2, curve_gain=" + format_1dp(j_gain) + " dB)")
+    else:
+        println("  [FAIL] P3: jerk recovery failed score=" + format_1dp(j_score) + " a=" + format_1dp(j_jerk) + " gain=" + format_1dp(j_gain))
+        ok = 0
+
+    // P4: Sidereal Anomaly Screening Check
+    if j_sid == 1:
+        println("  [PASS] P4: sidereal anomaly flagged (|drift| > Earth rotation bound)")
+    else:
+        println("  [FAIL] P4: sidereal anomaly failed to trigger")
+        ok = 0
+
+    decay x
+    decay score_slot
+    decay drift_slot
+    decay jerk_slot
+    decay f0_slot
+    decay gain_slot
+    decay sid_slot
+    decay rng_seed_slot
+
+    if ok == 1:
+        println("[prove] jerk_track: ALL BATTERIES PASSED (4/4)")
+        return 0
+    println("[prove] jerk_track: BATTERIES FAILED")
+    return 1
+
+// ── CLI Usage ───────────────────────────────────────────────────────────────
+pub fn jerk_track_usage() -> String:
+    var t: String = "================================================================================\n"
+    t = t + " jerk_track 0.1.0 — TurboKain Non-Linear Doppler & Jerk Tracker\n"
+    t = t + "================================================================================\n\n"
+    t = t + "Viterbi track-before-detect over non-linear accelerating exoplanetary & orbital\n"
+    t = t + "carrier trajectories with curvature polynomial fit and sidereal screening.\n\n"
+    t = t + "USAGE:\n"
+    t = t + "  tkc jerk_track --in <file.f32> [options...]\n"
+    t = t + "  tkc jerk [options...]\n\n"
+    t = t + "OPTIONS:\n"
+    t = t + "  --in <path>        Input float32 LE time series voltage file\n"
+    t = t + "  --out <stem>       Output file stem (default: reports/jerk)\n"
+    t = t + "  --fs <hz>          Sampling frequency in Hz (default: 2929687.5)\n"
+    t = t + "  --f0-mhz <mhz>     Center frequency in MHz (default: 1407.7)\n"
+    t = t + "  --nfft <int>       STFT FFT size (default: 8192)\n"
+    t = t + "  --hop <int>        STFT hop size (default: 4096)\n"
+    t = t + "  --k <int>          Viterbi agility max bins/row (default: 2)\n"
+    t = t + "  --thresh <float>   Viterbi score detection threshold (default: 12.0)\n"
+    t = t + "  --prove            Run internal mathematical self-test battery (4/4)\n\n"
+    t = t + "OUTPUTS:\n"
+    t = t + "  <stem>.md          Markdown report with kinematics, fit residuals, and curvature gain\n"
+    t = t + "  <stem>.csv         CSV row: f0_hz, drift_hz_s, jerk_hz_s2, score_x100, gain_db_x100, sidereal_anom, verdict\n"
+    return t
+
+// ── Main Entry Point ────────────────────────────────────────────────────────
+pub fn jerk_track_main(args: Array<String>) -> Int with Unsafe:
+    let n_args: Int = len(args)
+    if n_args == 0:
+        print(jerk_track_usage())
+        return EXIT_HELP
+
+    var in_path: String = ""
+    var out_stem: String = "reports/jerk"
+    var fs_arg: Float = FS_HZ
+    var f0_mhz_arg: Float = 1407.7
+    var nfft_arg: Int = JERK_NFFT_DEFAULT
+    var hop_arg: Int = JERK_HOP_DEFAULT
+    var k_arg: Int = JERK_K_DEFAULT
+    var thresh_arg: Float = 12.0
+    var do_prove: Int = 0
+
+    var idx: Int = 0
+    while idx < n_args:
+        let a: String = args[idx]
+        if a == "--help" or a == "-h":
+            print(jerk_track_usage())
+            return EXIT_HELP
+        elif a == "--prove":
+            do_prove = 1
+        elif a == "--in":
+            if idx + 1 < n_args:
+                in_path = args[idx + 1]
+                idx = idx + 1
+        elif a == "--out":
+            if idx + 1 < n_args:
+                out_stem = args[idx + 1]
+                idx = idx + 1
+        elif a == "--fs":
+            if idx + 1 < n_args:
+                fs_arg = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--f0-mhz":
+            if idx + 1 < n_args:
+                f0_mhz_arg = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--nfft":
+            if idx + 1 < n_args:
+                nfft_arg = parse_int_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--hop":
+            if idx + 1 < n_args:
+                hop_arg = parse_int_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--k":
+            if idx + 1 < n_args:
+                k_arg = parse_int_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--thresh":
+            if idx + 1 < n_args:
+                thresh_arg = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif len(in_path) == 0 and char_at(a, 0) != "-":
+            in_path = a
+        idx = idx + 1
+
+    if do_prove == 1:
+        return jerk_track_prove()
+
+    if len(in_path) == 0:
+        println("jerk_track: ERROR: no input .f32 specified. Use --in <file.f32> or --prove")
+        return EXIT_ERROR
+
+    // Read input .f32 voltage file
+    let h_in: ptr<Void> = k_CreateFileA(in_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h_in) == -1:
+        println("jerk_track: ERROR: cannot open input file " + in_path)
+        return EXIT_ERROR
+
+    let file_sz_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let ok_sz: Int = k_GetFileSizeEx(h_in, file_sz_slot)
+    let file_bytes: Int = mem_load(file_sz_slot, "Int")
+    decay file_sz_slot
+
+    if ok_sz == 0 or file_bytes <= 0:
+        println("jerk_track: ERROR: invalid file size for " + in_path)
+        let _c: Int = k_CloseHandle(h_in)
+        return EXIT_ERROR
+
+    let raw_buf: ptr<Byte> = alloc_zeroed(file_bytes + 32, "Byte")
+    let nread_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let ok_read: Int = k_ReadFile(h_in, raw_buf, file_bytes, nread_slot, null_ptr())
+    let _c: Int = k_CloseHandle(h_in)
+    decay nread_slot
+
+    if ok_read == 0:
+        println("jerk_track: ERROR: failed reading bytes from " + in_path)
+        return EXIT_ERROR
+
+    let total_samples: Int = file_bytes / 4
+    if total_samples < nfft_arg:
+        println("jerk_track: ERROR: input file too short for NFFT=" + str(nfft_arg))
+        return EXIT_ERROR
+
+    // Power-of-2 table for IEEE-754 decode
+    let p2t: ptr<Float> = alloc_zeroed(256 + 32, "Float")
+    var p2i: Int = 0
+    var p2v: Float = 1.0
+    while p2i < 127:
+        mem_store(ptr_offset(p2t, 126 - p2i, "Float"), 1.0 / p2v, "Float")
+        p2v = p2v * 2.0
+        p2i = p2i + 1
+    mem_store(ptr_offset(p2t, 127, "Float"), 1.0, "Float")
+    p2i = 1
+    p2v = 2.0
+    while p2i < 128:
+        mem_store(ptr_offset(p2t, 127 + p2i, "Float"), p2v, "Float")
+        p2v = p2v * 2.0
+        p2i = p2i + 1
+
+    let x_arena: ptr<Float> = alloc_zeroed(total_samples + 32, "Float")
+    var s_idx: Int = 0
+    while s_idx < total_samples:
+        let b0: Int = bref(raw_buf, s_idx * 4)
+        let b1: Int = bref(raw_buf, s_idx * 4 + 1)
+        let b2: Int = bref(raw_buf, s_idx * 4 + 2)
+        let b3: Int = bref(raw_buf, s_idx * 4 + 3)
+        let f_val: Float = f32_of_quad(b0, b1, b2, b3, p2t)
+        mem_store(ptr_offset(x_arena, s_idx, "Float"), f_val, "Float")
+        s_idx = s_idx + 1
+
+    decay raw_buf
+    decay p2t
+
+    println("[jerk_track] loaded " + str(total_samples) + " samples from " + in_path + " (fs=" + format_1dp(fs_arg) + " Hz)")
+
+    let score_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let drift_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let jerk_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let f0_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let gain_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let sid_slot: ptr<Int> = alloc_zeroed(1, "Int")
+
+    let rows_analyzed: Int = jerk_analyze_buffer(x_arena, total_samples, fs_arg, nfft_arg, hop_arg, k_arg, f0_mhz_arg,
+                                                 score_slot, drift_slot, jerk_slot, f0_slot, gain_slot, sid_slot)
+
+    let score_val: Float = mem_load(score_slot, "Float")
+    let drift_val: Float = mem_load(drift_slot, "Float")
+    let jerk_val: Float = mem_load(jerk_slot, "Float")
+    let f0_val: Float = mem_load(f0_slot, "Float")
+    let gain_val: Float = mem_load(gain_slot, "Float")
+    let sid_val: Int = mem_load(sid_slot, "Int")
+
+    decay score_slot
+    decay drift_slot
+    decay jerk_slot
+    decay f0_slot
+    decay gain_slot
+    decay sid_slot
+    decay x_arena
+
+    var verdict: String = "QUIET"
+    if score_val >= thresh_arg:
+        if gain_val >= 3.0:
+            verdict = "JERK-ACCEL"
+        elif sid_val == 1:
+            verdict = "ANOMALOUS-DRIFT"
+        else:
+            verdict = "DRIFT-TRACK"
+
+    println("[jerk_track] RESULT verdict=" + verdict + " score=" + format_1dp(score_val) + " f0=" + format_1dp(f0_val) + " drift=" + format_1dp(drift_val) + " Hz/s jerk=" + format_1dp(jerk_val) + " Hz/s^2 curve_gain=" + format_1dp(gain_val) + " dB sidereal_anom=" + str(sid_val))
+
+    // Markdown Report
+    var md: String = "# JERK_TRACK REPORT — Non-Linear Doppler & Jerk Tracking\n\n"
+    md = md + "- **Input File:** `" + in_path + "`\n"
+    md = md + "- **Rows Analyzed:** `" + str(rows_analyzed) + " (NFFT=" + str(nfft_arg) + ", HOP=" + str(hop_arg) + ")`\n"
+    md = md + "- **Verdict:** `" + verdict + "`\n"
+    md = md + "- **Viterbi Trellis Score:** `" + format_1dp(score_val) + "` (threshold: " + format_1dp(thresh_arg) + ")\n"
+    md = md + "- **Carrier Frequency (f0):** `" + format_1dp(f0_val) + " Hz`\n"
+    md = md + "- **Linear Drift (v):** `" + format_1dp(drift_val) + " Hz/s`\n"
+    md = md + "- **Jerk / Acceleration (a):** `" + format_1dp(jerk_val) + " Hz/s^2`\n"
+    md = md + "- **Curvature Gain:** `" + format_1dp(gain_val) + " dB`\n"
+    md = md + "- **Sidereal Anomaly:** `" + str(sid_val) + "` (Earth L-band bound: 0.35 Hz/s)\n\n"
+
+    // CSV
+    var csv: String = "f0_hz,drift_hz_s,jerk_hz_s2,score_x100,gain_db_x100,sidereal_anom,verdict\n"
+    csv = csv + str(f0_val as Int) + "," + str(sig_clamp100(drift_val)) + "," + str(sig_clamp100(jerk_val)) + ","
+    csv = csv + str(sig_clamp100(score_val)) + "," + str(sig_clamp100(gain_val)) + "," + str(sid_val) + "," + verdict + "\n"
+
+    let _w1: Int = write_text_file(out_stem + ".md", md)
+    let _w2: Int = write_text_file(out_stem + ".csv", csv)
+    println("[jerk_track] wrote " + out_stem + ".md and " + out_stem + ".csv")
+
+    return EXIT_OK

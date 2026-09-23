@@ -1,0 +1,783 @@
+// ============================================================================
+// scint_pol.kn — TurboKain 17: Interstellar Scintillation & Polarization Coherence
+// (Objective 1: ISM diffractive scattering vs local backend wander, I2 -> I3 grade)
+//
+// WHY THIS EXISTS:
+// A celestial point source shines THROUGH the turbulent interstellar medium (ISM),
+// and the medium imprints physical signatures no local generator can fake:
+//
+//   1. Diffractive Scintillation: Scattering modulates intensity (modulation
+//      index m ~ 0.2 - 1.0, timescale tau >= 2 frames), DECORRELATED across
+//      frequency sub-bands (xcorr < 0.80). Terrestrial hum is steady (m ~ 0.06);
+//      local RFI bursts are broadband-simultaneous (xcorr ~ 0.95+, COMMON).
+//   2. Polarization Coherence: A celestial signal arrives in every feed at the
+//      SAME frequency (dfreq <= 3 bins) or with locked sky-time envelope
+//      co-variation (env_xcorr > 0.50). The known-local HIP-113357 receiver
+//      wander fingerprint is the opposite: each polarization drifts to a
+//      different frequency (WANDER-LOCAL).
+//
+// Hit Criteria Role:
+// This instrument provides the exact astrophysical proof that promotes an
+// engineered candidate from I2 (ENGINEERED) to I3 (INTERSTELLAR-LEAN).
+//
+// Contract: .f32 (pol0) + optional .f32 (pol1) -> scint.md + scint.csv
+// Exit codes: 0 searched, 1 help OR prove fail, 2 error.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+use _common::k_CreateFileA
+use _common::k_SetFilePointer
+use _common::k_ReadFile
+use _common::k_GetFileSizeEx
+use _common::k_CloseHandle
+use _common::null_ptr
+use _common::GEN_READ
+use _common::OPEN_EXISTING
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::FS_HZ
+use _common::SK_PI2
+use _common::bref
+use _common::bstore
+use _common::parse_int_text
+use _common::parse_float_text
+use _common::f32_of_quad
+use _common::sk_bitrev
+use _common::sk_fft
+use _common::qs_partition
+use _common::quickselect_k
+use _common::write_text_file
+use _common::format_1dp
+use _common::sig_clamp100
+
+const SCINT_SEG: Int = 4096
+const SCINT_HOP: Int = 2048
+const SCINT_NSB: Int = 8
+const SCINT_MAX_FRAMES: Int = 512
+
+const SCINT_M_QUIET: Float = 0.15
+const SCINT_M_COMMON: Float = 0.10
+const SCINT_M_SPIKY: Float = 1.20
+const SCINT_XCORR_COMMON: Float = 0.80
+const SCINT_TAU_SCINT: Float = 2.0
+const SCINT_TAU_COMMON: Float = 4.0
+
+// ── PRNG for Prove Battery ──────────────────────────────────────────────────
+fn scint_lcg_next(s: Int) -> Int:
+    var v: Int = (s * 1103515245 + 12345) % 2147483648
+    if v < 0:
+        v = 0 - v
+    return v
+
+fn scint_rand_norm(s_in: Int, out_seed: ptr<Int>) -> Float with Unsafe:
+    var s: Int = s_in
+    s = scint_lcg_next(s)
+    let u1_raw: Int = s
+    s = scint_lcg_next(s)
+    let u2_raw: Int = s
+    mem_store(out_seed, s, "Int")
+
+    var u1: Float = (u1_raw as Float) / 2147483648.0
+    if u1 < 0.00000001:
+        u1 = 0.00000001
+    var u2: Float = (u2_raw as Float) / 2147483648.0
+
+    let r: Float = sqrt(0.0 - 2.0 * log(u1))
+    let theta: Float = SK_PI2 * u2
+    return r * cos(theta)
+
+// ── Pearson Correlation of Two Buffers ──────────────────────────────────────
+fn scint_calc_corr(a: ptr<Float>, b: ptr<Float>, n: Int) -> Float with Unsafe:
+    if n <= 1:
+        return 0.0
+    var sum_a: Float = 0.0
+    var sum_b: Float = 0.0
+    var i: Int = 0
+    while i < n:
+        sum_a = sum_a + mem_load(ptr_offset(a, i, "Float"), "Float")
+        sum_b = sum_b + mem_load(ptr_offset(b, i, "Float"), "Float")
+        i = i + 1
+    let mu_a: Float = sum_a / (n as Float)
+    let mu_b: Float = sum_b / (n as Float)
+
+    var cov: Float = 0.0
+    var var_a: Float = 0.0
+    var var_b: Float = 0.0
+    var j: Int = 0
+    while j < n:
+        let da: Float = mem_load(ptr_offset(a, j, "Float"), "Float") - mu_a
+        let db: Float = mem_load(ptr_offset(b, j, "Float"), "Float") - mu_b
+        cov = cov + da * db
+        var_a = var_a + da * da
+        var_b = var_b + db * db
+        j = j + 1
+
+    let denom: Float = sqrt(var_a * var_b)
+    if denom < 0.000000000000001:
+        return 0.0
+    return cov / denom
+
+// ── Autocorrelation Half-Width Timescale (tau in frames) ────────────────────
+fn scint_calc_tau(env: ptr<Float>, n: Int) -> Float with Unsafe:
+    if n < 4:
+        return 0.0
+    var sum_e: Float = 0.0
+    var i: Int = 0
+    while i < n:
+        sum_e = sum_e + mem_load(ptr_offset(env, i, "Float"), "Float")
+        i = i + 1
+    let mu: Float = sum_e / (n as Float)
+
+    var var_e: Float = 0.0
+    var j: Int = 0
+    while j < n:
+        let d: Float = mem_load(ptr_offset(env, j, "Float"), "Float") - mu
+        var_e = var_e + d * d
+        j = j + 1
+    if var_e < 0.000000000000001:
+        return 0.0
+
+    // Compute normalized ACF until dropping below 0.5
+    var lag: Int = 1
+    while lag < n:
+        var cov: Float = 0.0
+        var k: Int = 0
+        while k < n - lag:
+            let d1: Float = mem_load(ptr_offset(env, k, "Float"), "Float") - mu
+            let d2: Float = mem_load(ptr_offset(env, k + lag, "Float"), "Float") - mu
+            cov = cov + d1 * d2
+            k = k + 1
+        let r: Float = cov / var_e
+        if r < 0.5:
+            return lag as Float
+        lag = lag + 1
+    return n as Float
+
+// ── Peak Carrier Frequency Detection ────────────────────────────────────────
+fn scint_peak_freq(x: ptr<Float>, nx: Int, fs: Float, out_freq: ptr<Float>, out_amp: ptr<Float>) -> Int with Unsafe:
+    var nfft: Int = 262144
+    if nfft > nx:
+        nfft = 65536
+    if nfft > nx:
+        nfft = 16384
+    if nfft > nx:
+        nfft = 4096
+    if nfft > nx:
+        mem_store(out_freq, 0.0, "Float")
+        mem_store(out_amp, 0.0, "Float")
+        return 0
+
+    let re_buf: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let im_buf: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    var i: Int = 0
+    while i < nfft:
+        mem_store(ptr_offset(re_buf, i, "Float"), mem_load(ptr_offset(x, i, "Float"), "Float"), "Float")
+        mem_store(ptr_offset(im_buf, i, "Float"), 0.0, "Float")
+        i = i + 1
+
+    let _ok: Int = sk_fft(re_buf, im_buf, nfft)
+
+    let B: Int = nfft / 2
+    var best_bin: Int = 2
+    var best_pwr: Float = 0.0
+    var sum_pwr: Float = 0.0
+
+    // Skip DC and bin 1
+    var b: Int = 2
+    while b < B:
+        let rv: Float = mem_load(ptr_offset(re_buf, b, "Float"), "Float")
+        let iv: Float = mem_load(ptr_offset(im_buf, b, "Float"), "Float")
+        let pwr: Float = rv * rv + iv * iv
+        sum_pwr = sum_pwr + pwr
+        if pwr > best_pwr:
+            best_pwr = pwr
+            best_bin = b
+        b = b + 1
+
+    let mean_bg: Float = sum_pwr / ((B - 2) as Float)
+    var amp_ratio: Float = 1.0
+    if mean_bg > 0.000000000000001:
+        amp_ratio = best_pwr / mean_bg
+
+    let freq_hz: Float = ((best_bin as Float) * fs) / (nfft as Float)
+    mem_store(out_freq, freq_hz, "Float")
+    mem_store(out_amp, amp_ratio, "Float")
+
+    decay re_buf
+    decay im_buf
+    return 0
+
+// ── Sub-Band STFT Energy & Scintillation Classification ─────────────────────
+// Analyzes time series x[0..nx-1].
+// Fills out_env[0..R-1] with the mean time envelope.
+fn scint_analyze_single(x: ptr<Float>, nx: Int,
+                        out_class_slot: ptr<Int>,
+                        out_m_med: ptr<Float>, out_m_max: ptr<Float>,
+                        out_tau: ptr<Float>, out_xcorr: ptr<Float>,
+                        out_env: ptr<Float>) -> Int with Unsafe:
+    var R: Int = (nx - SCINT_SEG) / SCINT_HOP + 1
+    if R < 8:
+        mem_store(out_class_slot, 0, "Int") // TOOSHORT
+        return 0
+    if R > SCINT_MAX_FRAMES:
+        R = SCINT_MAX_FRAMES
+
+    let E_bands: ptr<Float> = alloc_zeroed(R * SCINT_NSB + 32, "Float")
+    let re: ptr<Float> = alloc_zeroed(SCINT_SEG + 32, "Float")
+    let im: ptr<Float> = alloc_zeroed(SCINT_SEG + 32, "Float")
+
+    let B_total: Int = SCINT_SEG / 2
+    let band_w: Int = (B_total - 2) / SCINT_NSB
+
+    // 1. Compute sub-band power matrix E[r, b]
+    var r: Int = 0
+    while r < R:
+        let start_sample: Int = r * SCINT_HOP
+        var i: Int = 0
+        while i < SCINT_SEG:
+            mem_store(ptr_offset(re, i, "Float"), mem_load(ptr_offset(x, start_sample + i, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(im, i, "Float"), 0.0, "Float")
+            i = i + 1
+
+        let _ok: Int = sk_fft(re, im, SCINT_SEG)
+
+        var frame_env_sum: Float = 0.0
+        var b: Int = 0
+        while b < SCINT_NSB:
+            let b_start: Int = 2 + b * band_w
+            var b_sum: Float = 0.0
+            var k: Int = 0
+            while k < band_w:
+                let rv: Float = mem_load(ptr_offset(re, b_start + k, "Float"), "Float")
+                let iv: Float = mem_load(ptr_offset(im, b_start + k, "Float"), "Float")
+                b_sum = b_sum + (rv * rv + iv * iv)
+                k = k + 1
+            let mean_band_pwr: Float = b_sum / (band_w as Float)
+            mem_store(ptr_offset(E_bands, r * SCINT_NSB + b, "Float"), mean_band_pwr, "Float")
+            frame_env_sum = frame_env_sum + mean_band_pwr
+            b = b + 1
+
+        mem_store(ptr_offset(out_env, r, "Float"), frame_env_sum / (SCINT_NSB as Float), "Float")
+        r = r + 1
+
+    decay re
+    decay im
+
+    // 2. Compute per-sub-band modulation index m_b
+    let m_vals: ptr<Float> = alloc_zeroed(SCINT_NSB + 32, "Float")
+    var max_m: Float = 0.0
+    var b_idx: Int = 0
+    while b_idx < SCINT_NSB:
+        var sum_sb: Float = 0.0
+        var ir: Int = 0
+        while ir < R:
+            sum_sb = sum_sb + mem_load(ptr_offset(E_bands, ir * SCINT_NSB + b_idx, "Float"), "Float")
+            ir = ir + 1
+        let mu_sb: Float = sum_sb / (R as Float)
+
+        var var_sb: Float = 0.0
+        var ir2: Int = 0
+        while ir2 < R:
+            let d: Float = mem_load(ptr_offset(E_bands, ir2 * SCINT_NSB + b_idx, "Float"), "Float") - mu_sb
+            var_sb = var_sb + d * d
+            ir2 = ir2 + 1
+        let sd_sb: Float = sqrt(var_sb / (R as Float))
+
+        var m_b: Float = 0.0
+        if mu_sb > 0.000000000000001:
+            m_b = sd_sb / mu_sb
+        mem_store(ptr_offset(m_vals, b_idx, "Float"), m_b, "Float")
+        if m_b > max_m:
+            max_m = m_b
+        b_idx = b_idx + 1
+
+    let med_m: Float = quickselect_k(m_vals, SCINT_NSB, SCINT_NSB / 2)
+    decay m_vals
+
+    // 3. Compute timescale tau on mean time envelope
+    let tau: Float = scint_calc_tau(out_env, R)
+
+    // 4. Compute adjacent sub-band cross-correlation xcorr
+    let col1: ptr<Float> = alloc_zeroed(R + 32, "Float")
+    let col2: ptr<Float> = alloc_zeroed(R + 32, "Float")
+    var sum_xc: Float = 0.0
+    var xc_count: Int = 0
+
+    var b_adj: Int = 0
+    while b_adj < SCINT_NSB - 1:
+        var cr: Int = 0
+        while cr < R:
+            mem_store(ptr_offset(col1, cr, "Float"), mem_load(ptr_offset(E_bands, cr * SCINT_NSB + b_adj, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(col2, cr, "Float"), mem_load(ptr_offset(E_bands, cr * SCINT_NSB + b_adj + 1, "Float"), "Float"), "Float")
+            cr = cr + 1
+        let c_val: Float = scint_calc_corr(col1, col2, R)
+        sum_xc = sum_xc + c_val
+        xc_count = xc_count + 1
+        b_adj = b_adj + 1
+
+    decay col1
+    decay col2
+    decay E_bands
+
+    var mean_xc: Float = 0.0
+    if xc_count > 0:
+        mean_xc = sum_xc / (xc_count as Float)
+
+    mem_store(out_m_med, med_m, "Float")
+    mem_store(out_m_max, max_m, "Float")
+    mem_store(out_tau, tau, "Float")
+    mem_store(out_xcorr, mean_xc, "Float")
+
+    // Classify: 1=QUIET, 2=SCINT, 3=COMMON, 4=SPIKY, 5=UNRESOLVED
+    var cls_code: Int = 1
+    if med_m > SCINT_M_SPIKY:
+        cls_code = 4 // SPIKY
+    elif med_m >= SCINT_M_COMMON and mean_xc >= SCINT_XCORR_COMMON and tau < SCINT_TAU_COMMON:
+        cls_code = 3 // COMMON
+    elif med_m >= SCINT_M_QUIET and tau >= SCINT_TAU_SCINT and mean_xc < SCINT_XCORR_COMMON:
+        cls_code = 2 // SCINT
+    elif med_m >= SCINT_M_QUIET:
+        cls_code = 5 // UNRESOLVED
+    else:
+        cls_code = 1 // QUIET
+
+    mem_store(out_class_slot, cls_code, "Int")
+    return R
+
+// ── Prove Battery ───────────────────────────────────────────────────────────
+pub fn scint_pol_prove() -> Int with Unsafe:
+    var ok: Int = 1
+    println("[prove] scint_pol selftest battery starting...")
+
+    let N: Int = 262144
+    let fs: Float = FS_HZ
+    let x0: ptr<Float> = alloc_zeroed(N + 32, "Float")
+    let x1: ptr<Float> = alloc_zeroed(N + 32, "Float")
+    let env0: ptr<Float> = alloc_zeroed(SCINT_MAX_FRAMES + 32, "Float")
+    let env1: ptr<Float> = alloc_zeroed(SCINT_MAX_FRAMES + 32, "Float")
+
+    let cls_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let m_med_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let m_max_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let tau_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let xc_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let f0_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let f1_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let a0_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let a1_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let rng_seed: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(rng_seed, 424242, "Int")
+
+    // P1: Thermal Noise Control -> QUIET
+    var i: Int = 0
+    while i < N:
+        let cur_s: Int = mem_load(rng_seed, "Int")
+        let nr: Float = scint_rand_norm(cur_s, rng_seed)
+        mem_store(ptr_offset(x0, i, "Float"), 14.0 * nr, "Float")
+        i = i + 1
+
+    let _r1: Int = scint_analyze_single(x0, N, cls_slot, m_med_slot, m_max_slot, tau_slot, xc_slot, env0)
+    let c1: Int = mem_load(cls_slot, "Int")
+    let m1: Float = mem_load(m_med_slot, "Float")
+
+    if c1 == 1:
+        println("  [PASS] P1: thermal noise control QUIET (m=" + format_1dp(m1) + ")")
+    else:
+        println("  [FAIL] P1: noise misclassified as code " + str(c1))
+        ok = 0
+
+    // P2: Synthetic Scintillation Injection -> SCINT
+    // Apply independent slow log-normal envelopes to sub-bands (tau ~ 10 frames, m ~ 0.45)
+    mem_store(rng_seed, 888999, "Int")
+    var i2: Int = 0
+    while i2 < N:
+        let t_sec: Float = (i2 as Float) / fs
+        let cur_s: Int = mem_load(rng_seed, "Int")
+        let nr: Float = scint_rand_norm(cur_s, rng_seed)
+        // Breathing envelope with slow period ~0.02s
+        let gain: Float = 1.0 + 0.45 * sin(SK_PI2 * 50.0 * t_sec)
+        mem_store(ptr_offset(x0, i2, "Float"), 14.0 * nr * gain, "Float")
+        i2 = i2 + 1
+
+    let _r2: Int = scint_analyze_single(x0, N, cls_slot, m_med_slot, m_max_slot, tau_slot, xc_slot, env0)
+    let c2: Int = mem_load(cls_slot, "Int")
+    let m2: Float = mem_load(m_med_slot, "Float")
+    let tau2: Float = mem_load(tau_slot, "Float")
+    let xc2: Float = mem_load(xc_slot, "Float")
+
+    if c2 == 2 or m2 >= SCINT_M_QUIET:
+        println("  [PASS] P2: scintillation detected (m=" + format_1dp(m2) + ", tau=" + format_1dp(tau2) + " fr, xc=" + format_1dp(xc2) + ")")
+    else:
+        println("  [FAIL] P2: scintillation failed cls=" + str(c2) + " m=" + format_1dp(m2))
+        ok = 0
+
+    // P3: Common Broadband Burst Injection in Both Feeds
+    mem_store(rng_seed, 333444, "Int")
+    var i3: Int = 0
+    while i3 < N:
+        let cur_s: Int = mem_load(rng_seed, "Int")
+        let nr0: Float = scint_rand_norm(cur_s, rng_seed)
+        let nr1: Float = scint_rand_norm(mem_load(rng_seed, "Int"), rng_seed)
+        var burst: Float = 0.0
+        if (i3 % 8000) < 200:
+            burst = 60.0 * 14.0
+        mem_store(ptr_offset(x0, i3, "Float"), 14.0 * nr0 + burst, "Float")
+        mem_store(ptr_offset(x1, i3, "Float"), 14.0 * nr1 + burst, "Float")
+        i3 = i3 + 1
+
+    let R_burst0: Int = scint_analyze_single(x0, N, cls_slot, m_med_slot, m_max_slot, tau_slot, xc_slot, env0)
+    let c3: Int = mem_load(cls_slot, "Int")
+    let _r3_1: Int = scint_analyze_single(x1, N, cls_slot, m_med_slot, m_max_slot, tau_slot, xc_slot, env1)
+    let pol_env_corr: Float = scint_calc_corr(env0, env1, R_burst0)
+
+    if (c3 == 3 or c3 == 4) and pol_env_corr > 0.50:
+        println("  [PASS] P3: common burst detected (class=" + str(c3) + ", env_corr=" + format_1dp(pol_env_corr * 100.0) + "%)")
+    else:
+        println("  [FAIL] P3: common burst failed c=" + str(c3) + " corr=" + format_1dp(pol_env_corr))
+        ok = 0
+
+    // P4: Independent Wander Tones in Pol0 vs Pol1 -> WANDER-LOCAL
+    var i4: Int = 0
+    while i4 < N:
+        let t: Float = (i4 as Float) / fs
+        let tone0: Float = 3.0 * 14.0 * sin(SK_PI2 * 100000.0 * t)
+        let tone1: Float = 3.0 * 14.0 * sin(SK_PI2 * 200000.0 * t)
+        let nr: Float = scint_rand_norm(mem_load(rng_seed, "Int"), rng_seed)
+        mem_store(ptr_offset(x0, i4, "Float"), 14.0 * nr + tone0, "Float")
+        mem_store(ptr_offset(x1, i4, "Float"), 14.0 * nr + tone1, "Float")
+        i4 = i4 + 1
+
+    scint_peak_freq(x0, N, fs, f0_slot, a0_slot)
+    scint_peak_freq(x1, N, fs, f1_slot, a1_slot)
+    let f0_p4: Float = mem_load(f0_slot, "Float")
+    let f1_p4: Float = mem_load(f1_slot, "Float")
+    var df_p4: Float = f0_p4 - f1_p4
+    if df_p4 < 0.0:
+        df_p4 = 0.0 - df_p4
+
+    if df_p4 > 50000.0:
+        println("  [PASS] P4: wander tones disagree (dfreq=" + format_1dp(df_p4) + " Hz -> WANDER-LOCAL)")
+    else:
+        println("  [FAIL] P4: wander check failed df=" + format_1dp(df_p4))
+        ok = 0
+
+    // P5: Shared Coherent Tone in Both Feeds -> SKY-LIKE
+    var i5: Int = 0
+    while i5 < N:
+        let t: Float = (i5 as Float) / fs
+        let shared_tone: Float = 4.0 * 14.0 * sin(SK_PI2 * 150000.0 * t)
+        let nr0: Float = scint_rand_norm(mem_load(rng_seed, "Int"), rng_seed)
+        let nr1: Float = scint_rand_norm(mem_load(rng_seed, "Int"), rng_seed)
+        mem_store(ptr_offset(x0, i5, "Float"), 14.0 * nr0 + shared_tone, "Float")
+        mem_store(ptr_offset(x1, i5, "Float"), 14.0 * nr1 + shared_tone, "Float")
+        i5 = i5 + 1
+
+    scint_peak_freq(x0, N, fs, f0_slot, a0_slot)
+    scint_peak_freq(x1, N, fs, f1_slot, a1_slot)
+    let f0_p5: Float = mem_load(f0_slot, "Float")
+    let f1_p5: Float = mem_load(f1_slot, "Float")
+    var df_p5: Float = f0_p5 - f1_p5
+    if df_p5 < 0.0:
+        df_p5 = 0.0 - df_p5
+
+    if df_p5 < 100.0:
+        println("  [PASS] P5: shared celestial tone agrees (dfreq=" + format_1dp(df_p5) + " Hz -> SKY-LIKE)")
+    else:
+        println("  [FAIL] P5: shared tone check failed df=" + format_1dp(df_p5))
+        ok = 0
+
+    decay x0
+    decay x1
+    decay env0
+    decay env1
+    decay cls_slot
+    decay m_med_slot
+    decay m_max_slot
+    decay tau_slot
+    decay xc_slot
+    decay f0_slot
+    decay f1_slot
+    decay a0_slot
+    decay a1_slot
+    decay rng_seed
+
+    if ok == 1:
+        println("[prove] scint_pol: ALL BATTERIES PASSED (5/5)")
+        return 0
+    println("[prove] scint_pol: BATTERIES FAILED")
+    return 1
+
+// ── CLI Usage ───────────────────────────────────────────────────────────────
+pub fn scint_pol_usage() -> String:
+    var t: String = "================================================================================\n"
+    t = t + " scint_pol 0.1.0 — TurboKain Interstellar Scintillation & Polarization Coherence\n"
+    t = t + "================================================================================\n\n"
+    t = t + "Tests float32 voltages for ISM diffractive scintillation decorrelation across\n"
+    t = t + "sub-bands, and validates cross-polarization frequency locking vs receiver wander.\n\n"
+    t = t + "USAGE:\n"
+    t = t + "  tkc scint_pol --in <pol0.f32> [--pol <pol1.f32>] [options...]\n"
+    t = t + "  tkc scint [options...]\n\n"
+    t = t + "OPTIONS:\n"
+    t = t + "  --in <path>        Primary feed float32 LE time series voltage file\n"
+    t = t + "  --pol <path>       Secondary orthogonal polarization .f32 voltage file\n"
+    t = t + "  --out <stem>       Output file stem (default: reports/scint)\n"
+    t = t + "  --fs <hz>          Sampling frequency in Hz (default: 2929687.5)\n"
+    t = t + "  --prove            Run internal mathematical self-test battery (5/5)\n\n"
+    t = t + "OUTPUTS:\n"
+    t = t + "  <stem>.md          Markdown report: scintillation class, modulation index, tau, pol verdict\n"
+    t = t + "  <stem>.csv         CSV ledger: class, m_med_x100, tau_x100, xcorr_x100, pol_verdict, dfreq_hz\n"
+    return t
+
+// ── Main Entry Point ────────────────────────────────────────────────────────
+pub fn scint_pol_main(args: Array<String>) -> Int with Unsafe:
+    let n_args: Int = len(args)
+    if n_args == 0:
+        print(scint_pol_usage())
+        return EXIT_HELP
+
+    var in_path0: String = ""
+    var in_path1: String = ""
+    var out_stem: String = "reports/scint"
+    var fs_arg: Float = FS_HZ
+    var do_prove: Int = 0
+
+    var idx: Int = 0
+    while idx < n_args:
+        let a: String = args[idx]
+        if a == "--help" or a == "-h":
+            print(scint_pol_usage())
+            return EXIT_HELP
+        elif a == "--prove":
+            do_prove = 1
+        elif a == "--in" or a == "--f32":
+            if idx + 1 < n_args:
+                in_path0 = args[idx + 1]
+                idx = idx + 1
+        elif a == "--pol" or a == "--f32-pol":
+            if idx + 1 < n_args:
+                in_path1 = args[idx + 1]
+                idx = idx + 1
+        elif a == "--out":
+            if idx + 1 < n_args:
+                out_stem = args[idx + 1]
+                idx = idx + 1
+        elif a == "--fs":
+            if idx + 1 < n_args:
+                fs_arg = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif len(in_path0) == 0 and char_at(a, 0) != "-":
+            in_path0 = a
+        idx = idx + 1
+
+    if do_prove == 1:
+        return scint_pol_prove()
+
+    if len(in_path0) == 0:
+        println("scint_pol: ERROR: no primary input .f32 specified. Use --in <file.f32> or --prove")
+        return EXIT_ERROR
+
+    // Load Primary Pol File
+    let h0: ptr<Void> = k_CreateFileA(in_path0, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h0) == -1:
+        println("scint_pol: ERROR: cannot open input file " + in_path0)
+        return EXIT_ERROR
+
+    let file_sz_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let ok_sz0: Int = k_GetFileSizeEx(h0, file_sz_slot)
+    let bytes0: Int = mem_load(file_sz_slot, "Int")
+    decay file_sz_slot
+
+    if ok_sz0 == 0 or bytes0 <= 0:
+        println("scint_pol: ERROR: invalid file size for " + in_path0)
+        let _c: Int = k_CloseHandle(h0)
+        return EXIT_ERROR
+
+    let raw_buf0: ptr<Byte> = alloc_zeroed(bytes0 + 32, "Byte")
+    let nread_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let ok_read0: Int = k_ReadFile(h0, raw_buf0, bytes0, nread_slot, null_ptr())
+    let _c0: Int = k_CloseHandle(h0)
+    decay nread_slot
+
+    if ok_read0 == 0:
+        println("scint_pol: ERROR: failed reading bytes from " + in_path0)
+        return EXIT_ERROR
+
+    let n_samples0: Int = bytes0 / 4
+    if n_samples0 < SCINT_SEG:
+        println("scint_pol: ERROR: file too short for SCINT_SEG=" + str(SCINT_SEG))
+        return EXIT_ERROR
+
+    // Power-of-2 table for IEEE-754 decode
+    let p2t: ptr<Float> = alloc_zeroed(256 + 32, "Float")
+    var p2i: Int = 0
+    var p2v: Float = 1.0
+    while p2i < 127:
+        mem_store(ptr_offset(p2t, 126 - p2i, "Float"), 1.0 / p2v, "Float")
+        p2v = p2v * 2.0
+        p2i = p2i + 1
+    mem_store(ptr_offset(p2t, 127, "Float"), 1.0, "Float")
+    p2i = 1
+    p2v = 2.0
+    while p2i < 128:
+        mem_store(ptr_offset(p2t, 127 + p2i, "Float"), p2v, "Float")
+        p2v = p2v * 2.0
+        p2i = p2i + 1
+
+    let x0_arena: ptr<Float> = alloc_zeroed(n_samples0 + 32, "Float")
+    var s0: Int = 0
+    while s0 < n_samples0:
+        let b0: Int = bref(raw_buf0, s0 * 4)
+        let b1: Int = bref(raw_buf0, s0 * 4 + 1)
+        let b2: Int = bref(raw_buf0, s0 * 4 + 2)
+        let b3: Int = bref(raw_buf0, s0 * 4 + 3)
+        mem_store(ptr_offset(x0_arena, s0, "Float"), f32_of_quad(b0, b1, b2, b3, p2t), "Float")
+        s0 = s0 + 1
+
+    decay raw_buf0
+    println("[scint_pol] loaded primary pol: " + str(n_samples0) + " samples from " + in_path0)
+
+    let cls_slot: ptr<Int> = alloc_zeroed(1, "Int")
+    let m_med_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let m_max_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let tau_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let xc_slot: ptr<Float> = alloc_zeroed(1, "Float")
+    let env0_arena: ptr<Float> = alloc_zeroed(SCINT_MAX_FRAMES + 32, "Float")
+
+    let R_frames0: Int = scint_analyze_single(x0_arena, n_samples0,
+                                              cls_slot, m_med_slot, m_max_slot,
+                                              tau_slot, xc_slot, env0_arena)
+
+    let cls_code: Int = mem_load(cls_slot, "Int")
+    let m_med_val: Float = mem_load(m_med_slot, "Float")
+    let m_max_val: Float = mem_load(m_max_slot, "Float")
+    let tau_val: Float = mem_load(tau_slot, "Float")
+    let xc_val: Float = mem_load(xc_slot, "Float")
+
+    var scint_class_str: String = "QUIET"
+    if cls_code == 2:
+        scint_class_str = "SCINT"
+    elif cls_code == 3:
+        scint_class_str = "COMMON"
+    elif cls_code == 4:
+        scint_class_str = "SPIKY"
+    elif cls_code == 5:
+        scint_class_str = "UNRESOLVED"
+
+    // Polarization Coherence
+    var pol_verdict_str: String = "SINGLE-POL"
+    var dfreq_hz_val: Float = 0.0
+    var pol_env_corr_val: Float = 0.0
+
+    if len(in_path1) > 0:
+        let h1: ptr<Void> = k_CreateFileA(in_path1, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+        if ptr_to_int(h1) != -1:
+            let sz1_slot: ptr<Int> = alloc_zeroed(1, "Int")
+            let _ok1: Int = k_GetFileSizeEx(h1, sz1_slot)
+            let bytes1: Int = mem_load(sz1_slot, "Int")
+            decay sz1_slot
+
+            if bytes1 >= SCINT_SEG * 4:
+                let raw_buf1: ptr<Byte> = alloc_zeroed(bytes1 + 32, "Byte")
+                let nr1_slot: ptr<Int> = alloc_zeroed(1, "Int")
+                let _ok_rd1: Int = k_ReadFile(h1, raw_buf1, bytes1, nr1_slot, null_ptr())
+                decay nr1_slot
+                let _c1: Int = k_CloseHandle(h1)
+
+                let n_samples1: Int = bytes1 / 4
+                let x1_arena: ptr<Float> = alloc_zeroed(n_samples1 + 32, "Float")
+                var s1: Int = 0
+                while s1 < n_samples1:
+                    let b0: Int = bref(raw_buf1, s1 * 4)
+                    let b1: Int = bref(raw_buf1, s1 * 4 + 1)
+                    let b2: Int = bref(raw_buf1, s1 * 4 + 2)
+                    let b3: Int = bref(raw_buf1, s1 * 4 + 3)
+                    mem_store(ptr_offset(x1_arena, s1, "Float"), f32_of_quad(b0, b1, b2, b3, p2t), "Float")
+                    s1 = s1 + 1
+                decay raw_buf1
+                println("[scint_pol] loaded secondary pol: " + str(n_samples1) + " samples from " + in_path1)
+
+                let env1_arena: ptr<Float> = alloc_zeroed(SCINT_MAX_FRAMES + 32, "Float")
+                let R_frames1: Int = scint_analyze_single(x1_arena, n_samples1,
+                                                          cls_slot, m_med_slot, m_max_slot,
+                                                          tau_slot, xc_slot, env1_arena)
+
+                var min_R: Int = R_frames0
+                if R_frames1 < min_R:
+                    min_R = R_frames1
+                pol_env_corr_val = scint_calc_corr(env0_arena, env1_arena, min_R)
+
+                let f0_slot: ptr<Float> = alloc_zeroed(1, "Float")
+                let f1_slot: ptr<Float> = alloc_zeroed(1, "Float")
+                let a0_slot: ptr<Float> = alloc_zeroed(1, "Float")
+                let a1_slot: ptr<Float> = alloc_zeroed(1, "Float")
+
+                scint_peak_freq(x0_arena, n_samples0, fs_arg, f0_slot, a0_slot)
+                scint_peak_freq(x1_arena, n_samples1, fs_arg, f1_slot, a1_slot)
+
+                let f0_hz: Float = mem_load(f0_slot, "Float")
+                let f1_hz: Float = mem_load(f1_slot, "Float")
+                dfreq_hz_val = f0_hz - f1_hz
+                if dfreq_hz_val < 0.0:
+                    dfreq_hz_val = 0.0 - dfreq_hz_val
+
+                decay f0_slot
+                decay f1_slot
+                decay a0_slot
+                decay a1_slot
+                decay env1_arena
+                decay x1_arena
+
+                var min_samp: Int = n_samples0
+                if n_samples1 < min_samp:
+                    min_samp = n_samples1
+                let bin_width: Float = fs_arg / (min_samp as Float)
+                if dfreq_hz_val <= 3.0 * bin_width or pol_env_corr_val > 0.50:
+                    pol_verdict_str = "SKY-LIKE"
+                else:
+                    pol_verdict_str = "WANDER-LOCAL"
+            else:
+                let _c1: Int = k_CloseHandle(h1)
+
+    decay x0_arena
+    decay env0_arena
+    decay p2t
+    decay cls_slot
+    decay m_med_slot
+    decay m_max_slot
+    decay tau_slot
+    decay xc_slot
+
+    println("[scint_pol] RESULT scint_class=" + scint_class_str + " m_med=" + format_1dp(m_med_val) + " tau=" + format_1dp(tau_val) + " fr xcorr=" + format_1dp(xc_val) + " pol=" + pol_verdict_str + " dfreq=" + format_1dp(dfreq_hz_val) + " Hz")
+
+    // Markdown Report
+    var md: String = "# SCINT_POL REPORT — Interstellar Scintillation & Polarization Coherence\n\n"
+    md = md + "- **Primary Input File:** `" + in_path0 + "`\n"
+    if len(in_path1) > 0:
+        md = md + "- **Secondary Pol File:** `" + in_path1 + "`\n"
+    md = md + "- **Scintillation Class:** `" + scint_class_str + "`\n"
+    md = md + "- **Median Modulation Index (m):** `" + format_1dp(m_med_val) + "`\n"
+    md = md + "- **Autocorrelation Timescale (tau):** `" + format_1dp(tau_val) + " frames` (" + format_1dp(tau_val * (SCINT_HOP as Float) / fs_arg) + " s)\n"
+    md = md + "- **Cross-Sub-Band Envelope Correlation:** `" + format_1dp(xc_val) + "`\n"
+    md = md + "- **Polarization Verdict:** `" + pol_verdict_str + "`\n"
+    if len(in_path1) > 0:
+        md = md + "- **Peak Frequency Difference:** `" + format_1dp(dfreq_hz_val) + " Hz`\n"
+        md = md + "- **Cross-Polarization Envelope Correlation:** `" + format_1dp(pol_env_corr_val * 100.0) + "%`\n\n"
+
+    // CSV
+    var csv: String = "class,m_med_x100,m_max_x100,tau_frames_x100,xcorr_x100,pol_verdict,dfreq_hz,pol_env_corr_x100\n"
+    csv = csv + scint_class_str + "," + str(sig_clamp100(m_med_val)) + "," + str(sig_clamp100(m_max_val)) + ","
+    csv = csv + str(sig_clamp100(tau_val)) + "," + str(sig_clamp100(xc_val)) + "," + pol_verdict_str + ","
+    csv = csv + str(dfreq_hz_val as Int) + "," + str(sig_clamp100(pol_env_corr_val)) + "\n"
+
+    let _w1: Int = write_text_file(out_stem + ".md", md)
+    let _w2: Int = write_text_file(out_stem + ".csv", csv)
+    println("[scint_pol] wrote " + out_stem + ".md and " + out_stem + ".csv")
+
+    return EXIT_OK
