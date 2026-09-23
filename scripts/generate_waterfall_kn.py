@@ -75,7 +75,7 @@ const WF_TURBO_HEX: String = "{thex}"
 const WF_INFERNO_HEX: String = "{ihex}"
 
 pub fn waterfall_usage() -> String:
-    var t: String = "waterfall 0.1.0 — TurboKain High-Density Scientific Waterfall Engine\\n"
+    var t: String = "waterfall 0.2.0 — TurboKain High-Density Scientific Waterfall Engine\\n"
     t = t + "Generates multi-panel 1920x1080 diagnostic PNG dashboard with dynamic spectrum,\\n"
     t = t + "power spectrum, time envelope, spectral kurtosis, HUD telemetry, and candidate overlays.\\n\\n"
     t = t + "USAGE:\\n"
