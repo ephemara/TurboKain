@@ -34,6 +34,7 @@ F32_DETECTORS = [
     "frame_hunt",
     "xeno_scan",
     "lag_hunt",
+    "waterfall",
 ]
 
 
@@ -88,6 +89,8 @@ def _detector_args(
     if tool.out_flag:
         if tool.appends_ext:
             args += [tool.out_flag, str(out_stem)]
+        elif tool.name == "waterfall":
+            args += [tool.out_flag, str(out_stem) + ".png", "--dir", str(out_stem.parent)]
         else:
             # Literal-path tools write exactly what they are given: hand them
             # a .md path so unify (and humans) can see the table.

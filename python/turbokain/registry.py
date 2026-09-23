@@ -266,6 +266,18 @@ _TOOLS: list[Tool] = [
         fs_flag=None,
         note="Campaign report unifier: tables -> REPORT.md + evidence.csv + verdicts.json.",
     ),
+    # -- visualization ------------------------------------------------------
+    Tool(
+        "waterfall",
+        "kain/core/waterfall.exe",
+        "detector",
+        "f32",
+        selftest=("--prove",),
+        in_flag="--in",
+        out_flag="--out",
+        fs_flag="--fs",
+        note="Multi-panel 1920x1080 scientific diagnostic waterfall PNG generator.",
+    ),
     # -- suite / portable core ----------------------------------------------
     Tool(
         "core",
@@ -342,6 +354,7 @@ CORE_TOOLS: set[str] = {
     "sk_gate",
     "slice",
     "unify",
+    "waterfall",
     "xeno_scan",
     "xvm_sandbox",
 }

@@ -56,9 +56,9 @@ fn usage() -> String:
     t = t + "  jerk_track   -> jerk              lag_hunt     -> lag\n"
     t = t + "  raster_hunt  -> raster            scint_pol    -> scint, pol\n"
     t = t + "  sk_gate      -> sk                slice        -> slice\n"
-    t = t + "  stack        -> stk               xeno_scan    -> xeno\n"
-    t = t + "  xvm_sandbox  -> xvm\n\n"
-    t = t + "INSTRUMENTS (20 total):\n"
+    t = t + "  stack        -> stk               waterfall    -> wf, plot\n"
+    t = t + "  xeno_scan    -> xeno              xvm_sandbox  -> xvm\n\n"
+    t = t + "INSTRUMENTS (21 total):\n"
     t = t + "  [Ingest / Calibration]\n"
     t = t + "    slice         GUPPI .raw -> .f32 channel/pol voltage slice (2/8-bit)\n"
     t = t + "    fil_reader    Sigproc .fil -> .f32 voltage slice (8/16/32-bit)\n"
@@ -86,6 +86,8 @@ fn usage() -> String:
     t = t + "    stack         Incoherent multi-epoch ON/OFF power stacker (sqrt-N gain)\n\n"
     t = t + "  [Report]\n"
     t = t + "    unify         Campaign report unifier (tables -> REPORT.md)\n\n"
+    t = t + "  [Visualization & Diagnostics]\n"
+    t = t + "    waterfall     High-density multi-panel 1920x1080 diagnostic PNG dashboard\n\n"
     t = t + "PIPELINE PING-PONG WORKFLOW:\n"
     t = t + "  raw -> [slice] -> .f32 -> [sk/xeno] -> [fam] -> alpha baud\n"
     t = t + "      -> [bits --alpha] -> bits.bin -> [xvm] -> symbolic verdict\n"
@@ -134,6 +136,8 @@ fn tool_help(tool: String) -> Int:
         print(scint_pol_usage())
     elif tool == "unify":
         print(unify_usage())
+    elif tool == "waterfall" or tool == "wf" or tool == "plot":
+        print(waterfall_usage())
     else:
         println("core: unknown tool '" + tool + "'")
         print(usage())
@@ -230,6 +234,8 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return scint_pol_main(sub)
     elif tool == "unify":
         return unify_main(sub)
+    elif tool == "waterfall" or tool == "wf" or tool == "plot":
+        return waterfall_main(sub)
     else:
         return -999
 
@@ -244,58 +250,61 @@ fn is_suite_binary(stem: String) -> Int:
 
 fn run_prove_all() -> Int with Unsafe:
     println("================================================================================")
-    println(" TurboKain Core Suite — Unified Native Prove Battery (15 instruments)")
+    println(" TurboKain Core Suite — Unified Native Prove Battery (16 instruments)")
     println("================================================================================")
     var failed: Int = 0
 
-    println("\n[1/15] bitslice --prove")
+    println("\n[1/16] bitslice --prove")
     if bitslice_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[2/15] boxcar_bank --prove")
+    println("\n[2/16] boxcar_bank --prove")
     if boxcar_bank_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[3/15] config --prove")
+    println("\n[3/16] config --prove")
     if config_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[4/15] drift_hunt --prove")
+    println("\n[4/16] drift_hunt --prove")
     if drift_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[5/15] fil_reader --prove")
+    println("\n[5/16] fil_reader --prove")
     if fil_reader_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[6/15] frame_hunt --prove")
+    println("\n[6/16] frame_hunt --prove")
     if frame_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[7/15] lag_hunt --prove")
+    println("\n[7/16] lag_hunt --prove")
     if lag_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[8/15] xeno_scan --selftest")
+    println("\n[8/16] xeno_scan --selftest")
     if xeno_scan_main(["--selftest"]) != 0: failed = failed + 1
 
-    println("\n[9/15] xvm_sandbox --selftest")
+    println("\n[9/16] xvm_sandbox --selftest")
     if xvm_sandbox_main(["--selftest"]) != 0: failed = failed + 1
 
-    println("\n[10/15] raster_hunt --prove")
+    println("\n[10/16] raster_hunt --prove")
     if raster_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[11/15] jerk_track --prove")
+    println("\n[11/16] jerk_track --prove")
     if jerk_track_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[12/15] scint_pol --prove")
+    println("\n[12/16] scint_pol --prove")
     if scint_pol_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[13/15] unify --prove")
+    println("\n[13/16] unify --prove")
     if unify_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[14/15] stack --prove")
+    println("\n[14/16] stack --prove")
     if stack_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[15/15] h5_reader --prove")
+    println("\n[15/16] h5_reader --prove")
     if h5_reader_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[16/16] waterfall --prove")
+    if waterfall_main(["--prove"]) != 0: failed = failed + 1
 
     println("\n================================================================================")
     if failed == 0:
-        println(" Core Battery Receipt: ALL 15 PROVE BATTERIES PASSED (receipt=PASS)")
+        println(" Core Battery Receipt: ALL 16 PROVE BATTERIES PASSED (receipt=PASS)")
         println("================================================================================")
         return EXIT_OK
     else:
@@ -395,8 +404,11 @@ fn run_sweep(sub: Array<String>) -> Int with Unsafe:
     println("\n[Stage 9/9] scint_pol (Interstellar scintillation & polarization coherence)")
     let _sp: Int = scint_pol_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/scint"])
 
-    println("\n[Stage 10/10] unify (campaign report pack: REPORT.md + evidence.csv + verdicts.json)")
+    println("\n[Stage 10/11] unify (campaign report pack: REPORT.md + evidence.csv + verdicts.json)")
     let _un: Int = unify_main(["--dir", out_dir, "--target", target, "--freq-mhz", freqmhz, "--fs", fs_hz])
+
+    println("\n[Stage 11/11] waterfall (high-density 1920x1080 diagnostic dashboard PNG)")
+    let _wf: Int = waterfall_main(["--in", f32_path, "--dir", out_dir, "--out", out_dir + "/waterfall.png", "--fs", fs_hz, "--target", target, "--freq-mhz", freqmhz])
 
     println("\n================================================================================")
     println(" Sweep complete. Review tables under " + out_dir)
