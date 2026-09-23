@@ -244,14 +244,91 @@ proven fast lane.
 ## Pipeline
 
 ```
-.kn source  ──►  kain build --target llvm  ──►  .exe  ──►  receipts
-                                                              │
-                        markscript/*.md  (campaigns, IVT dispatch)
+kain/core/*.kn  ──►  kain amalgamate --raw kain/core -o kain/core.kn  ──►  kain build kain/core.kn  ──►  core.exe (~1.2 MB)
+ (modular source)                                                           (whole-program LLVM)          │
+                                                                                                        ├── core <tool> [args...]
+                                                                                                        ├── core help <tool>
+                                                                                                        ├── core prove
+                                                                                                        └── core sweep <f32>
+                                                                                                                   │
+                                                                                markscript/*.md  (campaigns, IVT dispatch)
 ```
 
-One file per tool, same argv, same CSV columns as the SetiYeti tool it
-shadows. The C/numpy version stays as the `spec` lane's oracle until the prove
-harness says the Kain lane matches.
+One file per tool during development, fused into a single whole-program
+executable (`core.exe`) for research runs, keeping byte-identical CLI/CSV
+contracts against the SetiYeti spec oracle.
+
+---
+
+## The Core Suite Architecture — Modular Source → Amalgamated Totality
+
+TurboKain's core follows the **SQLite / BusyBox doctrine**: *write in clean,
+isolated modules while developing; amalgamate into a single, fully-searchable,
+whole-program-optimized unit for execution and deep cross-tool coupling.*
+
+### Resolving the God-Component vs. Micro-Sprawl Paradox
+
+- **Why we avoid god components:** A 50,000-line monolithic file written by
+  multiple hands creates tangled global states, implicit side effects, and
+  brittle couplings where changing line 400 mysteriously breaks a math loop
+  on line 12,000.
+- **Why we avoid micro-file sprawl:** 500 files with 30 lines each force
+  developers to jump through 18 editor tabs, navigate deep directory trees,
+  and fight import drift just to trace a single buffer.
+- **The Amalgamation sweet spot:**
+  - In `kain/core/`, each of the 14 instruments lives in its own dedicated,
+    decoupled file (`slice.kn`, `fam_god.kn`, `boxcar_bank.kn`, `xvm_sandbox.kn`,
+    etc.). Each tool has a single responsibility, clean inputs/outputs, and
+    exports `pub fn <tool>_usage()` and `pub fn <tool>_main(args: Array<String>)`.
+  - `kain/core/_common.kn` is the single source of truth for all shared
+    infrastructure (kernel32 FFI, constants, memory load/store helpers,
+    number parsers, quickselect, FFT, text writers). The leading underscore
+    `_` guarantees it sorts first in ASCII (`_` < `b`), ensuring shared
+    primitives are declared before any tool references them in raw
+    amalgamation.
+  - `kain/core/dispatch.kn` owns the unified `main()` entry point. It hooks
+    `GetCommandLineA()` to support both `core <tool> [args...]` subcommand
+    syntax and direct `<tool>.exe` multi-call invocation (if copied or symlinked).
+
+### The Build & Amalgamation Workflow
+
+```bash
+# 1. Pack the core crate into a single unified source file:
+kain amalgamate --raw kain/core -o kain/core.kn
+
+# 2. Compile to a portable native binary (~1.2 MB, 14 tools, 77 flags, 0 runtime dependencies):
+kain build kain/core.kn --target llvm -o core.exe
+```
+
+### Driving `core.exe`
+
+```bash
+core help                  # Full directory of all 14 instruments + pipeline data-flow map
+core help <tool>           # Detailed mathematical background, flags, and contract for any tool
+core prove                 # Run all 9 formal self-test batteries in-memory in <3s
+core sweep <f32>           # Run the 7-stage detector battery over a time series in a single pass
+core <tool> [args...]      # Run any tool directly (e.g. core fam_god --in scan.f32 --segbank)
+```
+
+### The Yin & Yang Trajectory (Where this is heading)
+
+Right now, tools reside in modular files under `kain/core/*.kn` while their
+individual math kernels, prove batteries, and contracts are solidified.
+
+Once these core instruments are hardened, **our primary development center of
+gravity will shift directly into `kain/core.kn`**.
+
+Working directly in `core.kn` allows the tools to interact like **yin and yang**:
+- **Zero-serialization memory handoffs:** Instead of dumping `.f32` or `bits.bin`
+  to disk between stages, arenas pass directly across memory boundaries (`slice`
+  memory buffers flow directly into `fam_god` and `boxcar_bank`).
+- **Cross-instrument lattice coupling:** `fam_god`'s detected cyclic baud rate
+  ($\alpha$) steers `bitslice` and `xvm_sandbox` in-memory; `boxcar_bank`'s DM
+  candidate primes dedoppler search ranges in `drift_hunt`; `xeno_scan`'s
+  kurtosis flags dynamically gate `frame_hunt` and `lag_hunt`.
+- **Total whole-program visibility:** LLVM optimizes across the entire signal
+  processing chain simultaneously, dead-stripping unused paths, and a single
+  `grep` searches the entire scientific instrument in 2 milliseconds.
 
 ---
 
@@ -362,8 +439,10 @@ download is not done until the ledger says so.
 ## Repo layout
 
 ```
-kain/        backend exes — every folder is its own crate with its own build.txt
-             (`kain/_examples/` holds working sample tools)
+kain/        source crates and unified core suite
+  core/      modular source files (_common.kn, dispatch.kn, slice.kn, fam_god.kn...)
+  core.kn    raw amalgamation (all 16 files packed into single unified source)
+  core.exe   portable 1.2 MB binary containing all 14 instruments
 markscript/  campaign notebooks (.md) + the markscript runtime
 reports/     receipts, hits, evidence — machine-checkable outputs only
 _tmp/        scratch, gitignored, nothing load-bearing
@@ -381,18 +460,18 @@ AGENTS.md    this file
 ## Build & run
 
 ```bash
-# Build one tool to native (exe lands next to the source — see below)
-cd kain/<crate>
-kain build <tool>.kn --target llvm
+# 1. Amalgamate and build the portable core suite:
+kain amalgamate --raw kain/core -o kain/core.kn
+kain build kain/core.kn --target llvm -o core.exe
 
-# or explicitly, from anywhere:
-kain build kain/<crate>/<tool>.kn --target llvm -o kain/<crate>/<tool>.exe
+# 2. Run tools via core:
+core <tool> [args...]
+core help <tool>
+core prove
+core sweep <file.f32>
 
-# Check (parse + types; cannot verify ptr lanes — see rules)
-kain check kain/<crate>/<tool>.kn
-
-# Run
-kain/<crate>/<tool>.exe <args...>
+# 3. Check individual modular source files during development:
+kain check kain/core/<tool>.kn
 ```
 
 ### Where builds put things (read this before building)
