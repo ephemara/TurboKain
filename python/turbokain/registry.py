@@ -282,7 +282,14 @@ CORE_TOOLS: set[str] = {
 def load_registry(root: Path) -> Registry:
     reg = Registry(root=root)
     core_exe = None
-    for cand in [root / "core.exe", root / "kain" / "core.exe", root / "kain" / "core" / "core.exe"]:
+    for cand in [
+        root / "turbokain_core.exe",
+        root / "turbokain.exe",
+        root / "core.exe",
+        root / "kain" / "turbokain_core.exe",
+        root / "kain" / "core.exe",
+        root / "kain" / "core" / "core.exe",
+    ]:
         if cand.exists():
             core_exe = cand
             break

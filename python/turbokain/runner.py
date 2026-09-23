@@ -96,7 +96,14 @@ class RunResult:
 
 
 def find_core_exe(root: Path) -> Path | None:
-    for cand in [root / "core.exe", root / "kain" / "core.exe", root / "kain" / "core" / "core.exe"]:
+    for cand in [
+        root / "turbokain_core.exe",
+        root / "turbokain.exe",
+        root / "core.exe",
+        root / "kain" / "turbokain_core.exe",
+        root / "kain" / "core.exe",
+        root / "kain" / "core" / "core.exe",
+    ]:
         if cand.exists():
             return cand
     return None

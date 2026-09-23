@@ -3998,7 +3998,7 @@ fn main() -> Int with Unsafe:
     let args: Array<String> = process_user_args()
 
     // 1. If invoked as `<tool>.exe [args...]`:
-    if stem != "core" and stem != "core_main" and stem != "dispatch":
+    if stem != "core" and stem != "core_main" and stem != "dispatch" and stem != "turbokain" and stem != "turbokain_core" and stem != "turbokain-core":
         let rc: Int = run_tool_named(stem, args)
         if rc != -999:
             return rc
