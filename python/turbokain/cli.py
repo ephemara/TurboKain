@@ -213,6 +213,18 @@ def cmd_catalog(args: argparse.Namespace) -> int:
             (row.get("receipt", "") or "-")[:48],
         ])
     print(_fmt_table(["tool", "kind", "status", "prove", "receipt"], rows))
+    sky = root / "sky_catalog.tsv"
+    if sky.exists():
+        print()
+        print("SKY - sky_catalog.tsv (target | coverage | disposition):")
+        srows = []
+        for line in sky.read_text(encoding="utf-8").splitlines()[1:]:
+            if not line.strip():
+                continue
+            f = line.split("\t")
+            f += ["-"] * (12 - len(f))
+            srows.append([f[0], f[6], f[8]])
+        print(_fmt_table(["target", "coverage", "disposition"], srows))
     return 0
 
 

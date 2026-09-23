@@ -35,6 +35,7 @@ class Tool:
     in_flag: str | None = "--in"  # None => positional input
     out_flag: str | None = "--out"
     csv_flag: str | None = None
+    appends_ext: bool = False  # True => tool appends .md/.csv to a bare --out stem itself
     fs_flag: str | None = "--fs"
     note: str = ""
 
@@ -72,6 +73,16 @@ _TOOLS: list[Tool] = [
         fs_flag=None,
         note="Sigproc .fil -> .f32 (nbits 32/8/16, nifs=1).",
     ),
+    Tool(
+        "h5_reader",
+        "kain/core/h5_reader.exe",
+        "ingest",
+        "h5",
+        selftest=("--prove",),
+        out_flag="--out",
+        fs_flag=None,
+        note="BL HDF5 filterbank -> .f32 (bitshuffle/gzip, nbits 32/8/16).",
+    ),
     # -- detectors over .f32 ------------------------------------------------
     Tool(
         "sk_gate",
@@ -91,6 +102,7 @@ _TOOLS: list[Tool] = [
         "f32",
         selftest=("--prove",),
         out_flag="--out",
+        appends_ext=True,  # --out <stem> -> <stem>.md + <stem>.csv by itself
         note="DM sweep + boxcar pulse search.",
     ),
     Tool(
@@ -153,6 +165,38 @@ _TOOLS: list[Tool] = [
         csv_flag="--csv",
         note="M2 long-lag direct autocorrelation (PHASE/POWER/CADENCE/EVENT lenses).",
     ),
+    Tool(
+        "jerk_track",
+        "kain/core/jerk_track.exe",
+        "detector",
+        "f32",
+        selftest=("--prove",),
+        out_flag="--out",
+        csv_flag=None,
+        appends_ext=True,
+        note="Viterbi dynamic programming trellis for non-linear Doppler & orbital acceleration.",
+    ),
+    Tool(
+        "scint_pol",
+        "kain/core/scint_pol.exe",
+        "detector",
+        "f32",
+        selftest=("--prove",),
+        out_flag="--out",
+        csv_flag=None,
+        appends_ext=True,
+        note="Interstellar diffractive scintillation decorrelation & polarization coherence.",
+    ),
+    Tool(
+        "stack",
+        "kain/core/stack.exe",
+        "detector",
+        "f32",
+        selftest=("--prove",),
+        out_flag="--out",
+        csv_flag="--csv",
+        note="Incoherent multi-epoch ON/OFF power stacker (sqrt-N gain).",
+    ),
     # -- bridges ------------------------------------------------------------
     Tool(
         "bitslice",
@@ -163,6 +207,16 @@ _TOOLS: list[Tool] = [
         out_flag="--out",
         fs_flag="--fs",
         note=".f32 -> xvm bitstreams (sign/diff/mag).",
+    ),
+    Tool(
+        "raster_hunt",
+        "kain/core/raster_hunt.exe",
+        "payload",
+        "bits",
+        selftest=("--prove",),
+        out_flag="--out",
+        csv_flag="--csv",
+        note="2D payload framing & pictogram spatial autocorrelation (M8).",
     ),
     Tool(
         "xvm_sandbox",
@@ -198,6 +252,19 @@ _TOOLS: list[Tool] = [
         out_flag=None,
         fs_flag=None,
         note="Preset/header/CLI resolver (40 keys).",
+    ),
+    # -- report -------------------------------------------------------------
+    Tool(
+        "unify",
+        "kain/core/unify.exe",
+        "report",
+        "dir",
+        selftest=("--prove",),
+        in_flag="--dir",
+        out_flag="--out",
+        csv_flag="--csv",
+        fs_flag=None,
+        note="Campaign report unifier: tables -> REPORT.md + evidence.csv + verdicts.json.",
     ),
     # -- suite / portable core ----------------------------------------------
     Tool(
@@ -274,6 +341,7 @@ CORE_TOOLS: set[str] = {
     "lag_hunt",
     "sk_gate",
     "slice",
+    "unify",
     "xeno_scan",
     "xvm_sandbox",
 }

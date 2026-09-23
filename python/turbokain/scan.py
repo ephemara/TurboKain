@@ -86,7 +86,14 @@ def _detector_args(
     else:
         args += [str(inp)]
     if tool.out_flag:
-        args += [tool.out_flag, str(out_stem)]
+        if tool.appends_ext:
+            args += [tool.out_flag, str(out_stem)]
+        else:
+            # Literal-path tools write exactly what they are given: hand them
+            # a .md path so unify (and humans) can see the table.
+            args += [tool.out_flag, str(out_stem) + ".md"]
+    if tool.csv_flag and not tool.appends_ext:
+        args += [tool.csv_flag, str(out_stem) + ".csv"]
     if fs and tool.fs_flag:
         args += [tool.fs_flag, str(fs)]
     return args
@@ -142,34 +149,58 @@ def run_scan(plan: ScanPlan, reg: Registry, root: Path) -> dict:
     rows: list[dict] = []
 
     suffix = inp.suffix.lower()
-    is_raw = suffix in (".raw", ".fil") or suffix == ""
+    is_raw = suffix in (".raw", "")
+    is_fil = suffix == ".fil"
+    is_h5 = suffix in (".h5", ".hdf5")
     streams: list[tuple[int | None, int | None, Path]] = []
 
-    if is_raw:
-        slicer = reg.get("slice")
+    if is_raw or is_fil or is_h5:
+        if is_raw:
+            slicer_name = "slice"
+            slicer = reg.get("slice")
+        elif is_fil:
+            slicer_name = "fil_reader"
+            slicer = reg.get("fil_reader")
+        else:
+            slicer_name = "h5_reader"
+            slicer = reg.get("h5_reader")
+
         for chan in plan.chans:
             for pol in plan.pols:
                 f32 = plan.workdir / f"ch{chan}_p{pol}.f32"
-                args = _slice_args(slicer, inp, chan, pol, f32, plan.blocks)
+                if is_raw:
+                    args = _slice_args(slicer, inp, chan, pol, f32, plan.blocks)
+                elif is_fil:
+                    args = ["--in", str(inp), "--chan", str(chan), "--out", str(f32)]
+                else:
+                    args = ["--in", str(inp), "--chan", str(chan), "--pol", str(pol), "--out", str(f32)]
                 res = run_tool(
                     slicer, args, root=root, cwd=plan.workdir,
                     data_dir=plan.data_dir, timeout=plan.timeout,
                     expect_outputs=[f32],
                 )
-                log = _write_log(plan.workdir, f"slice_ch{chan}_p{pol}", res)
+                log = _write_log(plan.workdir, f"{slicer_name}_ch{chan}_p{pol}", res)
                 manifest["stages"].append(
-                    {"stage": "slice", "chan": chan, "pol": pol,
+                    {"stage": slicer_name, "chan": chan, "pol": pol,
                      "argv": res.argv, "exit": res.returncode,
                      "seconds": res.seconds, "log": str(log)}
                 )
                 rows.append(
-                    dict(chan=chan, pol=pol, tool="slice", exit=res.returncode,
+                    dict(chan=chan, pol=pol, tool=slicer_name, exit=res.returncode,
                          seconds=res.seconds, receipt=res.receipt,
                          verdicts=",".join(res.verdicts),
                          outputs=str(f32) if f32.exists() else "", log=str(log))
                 )
                 if res.returncode != 0 or not f32.exists():
                     continue
+
+                if plan.fs is None:
+                    import re
+                    m = re.search(r"fs_hz=([\d.]+)", res.stdout)
+                    if m:
+                        plan.fs = m.group(1)
+                        manifest["plan"]["fs"] = plan.fs
+
                 streams.append((chan, pol, f32))
     else:
         streams.append((None, None, inp))
@@ -208,6 +239,40 @@ def run_scan(plan: ScanPlan, reg: Registry, root: Path) -> dict:
                      verdicts=",".join(res.verdicts),
                      outputs=";".join(outs), log=str(log))
             )
+
+    # -- report stage: unify the run dir into REPORT.md + evidence.csv +
+    #    verdicts.json (auto; the Kain exe does the work, this only stages it).
+    try:
+        rep_tool = reg.get("unify")
+    except KeyError:
+        rep_tool = None
+    rep_outs = [plan.workdir / n for n in ("REPORT.md", "evidence.csv", "verdicts.json")]
+    if rep_tool is None:
+        rows.append(dict(chan="", pol="", tool="unify", exit=127,
+                         seconds=0.0, receipt=None, verdicts="UNKNOWN-TOOL",
+                         outputs="", log=""))
+    else:
+        rep_args = ["--dir", str(plan.workdir), "--target", plan.tag]
+        if plan.fs:
+            rep_args += ["--fs", str(plan.fs)]
+        rep_res = run_tool(
+            rep_tool, rep_args, root=root, cwd=plan.workdir,
+            data_dir=plan.data_dir, timeout=plan.timeout,
+            expect_outputs=rep_outs,
+        )
+        rep_log = _write_log(plan.workdir, "unify_report", rep_res)
+        rep_got = sorted(str(p) for p in rep_outs if p.exists())
+        manifest["stages"].append(
+            {"stage": "unify", "argv": rep_res.argv,
+             "exit": rep_res.returncode, "seconds": rep_res.seconds,
+             "log": str(rep_log)}
+        )
+        rows.append(
+            dict(chan="", pol="", tool="unify", exit=rep_res.returncode,
+                 seconds=rep_res.seconds, receipt=rep_res.receipt,
+                 verdicts=",".join(rep_res.verdicts),
+                 outputs=";".join(rep_got), log=str(rep_log))
+        )
 
     summary = plan.workdir / "summary.tsv"
     cols = ["chan", "pol", "tool", "exit", "seconds", "receipt", "verdicts", "outputs", "log"]
