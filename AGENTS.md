@@ -244,12 +244,12 @@ proven fast lane.
 ## Pipeline
 
 ```
-kain/core/*.kn  ──►  kain amalgamate --raw kain/core -o kain/core.kn  ──►  kain build kain/core.kn  ──►  core.exe (~1.2 MB)
+kain/core/*.kn  ──►  kain amalgamate --raw kain/core -o kain/core.kn  ──►  kain build kain/core.kn  ──►  core.exe (~1.5 MB)
  (modular source)                                                           (whole-program LLVM)          │
                                                                                                         ├── core <tool> [args...]
                                                                                                         ├── core help <tool>
                                                                                                         ├── core prove
-                                                                                                        └── core sweep <f32>
+                                                                                                        └── core sweep <input>
                                                                                                                    │
                                                                                 markscript/*.md  (campaigns, IVT dispatch)
 ```
@@ -276,9 +276,9 @@ whole-program-optimized unit for execution and deep cross-tool coupling.*
   developers to jump through 18 editor tabs, navigate deep directory trees,
   and fight import drift just to trace a single buffer.
 - **The Amalgamation sweet spot:**
-  - In `kain/core/`, each of the 14 instruments lives in its own dedicated,
-    decoupled file (`slice.kn`, `fam_god.kn`, `boxcar_bank.kn`, `xvm_sandbox.kn`,
-    etc.). Each tool has a single responsibility, clean inputs/outputs, and
+  - In `kain/core/`, each of the 21 instruments lives in its own dedicated,
+    decoupled file (`slice.kn`, `fam_god.kn`, `boxcar_bank.kn`, `waterfall.kn`,
+    `xvm_sandbox.kn`, etc.). Each tool has a single responsibility, clean inputs/outputs, and
     exports `pub fn <tool>_usage()` and `pub fn <tool>_main(args: Array<String>)`.
   - `kain/core/_common.kn` is the single source of truth for all shared
     infrastructure (kernel32 FFI, constants, memory load/store helpers,
@@ -296,18 +296,19 @@ whole-program-optimized unit for execution and deep cross-tool coupling.*
 # 1. Pack the core crate into a single unified source file:
 kain amalgamate --raw kain/core -o kain/core.kn
 
-# 2. Compile to a portable native binary (~1.2 MB, 14 tools, 77 flags, 0 runtime dependencies):
+# 2. Compile to a portable native binary (~1.5 MB, 21 tools, 108 prove checks, 0 runtime dependencies):
 kain build kain/core.kn --target llvm -o core.exe
 ```
 
 ### Driving `core.exe`
 
 ```bash
-core help                  # Full directory of all 14 instruments + pipeline data-flow map
+core help                  # Full directory of all 21 instruments + pipeline data-flow map
 core help <tool>           # Detailed mathematical background, flags, and contract for any tool
-core prove                 # Run all 9 formal self-test batteries in-memory in <3s
-core sweep <f32>           # Run the 7-stage detector battery over a time series in a single pass
+core prove                 # Run all 16 formal self-test batteries in-memory in <3.5s
+core sweep <input>         # Run the 11-stage detector + diagnostic battery in a single pass
 core <tool> [args...]      # Run any tool directly (e.g. core fam_god --in scan.f32 --segbank)
+core waterfall --in <f32>  # Generate 1920x1080 diagnostic PNG dashboard directly via Kain
 ```
 
 ### The Yin & Yang Trajectory (Where this is heading)
@@ -458,15 +459,16 @@ download is not done until the ledger says so.
 
 ```
 kain/        source crates and unified core suite
-  core/      modular source files (_common.kn, dispatch.kn, slice.kn, fam_god.kn...)
-  core.kn    raw amalgamation (all 16 files packed into single unified source)
-  core.exe   portable 1.2 MB binary containing all 14 instruments
+  core/      modular source files (_common.kn, dispatch.kn, slice.kn, waterfall.kn...)
+  core.kn    raw amalgamation (all 23 files packed into single unified source)
+  core.exe   portable 1.5 MB binary containing all 21 instruments
 markscript/  campaign notebooks (.md) + the markscript runtime
 reports/     receipts, hits, evidence — machine-checkable outputs only
 _tmp/        scratch, gitignored, nothing load-bearing
 docs/        spec.md + the vendored Kain baseline under docs/kain/
+  waterfall_examples/  gallery of 1920x1080 diagnostic PNG dashboards (drifting carrier, pulsar, RFI, FRB, sky)
 _objective/  the mission (objective_1.md)
-scripts/     Kain helpers (memlog.kn — append a memory.tsv row)
+scripts/     Kain helpers (memlog.kn — append a memory.tsv row; release.py — automated GitHub releases)
 python/      Python orchestration layer (tk driver — wrap exes, unified scans)
 memory.tsv   append-only change log — EVERY file change gets a row
 catalog.tsv  TurboKain tool/artifact ledger (see the Ledgers section above)
@@ -715,6 +717,45 @@ Baseline scaffolded. SetiYeti remains the truth. A Python orchestration layer
 scan / doctor / catalog), stdlib-only. First targets, in order: boxcar/fold
 sieve → power sieve → evidence journal → the MarkScript campaign layer. See
 `docs/spec.md`.
+
+---
+
+## Visual Diagnostics & Multimodal Analysis (`waterfall.kn`)
+
+AI agents operating in this repository must not rely solely on scalar CSV/TSV numbers.
+Numerical tables often mask subtle multi-carrier combs, transient flares, drifting trajectories,
+and RFI contamination that become immediately obvious in a high-resolution 2D dynamic spectrum.
+
+**TurboKain includes `waterfall.kn` (Tool 16)** — a high-density, multi-panel 1920×1080 Full HD
+PNG generator built natively in Kain. It unifies:
+1. **Panel 1: Integrated Power Spectrum $P(f)$** — Mean bandpass with median noise baseline,
+   detection threshold, and peak callout pins (aligned pixel-for-pixel with the waterfall).
+2. **Panel 2: Dynamic Waterfall Heatmap $P(t, f)$** — 1024 frequency bins × 445 time steps in
+   NASA `turbo` or Astronomical `inferno` colormap, with overlaid real candidate drift tracking vectors.
+3. **Panel 3: Time-Domain Total Power Envelope $P(t)$** — Auto-scaled power variance vs. time
+   tracking impulsive bursts, flares, and baseline stability with exact dB bounds.
+4. **Panel 4: Spectral Kurtosis $SK(f)$** — Channel-by-channel kurtosis with $SK = 1.0$ Gaussian
+   baseline and $\pm 0.2$ threshold boundaries highlighting non-Gaussian RFI.
+5. **Panel 5–8: Scientific Telemetry HUD** — Provenance, sample count, dynamic range, 10-instrument
+   pipeline matrix (`[SK_GATE]`, `[XENO_SCAN]`, `[BOXCAR_BANK]`, `[DRIFT_HUNT]`, `[JERK_TRACK]`,
+   `[FRAME_HUNT]`, `[LAG_HUNT]`, `[FAM_GOD]`, `[SCINT_POL]`, `[CADENCE]`), live candidate hit log,
+   and calibrated dB colorbar scale.
+
+### How Agents Must Use This Tool
+
+- **Generate during sweeps:** `tkc sweep <input>` runs `waterfall` automatically as Stage 11/11,
+  saving `<out-dir>/waterfall.png`.
+- **Run standalone:** `tkc waterfall --in <file.f32> --dir <sweep_dir> --out <file.png> [--cmap turbo|inferno]`
+- **Inspect visually with `read`:** After generating a waterfall, agents should use the `read` tool
+  to load the PNG directly into their multimodal context.
+- **What to analyze visually:**
+  - *Drift Trajectories:* Check if a signal exhibits linear Doppler drift ($\dot{f} \ne 0$) or is a
+    fixed terrestrial clock harmonic ($\dot{f} = 0.0$ Hz/s).
+  - *RFI Screening:* Cross-check $SK(f)$ dips and spikes against $P(f)$ peaks. A Gaussian astronomical
+    carrier keeps $SK \approx 1.0$; an intermittent terrestrial transmitter spikes $SK > 1.5$.
+  - *Impulsive Bursts:* Inspect $P(t)$ for periodic pulsar trains or single dispersed FRB sweeps.
+  - *Scientific Honesty:* In pure noise, `waterfall.kn` will draw no artificial drift lines and
+    report an honest negative (`NO DETECTIONS ABOVE FORMAL GATE | ALL CHANNELS CLEAN`). Never fake a hit.
 
 ---
 
