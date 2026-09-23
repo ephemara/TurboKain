@@ -23,6 +23,7 @@
 //   xvm_sandbox   Turing/post-Shannon symbolic execution sandbox
 //   cadence_pair  ON/OFF cadence corroboration gate
 //   config        Header/CLI/geometry parameter resolver
+//   stack         Incoherent multi-epoch ON/OFF power stacker
 // ============================================================================
 
 use std::process
@@ -42,7 +43,7 @@ fn usage() -> String:
     t = t + "USAGE:\n"
     t = t + "  tkc <tool> [args...]             Run any instrument directly (shorthands work)\n"
     t = t + "  tkc help <tool>                  Detailed CLI help for a specific tool\n"
-    t = t + "  tkc prove                        Run all 12 formal prove batteries in-memory\n"
+    t = t + "  tkc prove                        Run all 14 formal prove batteries in-memory\n"
     t = t + "  tkc sweep <f32> [options...]     Run full detector battery over a time series\n\n"
     t = t + "BINARY ALIASES:  tkc / core / turbokain_core / turbokain are all identical\n\n"
     t = t + "TOOL SHORTHANDS:\n"
@@ -54,8 +55,9 @@ fn usage() -> String:
     t = t + "  lag_hunt     -> lag               raster_hunt  -> raster\n"
     t = t + "  scint_pol    -> scint, pol        sk_gate      -> sk\n"
     t = t + "  xeno_scan    -> xeno              xvm_sandbox  -> xvm\n"
-    t = t + "  slice        -> slice\n\n"
-    t = t + "INSTRUMENTS (17 total):\n"
+    t = t + "  slice        -> slice\n"
+    t = t + "  stack        -> stk\n\n"
+    t = t + "INSTRUMENTS (19 total):\n"
     t = t + "  [Ingest / Calibration]\n"
     t = t + "    slice         GUPPI .raw -> .f32 channel/pol voltage slice (2/8-bit)\n"
     t = t + "    fil_reader    Sigproc .fil -> .f32 voltage slice (8/16/32-bit)\n"
@@ -76,7 +78,12 @@ fn usage() -> String:
     t = t + "    bitslice      .f32 voltage -> alien-machine bitstreams (sign/diff/mag)\n"
     t = t + "    raster_hunt   2D payload framing & pictogram spatial autocorrelation (M8)\n"
     t = t + "    xvm_sandbox   Turing/subleq/cellular automata execution sandbox\n"
-    t = t + "    cadence_pair  ON/OFF cadence corroboration gate (WATCH logic)\n\n"
+    t = t + "    cadence_pair  ON/OFF cadence corroboration gate (WATCH logic)\n"
+    t = t + "\n"
+    t = t + "  [Integration]\n"
+    t = t + "    stack         Incoherent multi-epoch ON/OFF power stacker (sqrt-N gain)\n\n"
+    t = t + "  [Report]\n"
+    t = t + "    unify         Campaign report unifier (tables -> REPORT.md)\n\n"
     t = t + "PIPELINE PING-PONG WORKFLOW:\n"
     t = t + "  raw -> [slice] -> .f32 -> [sk/xeno] -> [fam] -> alpha baud\n"
     t = t + "      -> [bits --alpha] -> bits.bin -> [xvm] -> symbolic verdict\n"
@@ -113,12 +120,16 @@ fn tool_help(tool: String) -> Int:
         print(cadence_pair_usage())
     elif tool == "config" or tool == "cfg":
         print(config_usage())
+    elif tool == "stack" or tool == "stk":
+        print(stack_usage())
     elif tool == "jerk_track" or tool == "jerk":
         print(jerk_track_usage())
     elif tool == "raster_hunt" or tool == "raster":
         print(raster_hunt_usage())
     elif tool == "scint_pol" or tool == "scint" or tool == "pol":
         print(scint_pol_usage())
+    elif tool == "unify":
+        print(unify_usage())
     else:
         println("core: unknown tool '" + tool + "'")
         print(usage())
@@ -183,6 +194,8 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return cadence_pair_main(sub)
     elif tool == "config" or tool == "cfg":
         return config_main(sub)
+    elif tool == "stack" or tool == "stk":
+        return stack_main(sub)
     elif tool == "drift_hunt" or tool == "drift":
         return drift_hunt_main(sub)
     elif tool == "fam_god" or tool == "fam":
@@ -209,6 +222,8 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return raster_hunt_main(sub)
     elif tool == "scint_pol" or tool == "scint" or tool == "pol":
         return scint_pol_main(sub)
+    elif tool == "unify":
+        return unify_main(sub)
     else:
         return -999
 
@@ -223,49 +238,55 @@ fn is_suite_binary(stem: String) -> Int:
 
 fn run_prove_all() -> Int with Unsafe:
     println("================================================================================")
-    println(" TurboKain Core Suite — Unified Native Prove Battery (12 instruments)")
+    println(" TurboKain Core Suite — Unified Native Prove Battery (14 instruments)")
     println("================================================================================")
     var failed: Int = 0
 
-    println("\n[1/12] bitslice --prove")
+    println("\n[1/14] bitslice --prove")
     if bitslice_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[2/12] boxcar_bank --prove")
+    println("\n[2/14] boxcar_bank --prove")
     if boxcar_bank_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[3/12] config --prove")
+    println("\n[3/14] config --prove")
     if config_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[4/12] drift_hunt --prove")
+    println("\n[4/14] drift_hunt --prove")
     if drift_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[5/12] fil_reader --prove")
+    println("\n[5/14] fil_reader --prove")
     if fil_reader_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[6/12] frame_hunt --prove")
+    println("\n[6/14] frame_hunt --prove")
     if frame_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[7/12] lag_hunt --prove")
+    println("\n[7/14] lag_hunt --prove")
     if lag_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[8/12] xeno_scan --selftest")
+    println("\n[8/14] xeno_scan --selftest")
     if xeno_scan_main(["--selftest"]) != 0: failed = failed + 1
 
-    println("\n[9/12] xvm_sandbox --selftest")
+    println("\n[9/14] xvm_sandbox --selftest")
     if xvm_sandbox_main(["--selftest"]) != 0: failed = failed + 1
 
-    println("\n[10/12] raster_hunt --prove")
+    println("\n[10/14] raster_hunt --prove")
     if raster_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[11/12] jerk_track --prove")
+    println("\n[11/14] jerk_track --prove")
     if jerk_track_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[12/12] scint_pol --prove")
+    println("\n[12/14] scint_pol --prove")
     if scint_pol_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[13/14] unify --prove")
+    if unify_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[14/14] stack --prove")
+    if stack_main(["--prove"]) != 0: failed = failed + 1
 
     println("\n================================================================================")
     if failed == 0:
-        println(" Core Battery Receipt: ALL 12 PROVE BATTERIES PASSED (receipt=PASS)")
+        println(" Core Battery Receipt: ALL 14 PROVE BATTERIES PASSED (receipt=PASS)")
         println("================================================================================")
         return EXIT_OK
     else:

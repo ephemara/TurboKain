@@ -1,7 +1,7 @@
 // -- KAIN RAW AMALGAMATION -- core ----------------------------------------------------------
 // kind:       directory
 // contents:   source
-// structure:  19 files | 19 modules
+// structure:  21 files | 21 modules
 //
 // -- PUBLIC INTERFACE DIRECTORY -----------------------------------------------
 //
@@ -3727,6 +3727,7 @@ pub fn config_main(args: Array<String>) -> Int:
 //   xvm_sandbox   Turing/post-Shannon symbolic execution sandbox
 //   cadence_pair  ON/OFF cadence corroboration gate
 //   config        Header/CLI/geometry parameter resolver
+//   stack         Incoherent multi-epoch ON/OFF power stacker
 // ============================================================================
 
 use std::process
@@ -3746,7 +3747,7 @@ fn usage() -> String:
     t = t + "USAGE:\n"
     t = t + "  tkc <tool> [args...]             Run any instrument directly (shorthands work)\n"
     t = t + "  tkc help <tool>                  Detailed CLI help for a specific tool\n"
-    t = t + "  tkc prove                        Run all 12 formal prove batteries in-memory\n"
+    t = t + "  tkc prove                        Run all 14 formal prove batteries in-memory\n"
     t = t + "  tkc sweep <f32> [options...]     Run full detector battery over a time series\n\n"
     t = t + "BINARY ALIASES:  tkc / core / turbokain_core / turbokain are all identical\n\n"
     t = t + "TOOL SHORTHANDS:\n"
@@ -3758,8 +3759,9 @@ fn usage() -> String:
     t = t + "  lag_hunt     -> lag               raster_hunt  -> raster\n"
     t = t + "  scint_pol    -> scint, pol        sk_gate      -> sk\n"
     t = t + "  xeno_scan    -> xeno              xvm_sandbox  -> xvm\n"
-    t = t + "  slice        -> slice\n\n"
-    t = t + "INSTRUMENTS (17 total):\n"
+    t = t + "  slice        -> slice\n"
+    t = t + "  stack        -> stk\n\n"
+    t = t + "INSTRUMENTS (19 total):\n"
     t = t + "  [Ingest / Calibration]\n"
     t = t + "    slice         GUPPI .raw -> .f32 channel/pol voltage slice (2/8-bit)\n"
     t = t + "    fil_reader    Sigproc .fil -> .f32 voltage slice (8/16/32-bit)\n"
@@ -3780,7 +3782,12 @@ fn usage() -> String:
     t = t + "    bitslice      .f32 voltage -> alien-machine bitstreams (sign/diff/mag)\n"
     t = t + "    raster_hunt   2D payload framing & pictogram spatial autocorrelation (M8)\n"
     t = t + "    xvm_sandbox   Turing/subleq/cellular automata execution sandbox\n"
-    t = t + "    cadence_pair  ON/OFF cadence corroboration gate (WATCH logic)\n\n"
+    t = t + "    cadence_pair  ON/OFF cadence corroboration gate (WATCH logic)\n"
+    t = t + "\n"
+    t = t + "  [Integration]\n"
+    t = t + "    stack         Incoherent multi-epoch ON/OFF power stacker (sqrt-N gain)\n\n"
+    t = t + "  [Report]\n"
+    t = t + "    unify         Campaign report unifier (tables -> REPORT.md)\n\n"
     t = t + "PIPELINE PING-PONG WORKFLOW:\n"
     t = t + "  raw -> [slice] -> .f32 -> [sk/xeno] -> [fam] -> alpha baud\n"
     t = t + "      -> [bits --alpha] -> bits.bin -> [xvm] -> symbolic verdict\n"
@@ -3817,12 +3824,16 @@ fn tool_help(tool: String) -> Int:
         print(cadence_pair_usage())
     elif tool == "config" or tool == "cfg":
         print(config_usage())
+    elif tool == "stack" or tool == "stk":
+        print(stack_usage())
     elif tool == "jerk_track" or tool == "jerk":
         print(jerk_track_usage())
     elif tool == "raster_hunt" or tool == "raster":
         print(raster_hunt_usage())
     elif tool == "scint_pol" or tool == "scint" or tool == "pol":
         print(scint_pol_usage())
+    elif tool == "unify":
+        print(unify_usage())
     else:
         println("core: unknown tool '" + tool + "'")
         print(usage())
@@ -3887,6 +3898,8 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return cadence_pair_main(sub)
     elif tool == "config" or tool == "cfg":
         return config_main(sub)
+    elif tool == "stack" or tool == "stk":
+        return stack_main(sub)
     elif tool == "drift_hunt" or tool == "drift":
         return drift_hunt_main(sub)
     elif tool == "fam_god" or tool == "fam":
@@ -3913,6 +3926,8 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return raster_hunt_main(sub)
     elif tool == "scint_pol" or tool == "scint" or tool == "pol":
         return scint_pol_main(sub)
+    elif tool == "unify":
+        return unify_main(sub)
     else:
         return -999
 
@@ -3927,49 +3942,55 @@ fn is_suite_binary(stem: String) -> Int:
 
 fn run_prove_all() -> Int with Unsafe:
     println("================================================================================")
-    println(" TurboKain Core Suite — Unified Native Prove Battery (12 instruments)")
+    println(" TurboKain Core Suite — Unified Native Prove Battery (14 instruments)")
     println("================================================================================")
     var failed: Int = 0
 
-    println("\n[1/12] bitslice --prove")
+    println("\n[1/14] bitslice --prove")
     if bitslice_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[2/12] boxcar_bank --prove")
+    println("\n[2/14] boxcar_bank --prove")
     if boxcar_bank_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[3/12] config --prove")
+    println("\n[3/14] config --prove")
     if config_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[4/12] drift_hunt --prove")
+    println("\n[4/14] drift_hunt --prove")
     if drift_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[5/12] fil_reader --prove")
+    println("\n[5/14] fil_reader --prove")
     if fil_reader_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[6/12] frame_hunt --prove")
+    println("\n[6/14] frame_hunt --prove")
     if frame_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[7/12] lag_hunt --prove")
+    println("\n[7/14] lag_hunt --prove")
     if lag_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[8/12] xeno_scan --selftest")
+    println("\n[8/14] xeno_scan --selftest")
     if xeno_scan_main(["--selftest"]) != 0: failed = failed + 1
 
-    println("\n[9/12] xvm_sandbox --selftest")
+    println("\n[9/14] xvm_sandbox --selftest")
     if xvm_sandbox_main(["--selftest"]) != 0: failed = failed + 1
 
-    println("\n[10/12] raster_hunt --prove")
+    println("\n[10/14] raster_hunt --prove")
     if raster_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[11/12] jerk_track --prove")
+    println("\n[11/14] jerk_track --prove")
     if jerk_track_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[12/12] scint_pol --prove")
+    println("\n[12/14] scint_pol --prove")
     if scint_pol_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[13/14] unify --prove")
+    if unify_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[14/14] stack --prove")
+    if stack_main(["--prove"]) != 0: failed = failed + 1
 
     println("\n================================================================================")
     if failed == 0:
-        println(" Core Battery Receipt: ALL 12 PROVE BATTERIES PASSED (receipt=PASS)")
+        println(" Core Battery Receipt: ALL 14 PROVE BATTERIES PASSED (receipt=PASS)")
         println("================================================================================")
         return EXIT_OK
     else:
@@ -13934,6 +13955,2052 @@ pub fn slice_main(args: Array<String>) -> Int with Unsafe:
     if json == 1:
         println("{\"tool\": \"slice\", \"version\": \"0.3.0\", \"blocks\": " + str(sliced) + ", \"samples\": " + str(total_samples) + ", \"chan\": " + str(want_chan) + ", \"pol\": " + str(want_pol) + ", \"verdict\": \"" + verdict + "\"}")
     println("receipt=PASS sliced=" + str(sliced) + " samples=" + str(total_samples))
+    return EXIT_OK
+
+// ============================================================================
+// stack.kn
+// ============================================================================
+// ============================================================================
+// stack.kn — TurboKain 19: incoherent multi-epoch power spectra stacker
+// (ON/OFF differencing, sqrt-Neff integration gain)
+//
+// Method (kept exact per spec):
+//   1. Per file: STFT waterfall (Hann + radix-2 sk_fft rows, drift_hunt
+//      shapes copied inline — no cross-import, per the small-ptr-callee
+//      crash workaround), hop = nfft (non-overlapping), power bins
+//      0..nfft/2. Each file time-averages to a mean spectrum m_i[f].
+//      The full waterfall is never stored: power accumulates per segment
+//      straight into m_i (streaming, O(nch) per file).
+//   2. ON-stack M_on[f] = mean over ON files; OFF-stack M_off[f] = mean
+//      over OFF files. >=1 ON required; OFF optional (absent -> whiten
+//      M_on directly and note it in the report).
+//   3. Difference D[f] = M_on[f] - M_off[f]. Whiten: running-median w=101
+//      background over D (stack_med100 converge: spec = insertion-sort /
+//      fast = quickselect, drift_hunt pattern — identical order statistic
+//      n/2, lanes agree by construction), MAD over residuals with 1.4826
+//      scale + epsilon floor. z[f] = (D[f]-bg[f])/scale * sqrt(Neff),
+//      Neff = (N_on*N_off)/(N_on+N_off), else N_on. The sqrt(N) gain.
+//   4. Inter-epoch drift trials: integer bin shifts -drift-bins..+drift-bins
+//      applied to each ON spectrum before averaging (shift-and-add across
+//      epochs); per-bin best z across shifts wins (best shift reported).
+//      Edge bins are always in range: evaluated bins sit drift-bins+4 from
+//      the edge, so f+s never leaves [4, nch-4).
+//   5. Detection: edge-mask drift-bins+4, NMS +-3 bins, top-64, thresh 6.0.
+//      Tables carry scaled ints only (freq_hz exact, sigma_x100, shift_bins)
+//      because str(Float) truncates in this lane.
+//   6. Law: stack_hit_ok gates every emitted hit (sig_x100 >= thresh_x100).
+//
+// Contract: ON/OFF .f32 voltage slices in -> stack.md + stack.csv out.
+// Exit codes: 0 searched, 1 help OR --prove FAIL, 2 error. No hardcoded data
+// paths: --data-dir / $SETIYETI_DATA only. Every detector takes --fs.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+// ── kernel32 file API (drift_hunt verbatim — no fs bridge for bulk) ─────────
+use _common::k_CreateFileA
+use _common::k_ReadFile
+use _common::k_GetFileSizeEx
+use _common::k_CloseHandle
+use _common::k_GetLastError
+use _common::null_ptr
+use _common::GEN_READ
+use _common::OPEN_EXISTING
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::FS_HZ
+use _common::SK_PI2
+use _common::bref
+use _common::parse_int_text
+use _common::parse_float_text
+use _common::find_from
+use _common::f32_of_quad
+use _common::sk_fft
+use _common::quickselect_k
+use _common::sig_clamp100
+
+// ── Geometry (data, not magic — argv overridable, see usage) ────────────────
+const STACK_F0_MHZ: Float = 1400.0
+const STACK_NFFT_DEFAULT: Int = 4096
+const STACK_NFFT_MIN: Int = 256
+const STACK_NFFT_MAX: Int = 16384
+const STACK_THRESH_DEFAULT: Float = 6.0
+const STACK_TOPK_DEFAULT: Int = 64
+const STACK_DBINS_DEFAULT: Int = 3
+const STACK_DBINS_MAX: Int = 16
+const STACK_WHITEN_W: Int = 101
+const STACK_MAX_N_DEFAULT: Int = 1048576
+const STACK_MAX_N_HARD: Int = 4194304
+const STACK_HIT_CAP: Int = 2048
+
+// ── Laws: gates the report must satisfy ─────────────────────────────────────
+law stack_hit_ok(sig_x100: Int, thresh_x100: Int) -> Bool:
+    return sig_x100 >= thresh_x100
+
+// ── Running-median converge (drift_hunt pattern, stack-owned names) ─────────
+fn stack_med_spec100(win: ptr<Float>, scratch: ptr<Float>, n: Int) -> Int:
+    var i: Int = 0
+    while i < n:
+        mem_store(ptr_offset(scratch, i, "Float"), mem_load(ptr_offset(win, i, "Float"), "Float"), "Float")
+        i = i + 1
+    var a: Int = 1
+    while a < n:
+        let key: Float = mem_load(ptr_offset(scratch, a, "Float"), "Float")
+        var b: Int = a - 1
+        var moved: Int = 0
+        while b >= 0:
+            if mem_load(ptr_offset(scratch, b, "Float"), "Float") > key:
+                mem_store(ptr_offset(scratch, b + 1, "Float"), mem_load(ptr_offset(scratch, b, "Float"), "Float"), "Float")
+                b = b - 1
+                moved = 1
+            else:
+                break
+        if moved == 1:
+            mem_store(ptr_offset(scratch, b + 1, "Float"), key, "Float")
+        a = a + 1
+    return (mem_load(ptr_offset(scratch, n / 2, "Float"), "Float") * 100.0) as Int
+
+fn stack_med_fast100(win: ptr<Float>, scratch: ptr<Float>, n: Int) -> Int:
+    var i: Int = 0
+    while i < n:
+        mem_store(ptr_offset(scratch, i, "Float"), mem_load(ptr_offset(win, i, "Float"), "Float"), "Float")
+        i = i + 1
+    return (quickselect_k(scratch, n, n / 2) * 100.0) as Int
+
+converge stack_med100(win: ptr<Float>, scratch: ptr<Float>, n: Int) -> Int:
+    spec exact:
+        return stack_med_spec100(win, scratch, n)
+    fast quick when capability("cpu.x86.avx2"):
+        return stack_med_fast100(win, scratch, n)
+
+// ── Core: mean spectra -> drift-trial ON/OFF stack hits ─────────────────────
+// specs holds (non+noff) mean spectra row-major, ON rows first. hbin/hsh/hsig
+// hold up to cap hits; zbest/shbest (caller arenas, nch) keep the per-bin
+// best scaled-z and winning shift across drift trials. Returns hit count.
+fn stk_detect(specs: ptr<Float>, non: Int, noff: Int, nch: Int, dbins: Int, thresh: Float, hbin: ptr<Int>, hsh: ptr<Int>, hsig: ptr<Int>, cap: Int, zbest: ptr<Float>, shbest: ptr<Int>) -> Int with Unsafe:
+    let half_w: Int = STACK_WHITEN_W / 2
+    let mut mon: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut mof: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut ddv: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut bgv: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut winv: ptr<Float> = alloc_zeroed(STACK_WHITEN_W + 32, "Float")
+    let mut scrv: ptr<Float> = alloc_zeroed(STACK_WHITEN_W + 32, "Float")
+    let mut resv: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut scr2: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut taken: ptr<Int> = alloc_zeroed(nch + 32, "Int")
+    var f: Int = 0
+    while f < nch:
+        mem_store(ptr_offset(mof, f, "Float"), 0.0, "Float")
+        f = f + 1
+    if noff > 0:
+        f = 0
+        while f < nch:
+            var acc: Float = 0.0
+            var r: Int = 0
+            while r < noff:
+                acc = acc + mem_load(ptr_offset(specs, (non + r) * nch + f, "Float"), "Float")
+                r = r + 1
+            mem_store(ptr_offset(mof, f, "Float"), acc / (noff as Float), "Float")
+            f = f + 1
+    var neff: Float = non as Float
+    if noff > 0:
+        neff = ((non * noff) as Float) / ((non + noff) as Float)
+    let gain: Float = sqrt(neff)
+    f = 0
+    while f < nch:
+        mem_store(ptr_offset(zbest, f, "Float"), 0.0 - 1000000000.0, "Float")
+        mem_store(ptr_offset(shbest, f, "Int"), 0, "Int")
+        f = f + 1
+    var s: Int = 0 - dbins
+    while s <= dbins:
+        f = 0
+        while f < nch:
+            var acc2: Float = 0.0
+            var r2: Int = 0
+            while r2 < non:
+                var src: Int = f + s
+                if src < 0:
+                    src = 0
+                if src >= nch:
+                    src = nch - 1
+                acc2 = acc2 + mem_load(ptr_offset(specs, r2 * nch + src, "Float"), "Float")
+                r2 = r2 + 1
+            mem_store(ptr_offset(mon, f, "Float"), acc2 / (non as Float), "Float")
+            f = f + 1
+        f = 0
+        while f < nch:
+            var d: Float = mem_load(ptr_offset(mon, f, "Float"), "Float")
+            if noff > 0:
+                d = d - mem_load(ptr_offset(mof, f, "Float"), "Float")
+            mem_store(ptr_offset(ddv, f, "Float"), d, "Float")
+            f = f + 1
+        f = 0
+        while f < nch:
+            var w0: Int = f - half_w
+            if w0 < 0:
+                w0 = 0
+            var w1: Int = f + half_w
+            if w1 >= nch:
+                w1 = nch - 1
+            let wn: Int = w1 - w0 + 1
+            var wk: Int = 0
+            while wk < wn:
+                mem_store(ptr_offset(winv, wk, "Float"), mem_load(ptr_offset(ddv, w0 + wk, "Float"), "Float"), "Float")
+                wk = wk + 1
+            let m100: Int = stack_med100(winv, scrv, wn)
+            mem_store(ptr_offset(bgv, f, "Float"), (m100 as Float) / 100.0, "Float")
+            f = f + 1
+        f = 0
+        while f < nch:
+            var rd: Float = mem_load(ptr_offset(ddv, f, "Float"), "Float") - mem_load(ptr_offset(bgv, f, "Float"), "Float")
+            if rd < 0.0:
+                rd = 0.0 - rd
+            mem_store(ptr_offset(resv, f, "Float"), rd, "Float")
+            f = f + 1
+        let mad100: Int = stack_med100(resv, scr2, nch)
+        var scale: Float = 1.4826 * ((mad100 as Float) / 100.0)
+        if scale <= 0.0:
+            scale = 0.000000001
+        f = 0
+        while f < nch:
+            let zv: Float = (mem_load(ptr_offset(ddv, f, "Float"), "Float") - mem_load(ptr_offset(bgv, f, "Float"), "Float")) / scale * gain
+            if zv > mem_load(ptr_offset(zbest, f, "Float"), "Float"):
+                mem_store(ptr_offset(zbest, f, "Float"), zv, "Float")
+                mem_store(ptr_offset(shbest, f, "Int"), s, "Int")
+            f = f + 1
+        s = s + 1
+    let m: Int = dbins + 4
+    f = 0
+    while f < m:
+        mem_store(ptr_offset(zbest, f, "Float"), 0.0 - 1000000000.0, "Float")
+        f = f + 1
+    f = nch - m
+    while f < nch:
+        mem_store(ptr_offset(zbest, f, "Float"), 0.0 - 1000000000.0, "Float")
+        f = f + 1
+    f = 0
+    while f < nch:
+        mem_store(ptr_offset(taken, f, "Int"), 0, "Int")
+        f = f + 1
+    var nhits: Int = 0
+    var found: Int = 0
+    while found < cap:
+        var bk: Int = -1
+        var bz: Float = thresh
+        f = 0
+        while f < nch:
+            if mem_load(ptr_offset(taken, f, "Int"), "Int") == 0:
+                if mem_load(ptr_offset(zbest, f, "Float"), "Float") >= bz:
+                    bz = mem_load(ptr_offset(zbest, f, "Float"), "Float")
+                    bk = f
+            f = f + 1
+        if bk < 0:
+            break
+        mem_store(ptr_offset(hbin, nhits, "Int"), bk, "Int")
+        mem_store(ptr_offset(hsh, nhits, "Int"), mem_load(ptr_offset(shbest, bk, "Int"), "Int"), "Int")
+        mem_store(ptr_offset(hsig, nhits, "Int"), sig_clamp100(bz), "Int")
+        nhits = nhits + 1
+        var s0: Int = bk - 3
+        if s0 < 0:
+            s0 = 0
+        var s1: Int = bk + 3
+        if s1 >= nch:
+            s1 = nch - 1
+        var sk: Int = s0
+        while sk <= s1:
+            mem_store(ptr_offset(taken, sk, "Int"), 1, "Int")
+            sk = sk + 1
+        found = found + 1
+    decay mon
+    decay mof
+    decay ddv
+    decay bgv
+    decay winv
+    decay scrv
+    decay resv
+    decay scr2
+    decay taken
+    return nhits
+
+pub fn stack_usage() -> String:
+    var t: String = "stack 0.1.0 — TurboKain incoherent multi-epoch ON/OFF power stacker\n"
+    t = t + "Per-file STFT mean spectra (Hann + radix-2 rows, hop=nfft), ON-mean minus\n"
+    t = t + "OFF-mean, median-whiten (w=101), MAD z * sqrt(Neff) integration gain,\n"
+    t = t + "integer shift-and-add drift trials across epochs, 6-sigma gate, NMS +-3.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  stack --on a.f32,b.f32,... --off c.f32,d.f32,... [--nfft 4096]\n"
+    t = t + "        [--thresh 6] [--fs 2929687.5] [--f0-mhz 1400] [--drift-bins 3]\n"
+    t = t + "        [--topk 64] [--max-n N] [--out stack.md] [--csv stack.csv]\n"
+    t = t + "        [--data-dir D]\n"
+    t = t + "  stack --prove           (self-test: CTRL / INJECT / RFI-CANCEL / single)\n"
+    t = t + "\n"
+    t = t + "OFF is optional (absent -> M_on whitened directly, noted in report).\n"
+    t = t + "CSV ints: freq_hz (exact Hz), shift_bins, sigma_x100. kind=stack.\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 searched, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+pub fn stack_main(args: Array<String>) -> Int with Unsafe:
+    // NOTE: `and`/`or` do not short-circuit — argv indexing sits behind
+    // nested ifs only.
+    var on_arg: String = ""
+    var off_arg: String = ""
+    var data_dir: String = ""
+    var out_path: String = ""
+    var csv_path: String = ""
+    var nfft: Int = STACK_NFFT_DEFAULT
+    var thresh: Float = STACK_THRESH_DEFAULT
+    var f0_mhz: Float = STACK_F0_MHZ
+    var fs: Float = FS_HZ
+    var dbins: Int = STACK_DBINS_DEFAULT
+    var topk: Int = STACK_TOPK_DEFAULT
+    var max_n: Int = STACK_MAX_N_DEFAULT
+    var show_help: Int = 0
+    var prove: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--prove":
+            prove = 1
+        elif a == "--on":
+            if i + 1 < len(args):
+                on_arg = args[i + 1]
+                i = i + 1
+        elif a == "--off":
+            if i + 1 < len(args):
+                off_arg = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif a == "--nfft":
+            if i + 1 < len(args):
+                nfft = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--thresh":
+            if i + 1 < len(args):
+                thresh = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--f0-mhz":
+            if i + 1 < len(args):
+                f0_mhz = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fs = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--drift-bins":
+            if i + 1 < len(args):
+                dbins = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--topk":
+            if i + 1 < len(args):
+                topk = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--max-n":
+            if i + 1 < len(args):
+                max_n = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    if on_arg == "":
+        if len(pos) > 0:
+            on_arg = pos[0]
+    if off_arg == "":
+        if len(pos) > 1:
+            off_arg = pos[1]
+
+    if show_help == 1:
+        print(stack_usage())
+        return EXIT_HELP
+    if topk <= 0 or topk > 512:
+        topk = STACK_TOPK_DEFAULT
+    if max_n < 4096:
+        max_n = 4096
+    if max_n > STACK_MAX_N_HARD:
+        max_n = STACK_MAX_N_HARD
+    if dbins < 0:
+        dbins = 0
+    if dbins > STACK_DBINS_MAX:
+        dbins = STACK_DBINS_MAX
+    if thresh <= 0.0:
+        thresh = STACK_THRESH_DEFAULT
+
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+
+    // ── --prove: self-contained, no files ──
+    if prove == 1:
+        println("stack-prove: ON/OFF stack core on synthetic mean spectra (nch=513)")
+        var npass: Int = 0
+        var total: Int = 0
+        let pnch: Int = 513
+        let mut pspec: ptr<Float> = alloc_zeroed(16 * pnch + 32, "Float")
+        let mut phit_b: ptr<Int> = alloc_zeroed(256 + 32, "Int")
+        let mut phit_s: ptr<Int> = alloc_zeroed(256 + 32, "Int")
+        let mut phit_g: ptr<Int> = alloc_zeroed(256 + 32, "Int")
+        let mut pzb: ptr<Float> = alloc_zeroed(pnch + 32, "Float")
+        let mut pshb: ptr<Int> = alloc_zeroed(pnch + 32, "Int")
+        // P1: CTRL noise-only 2ON+2OFF -> 0 hits CLEAN.
+        var pseed: Int = 1001
+        var pr: Int = 0
+        while pr < 4:
+            var pf: Int = 0
+            while pf < pnch:
+                var accn: Float = 0.0
+                var u: Int = 0
+                while u < 6:
+                    pseed = (pseed * 1103515245 + 12345) % 2147483648
+                    accn = accn + (pseed as Float) / 2147483648.0
+                    u = u + 1
+                mem_store(ptr_offset(pspec, pr * pnch + pf, "Float"), (accn - 3.0) * 14.0 + 42.0, "Float")
+                pf = pf + 1
+            pr = pr + 1
+        let c0: Int = stk_detect(pspec, 2, 2, pnch, 3, 6.0, phit_b, phit_s, phit_g, 256, pzb, pshb)
+        total = total + 1
+        if c0 == 0:
+            npass = npass + 1
+            println("  [PASS] P1 CTRL noise-only 2ON+2OFF  hits=0 CLEAN")
+        else:
+            println("  [FAIL] P1 CTRL noise-only 2ON+2OFF  hits=" + str(c0))
+        // P2: INJECT 3-sigma tone (bin 500, +30 ~ 3x per-file sigma) in all
+        // 8 ONs only -> stacked sigma >= 5.5 at shift 0 (sqrt-8 gain ~ x2).
+        pseed = 2002
+        pr = 0
+        while pr < 16:
+            var pf: Int = 0
+            while pf < pnch:
+                var accn: Float = 0.0
+                var u: Int = 0
+                while u < 6:
+                    pseed = (pseed * 1103515245 + 12345) % 2147483648
+                    accn = accn + (pseed as Float) / 2147483648.0
+                    u = u + 1
+                mem_store(ptr_offset(pspec, pr * pnch + pf, "Float"), (accn - 3.0) * 14.0 + 42.0, "Float")
+                pf = pf + 1
+            pr = pr + 1
+        pr = 0
+        while pr < 8:
+            let at: Int = pr * pnch + 500
+            mem_store(ptr_offset(pspec, at, "Float"), mem_load(ptr_offset(pspec, at, "Float"), "Float") + 30.0, "Float")
+            pr = pr + 1
+        let c1: Int = stk_detect(pspec, 8, 8, pnch, 3, 6.0, phit_b, phit_s, phit_g, 256, pzb, pshb)
+        let z500: Float = mem_load(ptr_offset(pzb, 500, "Float"), "Float")
+        let sh500: Int = mem_load(ptr_offset(pshb, 500, "Int"), "Int")
+        let z500x: Int = (z500 * 100.0) as Int
+        var got2: Int = 0
+        var q2: Int = 0
+        while q2 < c1:
+            var dd2: Int = mem_load(ptr_offset(phit_b, q2, "Int"), "Int") - 500
+            if dd2 < 0:
+                dd2 = 0 - dd2
+            if dd2 <= 3:
+                got2 = 1
+            q2 = q2 + 1
+        total = total + 1
+        if z500 >= 5.5:
+            if sh500 == 0:
+                npass = npass + 1
+                println("  [PASS] P2 INJECT stacked sigma_x100=" + str(z500x) + " shift=0")
+            else:
+                println("  [FAIL] P2 INJECT shift=" + str(sh500) + " want 0 sigma_x100=" + str(z500x))
+        else:
+            println("  [FAIL] P2 INJECT stacked sigma_x100=" + str(z500x) + " want >=550")
+        total = total + 1
+        if got2 == 1:
+            npass = npass + 1
+            println("  [PASS] P2b INJECT bin ~500 in hit list  hits=" + str(c1))
+        else:
+            println("  [FAIL] P2b INJECT bin ~500 missing  hits=" + str(c1))
+        // P3: RFI-CANCEL tone in ONs AND OFFs -> cancelled, CLEAN.
+        pseed = 3003
+        pr = 0
+        while pr < 4:
+            var pf3: Int = 0
+            while pf3 < pnch:
+                var accn3: Float = 0.0
+                var u3: Int = 0
+                while u3 < 6:
+                    pseed = (pseed * 1103515245 + 12345) % 2147483648
+                    accn3 = accn3 + (pseed as Float) / 2147483648.0
+                    u3 = u3 + 1
+                mem_store(ptr_offset(pspec, pr * pnch + pf3, "Float"), (accn3 - 3.0) * 14.0 + 42.0, "Float")
+                pf3 = pf3 + 1
+            pr = pr + 1
+        pr = 0
+        while pr < 4:
+            let at3: Int = pr * pnch + 500
+            mem_store(ptr_offset(pspec, at3, "Float"), mem_load(ptr_offset(pspec, at3, "Float"), "Float") + 30.0, "Float")
+            pr = pr + 1
+        let c2: Int = stk_detect(pspec, 2, 2, pnch, 3, 6.0, phit_b, phit_s, phit_g, 256, pzb, pshb)
+        total = total + 1
+        if c2 == 0:
+            npass = npass + 1
+            println("  [PASS] P3 RFI-CANCEL common tone  hits=0 CLEAN")
+        else:
+            println("  [FAIL] P3 RFI-CANCEL common tone  hits=" + str(c2))
+        // P4: single-file mode (1 ON, 0 OFF) still runs.
+        pseed = 4004
+        pr = 0
+        while pr < 1:
+            var pf4: Int = 0
+            while pf4 < pnch:
+                var accn4: Float = 0.0
+                var u4: Int = 0
+                while u4 < 6:
+                    pseed = (pseed * 1103515245 + 12345) % 2147483648
+                    accn4 = accn4 + (pseed as Float) / 2147483648.0
+                    u4 = u4 + 1
+                mem_store(ptr_offset(pspec, pr * pnch + pf4, "Float"), (accn4 - 3.0) * 14.0 + 42.0, "Float")
+                pf4 = pf4 + 1
+            pr = pr + 1
+        let c3: Int = stk_detect(pspec, 1, 0, pnch, 3, 6.0, phit_b, phit_s, phit_g, 256, pzb, pshb)
+        total = total + 1
+        if c3 == 0:
+            npass = npass + 1
+            println("  [PASS] P4 single-file 1ON+0OFF runs  hits=0")
+        else:
+            println("  [FAIL] P4 single-file 1ON+0OFF  hits=" + str(c3))
+        decay pspec
+        decay phit_b
+        decay phit_s
+        decay phit_g
+        decay pzb
+        decay pshb
+        println("[prove] " + str(npass) + "/" + str(total))
+        if npass == total:
+            println("receipt=PASS prove=5/5")
+            return EXIT_OK
+        println("receipt=FAIL prove=" + str(npass) + "/" + str(total))
+        return EXIT_HELP
+
+    // ── File mode ──
+    var on_files: Array<String> = []
+    var off_files: Array<String> = []
+    if len(on_arg) > 0:
+        let parts: Array<String> = text_split_string(on_arg, ",")
+        var q: Int = 0
+        while q < len(parts):
+            let cc: String = text_trim_string(parts[q])
+            if len(cc) > 0:
+                push(on_files, cc)
+            q = q + 1
+    if len(off_arg) > 0:
+        let parts2: Array<String> = text_split_string(off_arg, ",")
+        var qoff: Int = 0
+        while qoff < len(parts2):
+            let cc2: String = text_trim_string(parts2[qoff])
+            if len(cc2) > 0:
+                push(off_files, cc2)
+            qoff = qoff + 1
+    let non: Int = len(on_files)
+    let noff: Int = len(off_files)
+    if non < 1:
+        println("stack: need >=1 ON file: stack --on a.f32,b.f32,... [--off c.f32,...]")
+        return EXIT_ERROR
+    // nfft must be pow2: bump up (documented).
+    var pw: Int = STACK_NFFT_MIN
+    while pw < nfft:
+        pw = pw * 2
+    if pw > STACK_NFFT_MAX:
+        pw = STACK_NFFT_MAX
+    nfft = pw
+    let nch: Int = nfft / 2 + 1
+    let ntot: Int = non + noff
+    println("stack: ON=" + str(non) + " OFF=" + str(noff) + " nfft=" + str(nfft) + " nch=" + str(nch))
+    let t0: Int = now_millis()
+    // Shared scratch (allocated once, reused per file, single decay each).
+    let mut specs: ptr<Float> = alloc_zeroed(ntot * nch + 32, "Float")
+    let mut rawbuf: ptr<Byte> = alloc_zeroed(max_n * 4 + 32, "Byte")
+    let mut xbuf: ptr<Float> = alloc_zeroed(max_n + 32, "Float")
+    let mut sre: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let mut sim: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let mut hann: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let mut p2t: ptr<Float> = alloc_zeroed(254 + 32, "Float")
+    let mut szslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    var pv: Float = 1.0
+    var di: Int = 0
+    while di < 126:
+        pv = pv / 2.0
+        di = di + 1
+    var pj: Int = 0
+    while pj < 254:
+        mem_store(ptr_offset(p2t, pj, "Float"), pv, "Float")
+        pv = pv * 2.0
+        pj = pj + 1
+    var hn: Int = 0
+    while hn < nfft:
+        mem_store(ptr_offset(hann, hn, "Float"), 0.5 * (1.0 - cos(SK_PI2 * (hn as Float) / ((nfft - 1) as Float))), "Float")
+        hn = hn + 1
+    // Per file: read .f32, decode, STFT-accumulate into mean spectrum row.
+    var fi: Int = 0
+    while fi < ntot:
+        var rawp: String = ""
+        if fi < non:
+            rawp = on_files[fi]
+        else:
+            rawp = off_files[fi - non]
+        var fpath: String = rawp
+        if data_dir != "":
+            if find_from(rawp, ":", 0) < 0:
+                if len(rawp) > 0:
+                    if char_at(rawp, 0) != "/":
+                        fpath = data_dir + "/" + rawp
+        var tag: String = "ON"
+        if fi >= non:
+            tag = "OFF"
+        let rown: Int = fi
+        let h: ptr<Void> = k_CreateFileA(fpath, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+        if ptr_to_int(h) == -1:
+            println("stack: open fail err=" + str(k_GetLastError()) + ": " + fpath)
+            return EXIT_ERROR
+        var fsize: Int = -1
+        if k_GetFileSizeEx(h, szslot) != 0:
+            fsize = mem_load(szslot, "Int")
+        if fsize < 64:
+            println("stack: file too small: " + fpath)
+            return EXIT_ERROR
+        var want: Int = fsize
+        if want > max_n * 4:
+            want = max_n * 4
+        mem_store(nslot, 0, "Int")
+        let rok: Int = k_ReadFile(h, rawbuf, want, nslot, null_ptr())
+        let got: Int = mem_load(nslot, "Int")
+        let ch2: Int = k_CloseHandle(h)
+        if rok == 0 or got < 64:
+            println("stack: short read: " + fpath)
+            return EXIT_ERROR
+        let nsamp: Int = got / 4
+        let nt: Int = nsamp / nfft
+        if nt < 1:
+            println("stack: too short for one STFT row: " + fpath)
+            return EXIT_ERROR
+        var ds: Int = 0
+        while ds < nsamp:
+            let v: Float = f32_of_quad(bref(rawbuf, ds * 4), bref(rawbuf, ds * 4 + 1), bref(rawbuf, ds * 4 + 2), bref(rawbuf, ds * 4 + 3), p2t)
+            mem_store(ptr_offset(xbuf, ds, "Float"), v, "Float")
+            ds = ds + 1
+        var ff: Int = 0
+        while ff < nch:
+            mem_store(ptr_offset(specs, rown * nch + ff, "Float"), 0.0, "Float")
+            ff = ff + 1
+        var sp: Int = 0
+        while sp < nt:
+            var kk: Int = 0
+            while kk < nfft:
+                mem_store(ptr_offset(sre, kk, "Float"), mem_load(ptr_offset(xbuf, sp * nfft + kk, "Float"), "Float") * mem_load(ptr_offset(hann, kk, "Float"), "Float"), "Float")
+                mem_store(ptr_offset(sim, kk, "Float"), 0.0, "Float")
+                kk = kk + 1
+            let fr2: Int = sk_fft(sre, sim, nfft)
+            var bb: Int = 0
+            while bb < nch:
+                let rv: Float = mem_load(ptr_offset(sre, bb, "Float"), "Float")
+                let iv: Float = mem_load(ptr_offset(sim, bb, "Float"), "Float")
+                let old: Float = mem_load(ptr_offset(specs, rown * nch + bb, "Float"), "Float")
+                mem_store(ptr_offset(specs, rown * nch + bb, "Float"), old + rv * rv + iv * iv, "Float")
+                bb = bb + 1
+            sp = sp + 1
+        ff = 0
+        while ff < nch:
+            let acc3: Float = mem_load(ptr_offset(specs, rown * nch + ff, "Float"), "Float")
+            mem_store(ptr_offset(specs, rown * nch + ff, "Float"), acc3 / (nt as Float), "Float")
+            ff = ff + 1
+        println("stack: [" + tag + "] " + fpath + " N=" + str(nsamp) + " segs=" + str(nt))
+        fi = fi + 1
+    decay rawbuf
+    decay xbuf
+    decay sre
+    decay sim
+    decay hann
+    decay p2t
+    decay szslot
+    decay nslot
+    // Drift-trial stack detection.
+    let mut f_hbin: ptr<Int> = alloc_zeroed(STACK_HIT_CAP + 32, "Int")
+    let mut f_hsh: ptr<Int> = alloc_zeroed(STACK_HIT_CAP + 32, "Int")
+    let mut f_hsig: ptr<Int> = alloc_zeroed(STACK_HIT_CAP + 32, "Int")
+    let mut f_zb: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut f_shb: ptr<Int> = alloc_zeroed(nch + 32, "Int")
+    let t1: Int = now_millis()
+    let nh: Int = stk_detect(specs, non, noff, nch, dbins, thresh, f_hbin, f_hsh, f_hsig, STACK_HIT_CAP, f_zb, f_shb)
+    let t2: Int = now_millis()
+    decay specs
+    // Global sort desc by sigma.
+    var a: Int = 1
+    while a < nh:
+        let kb: Int = mem_load(ptr_offset(f_hbin, a, "Int"), "Int")
+        let ks: Int = mem_load(ptr_offset(f_hsh, a, "Int"), "Int")
+        let kg: Int = mem_load(ptr_offset(f_hsig, a, "Int"), "Int")
+        var b: Int = a - 1
+        var moved: Int = 0
+        while b >= 0:
+            let cb: Int = mem_load(ptr_offset(f_hbin, b, "Int"), "Int")
+            let cs: Int = mem_load(ptr_offset(f_hsh, b, "Int"), "Int")
+            let cg: Int = mem_load(ptr_offset(f_hsig, b, "Int"), "Int")
+            if cg < kg:
+                mem_store(ptr_offset(f_hbin, b + 1, "Int"), cb, "Int")
+                mem_store(ptr_offset(f_hsh, b + 1, "Int"), cs, "Int")
+                mem_store(ptr_offset(f_hsig, b + 1, "Int"), cg, "Int")
+                b = b - 1
+                moved = 1
+            else:
+                break
+        if moved == 1:
+            mem_store(ptr_offset(f_hbin, b + 1, "Int"), kb, "Int")
+            mem_store(ptr_offset(f_hsh, b + 1, "Int"), ks, "Int")
+            mem_store(ptr_offset(f_hsig, b + 1, "Int"), kg, "Int")
+        a = a + 1
+    var nkept: Int = nh
+    if nkept > topk:
+        nkept = topk
+    // Report (law: every kept hit clears the threshold gate).
+    let thresh_x100: Int = (thresh * 100.0) as Int
+    var neff_r: Float = non as Float
+    if noff > 0:
+        neff_r = ((non * noff) as Float) / ((non + noff) as Float)
+    let neff_x100: Int = (neff_r * 100.0) as Int
+    var md: String = "# stack: ON=" + str(non) + " OFF=" + str(noff) + " neff_x100=" + str(neff_x100) + " nfft=" + str(nfft) + " thresh_x100=" + str(thresh_x100) + "\n"
+    if noff == 0:
+        md = md + "# note: no OFF files — M_on whitened directly (no differencing)\n"
+    md = md + "| rank | freq_hz | shift_bins | sigma_x100 | kind |\n"
+    md = md + "|---|---|---|---|---|\n"
+    var csv: String = "freq_hz,shift_bins,sigma_x100,kind\n"
+    var r: Int = 0
+    while r < nkept:
+        let kb2: Int = mem_load(ptr_offset(f_hbin, r, "Int"), "Int")
+        let ks2: Int = mem_load(ptr_offset(f_hsh, r, "Int"), "Int")
+        let kg2: Int = mem_load(ptr_offset(f_hsig, r, "Int"), "Int")
+        let fh: Int = (f0_mhz * 1000000.0 + (kb2 as Float) * fs / (nfft as Float)) as Int
+        var ok_hi: Int = 0
+        if stack_hit_ok(kg2, thresh_x100) == true:
+            ok_hi = 1
+        md = md + "| " + str(r + 1) + " | " + str(fh) + " | " + str(ks2) + " | " + str(kg2) + " | stack law=" + str(ok_hi) + " |\n"
+        csv = csv + str(fh) + "," + str(ks2) + "," + str(kg2) + ",stack\n"
+        r = r + 1
+    decay f_hbin
+    decay f_hsh
+    decay f_hsig
+    decay f_zb
+    decay f_shb
+    println(md)
+    if out_path != "":
+        fs_write_text(out_path, md)
+    if csv_path != "":
+        fs_write_text(csv_path, csv)
+    println("stack: io_stft_ms=" + str(t1 - t0) + " stack_ms=" + str(t2 - t1) + " hits=" + str(nh) + " kept=" + str(nkept))
+    println("receipt=PASS searched=1 kept=" + str(nkept))
+    return EXIT_OK
+
+// ============================================================================
+// unify.kn
+// ============================================================================
+// ============================================================================
+// unify.kn — TurboKain 18: campaign report unifier
+//
+// Reads every detector table in a run directory and writes ONE unified
+// REPORT.md + ONE evidence.csv + ONE verdicts.json (fixed schema,
+// LLM-friendly), with cross-tool statistics. Replaces per-tool fragment
+// sprawl: one citable report per campaign instead of 200 scattered tables.
+//
+//   unify --dir <rundir> [--out REPORT.md] [--csv evidence.csv]
+//         [--json verdicts.json] [--target NAME] [--freq-mhz F] [--fs HZ]
+//         [--tables a,b,c] [--prove] [--help]
+//
+// Defaults: --out <dir>/REPORT.md, --csv <dir>/evidence.csv,
+//           --json <dir>/verdicts.json.
+//
+// INPUT: dir listing via std::fs fs_read_dir_paths (stdlib, verified under
+// `kain check` in this snapshot — no --tables fallback needed, though
+// --tables is kept as an explicit-input lane). .csv preferred (simple comma
+// split — our CSVs never contain quoted commas); .md pipe tables via the
+// cadence_pair row_cells/is_sep_row/col_index pattern. A .md whose stem also
+// has a .csv is skipped (csv wins).
+//
+// Per-tool harvest (flag iff): sk skflag==1; xeno lattice/verdict !=
+// XENO-CLEAN; fam hit==1 (STRUCTURES); fold detected==1; boxcar verdict==SHOT;
+// frame detected==1; drift any data row = kept tone; lag verdict != CLEAN;
+// jerk verdict != QUIET; scint class != QUIET; cad verdict col.
+// Structures deduped per (tool,star,leg,chan,kind,freq,alpha,period), max
+// sigma wins; lattice/rollup keyed (star,leg,chan) so mixed-target dirs keep
+// every star (star from filename stem, "-" when absent).
+//
+// WHY NO ACTORS: table parsing is sub-ms sequential file IO (a few hundred
+// KB of md/csv through the fs_read_text bridge). Actor fanout would be pure
+// overhead here — spawn/mailbox/backpressure buys nothing when the work is
+// one ordered pass over small text with shared accumulators. Per AGENTS.md,
+// actors are reserved for coarse fanout (channels x blocks x pols); they
+// belong to the future sweep detector-stage fanout upgrade, not to a
+// report unifier.
+//
+// Exit codes: 0 unified, 1 help, 2 error/prove failure.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::text
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::parse_int_text
+use _common::find_from
+use _common::row_cells
+use _common::is_sep_row
+use _common::col_index
+
+// Tool ids: 1=sk 2=xeno 3=fam 4=fold 5=boxcar 6=frame 7=drift 8=lag 9=jerk 10=scint 11=cad.
+
+fn uni_is_digit(c: String) -> Int:
+    if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
+        return 1
+    if c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
+        return 1
+    return 0
+
+fn uni_ends_with(name: String, suf: String) -> Int:
+    let nn: Int = len(name)
+    let sn: Int = len(suf)
+    if sn > nn:
+        return 0
+    let tail: String = text_substring_string(name, nn - sn, sn)
+    if tail == suf:
+        return 1
+    return 0
+
+fn uni_basename(path: String) -> String:
+    var cut: Int = -1
+    var i: Int = 0
+    while i < len(path):
+        let c: String = char_at(path, i)
+        if c == "/":
+            cut = i
+        elif c == "\\":
+            cut = i
+        i = i + 1
+    if cut < 0:
+        return path
+    return text_substring_string(path, cut + 1, len(path) - cut - 1)
+
+fn uni_stem(name: String) -> String:
+    var dot: Int = -1
+    var i: Int = 0
+    while i < len(name):
+        if char_at(name, i) == ".":
+            dot = i
+        i = i + 1
+    if dot < 0:
+        return name
+    return text_substring_string(name, 0, dot)
+
+fn uni_digits_after(name: String, tag: String) -> Int:
+    var p: Int = find_from(name, tag, 0)
+    while p >= 0:
+        let s: Int = p + len(tag)
+        if s < len(name):
+            if uni_is_digit(char_at(name, s)) == 1:
+                var e: Int = s
+                while e < len(name):
+                    if uni_is_digit(char_at(name, e)) == 1:
+                        e = e + 1
+                    else:
+                        break
+                return parse_int_text(text_substring_string(name, s, e - s))
+        p = find_from(name, tag, p + 1)
+    return -1
+
+fn uni_leg_of(name: String) -> String:
+    if find_from(name, "_on_", 0) >= 0:
+        return "on"
+    if find_from(name, "_off_", 0) >= 0:
+        return "off"
+    if uni_ends_with(name, "_on") == 1:
+        return "on"
+    if uni_ends_with(name, "_off") == 1:
+        return "off"
+    return "UNKNOWN"
+
+fn uni_chan_of(name: String) -> Int:
+    var ch: Int = uni_digits_after(name, "_c")
+    if ch >= 0:
+        return ch
+    ch = uni_digits_after(name, "ch")
+    if ch >= 0:
+        return ch
+    ch = uni_digits_after(name, "_p")
+    if ch >= 0:
+        return ch
+    return -1
+
+fn uni_tool_of(name: String) -> Int:
+    if find_from(name, "_cad_", 0) >= 0:
+        return 11
+    if find_from(name, "cad_", 0) == 0:
+        return 11
+    if find_from(name, "_fam_", 0) >= 0:
+        return 3
+    if find_from(name, "_fold_", 0) >= 0:
+        return 4
+    if find_from(name, "_sk_", 0) >= 0:
+        return 1
+    if find_from(name, "_xeno_", 0) >= 0:
+        return 2
+    if find_from(name, "_drift_", 0) >= 0:
+        return 7
+    if find_from(name, "_lag_", 0) >= 0:
+        return 8
+    if find_from(name, "_jerk_", 0) >= 0:
+        return 9
+    if find_from(name, "_scint_", 0) >= 0:
+        return 10
+    if find_from(name, "_frame_", 0) >= 0:
+        return 6
+    if find_from(name, "_pulse_", 0) >= 0:
+        return 5
+    if find_from(name, "_boxcar_", 0) >= 0:
+        return 5
+    return 0
+
+fn uni_star_of(name: String) -> String:
+    var toks: Array<String> = []
+    push(toks, "fam")
+    push(toks, "fold")
+    push(toks, "sk")
+    push(toks, "xeno")
+    push(toks, "drift")
+    push(toks, "lag")
+    push(toks, "jerk")
+    push(toks, "scint")
+    push(toks, "frame")
+    push(toks, "pulse")
+    push(toks, "boxcar")
+    push(toks, "cad")
+    var best: Int = -1
+    var ti: Int = 0
+    while ti < len(toks):
+        let mid: String = "_" + toks[ti] + "_"
+        let pm: Int = find_from(name, mid, 0)
+        if pm >= 0:
+            if best < 0:
+                best = pm
+            else:
+                if pm < best:
+                    best = pm
+        ti = ti + 1
+    if best > 0:
+        var st: String = text_substring_string(name, 0, best)
+        while len(st) > 0:
+            if char_at(st, len(st) - 1) == "_":
+                st = text_substring_string(st, 0, len(st) - 1)
+            else:
+                break
+        if len(st) == 0:
+            return "-"
+        return st
+    if best == 0:
+        return "-"
+    var pre: Int = 0
+    while pre < len(toks):
+        let px: String = toks[pre] + "_"
+        if len(name) >= len(px):
+            if text_substring_string(name, 0, len(px)) == px:
+                return "-"
+        pre = pre + 1
+    var po: Int = find_from(name, "_on_", 0)
+    var pf: Int = find_from(name, "_off_", 0)
+    var pc: Int = -1
+    if po >= 0:
+        pc = po
+    if pf >= 0:
+        if pc < 0:
+            pc = pf
+        else:
+            if pf < pc:
+                pc = pf
+    if pc > 0:
+        return text_substring_string(name, 0, pc)
+    return "-"
+
+fn uni_norm(p: String) -> String:
+    var r: String = ""
+    var i: Int = 0
+    while i < len(p):
+        let c: String = char_at(p, i)
+        if c == "\\":
+            r = r + "/"
+        else:
+            r = r + c
+        i = i + 1
+    return r
+
+fn uni_tool_name(t: Int) -> String:
+    if t == 1:
+        return "sk"
+    if t == 2:
+        return "xeno"
+    if t == 3:
+        return "fam"
+    if t == 4:
+        return "fold"
+    if t == 5:
+        return "boxcar"
+    if t == 6:
+        return "frame"
+    if t == 7:
+        return "drift"
+    if t == 8:
+        return "lag"
+    if t == 9:
+        return "jerk"
+    if t == 10:
+        return "scint"
+    if t == 11:
+        return "cad"
+    return "unknown"
+
+fn uni_csv_cells(row: String) -> Array<String>:
+    let parts: Array<String> = text_split_string(row, ",")
+    var cells: Array<String> = []
+    var i: Int = 0
+    while i < len(parts):
+        push(cells, text_trim_string(parts[i]))
+        i = i + 1
+    return cells
+
+fn uni_header_of(text: String, is_csv: Int) -> Array<String>:
+    var header: Array<String> = []
+    let lines: Array<String> = text_split_lines(text)
+    var i: Int = 0
+    while i < len(lines):
+        let ln: String = text_trim_string(lines[i])
+        if len(ln) > 0:
+            if is_csv == 1:
+                return uni_csv_cells(ln)
+            if is_sep_row(lines[i]) == 0:
+                header = row_cells(lines[i])
+                break
+        i = i + 1
+    return header
+
+fn uni_rows_of(text: String, is_csv: Int) -> Array<String>:
+    var rows: Array<String> = []
+    let lines: Array<String> = text_split_lines(text)
+    var skipped: Int = 0
+    var i: Int = 0
+    while i < len(lines):
+        let ln2: String = text_trim_string(lines[i])
+        if len(ln2) > 0:
+            if is_csv == 1:
+                if skipped == 0:
+                    skipped = 1
+                else:
+                    push(rows, lines[i])
+            else:
+                if is_sep_row(lines[i]) == 0:
+                    if skipped == 0:
+                        skipped = 1
+                    else:
+                        push(rows, lines[i])
+        i = i + 1
+    return rows
+
+fn uni_cells_of(row: String, is_csv: Int) -> Array<String>:
+    if is_csv == 1:
+        return uni_csv_cells(row)
+    return row_cells(row)
+
+fn uni_backtick(ln: String) -> String:
+    let a: Int = find_from(ln, "`", 0)
+    if a < 0:
+        return ""
+    let b: Int = find_from(ln, "`", a + 1)
+    if b < 0:
+        return ""
+    if b <= a + 1:
+        return ""
+    return text_substring_string(ln, a + 1, b - a - 1)
+
+// Prose-report fallback for jerk/scint .md (no pipe tables there).
+// Returns "verdict,strength" (strength 0 — csv is the precise lane).
+fn uni_prose_verdict(text: String, tool: Int) -> String:
+    let lines: Array<String> = text_split_lines(text)
+    var verdict: String = "UNKNOWN"
+    var i: Int = 0
+    while i < len(lines):
+        let ln3: String = lines[i]
+        if tool == 9:
+            if find_from(ln3, "Verdict:", 0) >= 0:
+                let v: String = uni_backtick(ln3)
+                if len(v) > 0:
+                    verdict = v
+        if tool == 10:
+            if find_from(ln3, "Scintillation Class:", 0) >= 0:
+                let v2: String = uni_backtick(ln3)
+                if len(v2) > 0:
+                    verdict = v2
+        i = i + 1
+    return verdict + ",0"
+
+// Harvest one parsed table.
+// Returns block: line0 = "verdict,strength,flagged"; lines 1.. = evidence
+// csv rows (tool,star,leg,chan,kind,freq_hz,alpha_hz,period_ms,sigma,verdict,src).
+fn uni_harvest_file(tool: Int, header: Array<String>, rows: Array<String>, leg: String, chan: Int, src: String) -> String:
+    let tname: String = uni_tool_name(tool)
+    var verdict: String = "CLEAN"
+    var strength: Int = 0
+    var flagged: Int = 0
+    var ev: String = ""
+    // Rows arrive raw: csv rows split on commas, md rows on pipes
+    // (shape-detected per row since csv is preferred but md is fallback).
+    var n: Int = len(rows)
+    var i: Int = 0
+    while i < n:
+        let raw: String = rows[i]
+        var cells: Array<String> = row_cells(raw)
+        if find_from(raw, ",", 0) >= 0:
+            if find_from(raw, "|", 0) < 0:
+                cells = uni_csv_cells(raw)
+        if len(cells) != len(header):
+            i = i + 1
+            continue
+        if tool == 1:
+            let cf: Int = col_index(header, "skflag")
+            var cf2: Int = col_index(header, "skdev_x1e3")
+            if cf2 < 0:
+                cf2 = col_index(header, "skdev_x1000")
+            if cf2 >= 0:
+                let dv: Int = parse_int_text(cells[cf2])
+                if dv > strength:
+                    strength = dv
+            if cf >= 0:
+                if parse_int_text(cells[cf]) == 1:
+                    flagged = 1
+        elif tool == 2:
+            let cl: Int = col_index(header, "lattice")
+            let cv: Int = col_index(header, "verdict")
+            let cz: Int = col_index(header, "maxz_x10")
+            var zv: Int = 0
+            if cz >= 0:
+                zv = parse_int_text(cells[cz])
+                if zv > strength:
+                    strength = zv
+            var bad: Int = 0
+            if cl >= 0:
+                if cells[cl] != "XENO-CLEAN":
+                    bad = 1
+            if cv >= 0:
+                if cells[cv] != "XENO-CLEAN":
+                    bad = 1
+            if bad == 1:
+                flagged = 1
+                ev = ev + tname + "," + leg + "," + str(chan) + ",XENO,0,0,0," + str(zv) + "," + cells[cv] + "," + src + "\n"
+        elif tool == 3:
+            let ch: Int = col_index(header, "hit")
+            let ca: Int = col_index(header, "alpha_hz_x100")
+            let cr: Int = col_index(header, "ratio_x100")
+            if cr >= 0:
+                let rv: Int = parse_int_text(cells[cr])
+                if rv > strength:
+                    strength = rv
+            if ch >= 0:
+                if parse_int_text(cells[ch]) == 1:
+                    flagged = 1
+                    var av: Int = 0
+                    var rv2: Int = 0
+                    if ca >= 0:
+                        av = parse_int_text(cells[ca])
+                    if cr >= 0:
+                        rv2 = parse_int_text(cells[cr])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",FAM," + str(av) + "," + str(av) + ",0," + str(rv2) + ",HIT," + src + "\n"
+        elif tool == 4:
+            let cd: Int = col_index(header, "detected")
+            let cfq: Int = col_index(header, "freq_hz_x100")
+            let cp: Int = col_index(header, "period_ms_x100")
+            let cs: Int = col_index(header, "sigma_x100")
+            if cs >= 0:
+                let sv: Int = parse_int_text(cells[cs])
+                if sv > strength:
+                    strength = sv
+            if cd >= 0:
+                if parse_int_text(cells[cd]) == 1:
+                    flagged = 1
+                    var fq: Int = 0
+                    var pm: Int = 0
+                    var sg: Int = 0
+                    if cfq >= 0:
+                        fq = parse_int_text(cells[cfq])
+                    if cp >= 0:
+                        pm = parse_int_text(cells[cp])
+                    if cs >= 0:
+                        sg = parse_int_text(cells[cs])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",FOLD," + str(fq) + ",0," + str(pm) + "," + str(sg) + ",HIT," + src + "\n"
+        elif tool == 5:
+            let cv2: Int = col_index(header, "verdict")
+            let cs2: Int = col_index(header, "sigma_x100")
+            if cs2 >= 0:
+                let sv2: Int = parse_int_text(cells[cs2])
+                if sv2 > strength:
+                    strength = sv2
+            if cv2 >= 0:
+                if cells[cv2] == "SHOT":
+                    flagged = 1
+                    var sg2: Int = 0
+                    if cs2 >= 0:
+                        sg2 = parse_int_text(cells[cs2])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",PULSE,0,0,0," + str(sg2) + ",SHOT," + src + "\n"
+        elif tool == 6:
+            let cd2: Int = col_index(header, "detected")
+            let cfq2: Int = col_index(header, "freq_hz_x100")
+            let cp2: Int = col_index(header, "period_ms_x100")
+            let cs3: Int = col_index(header, "sigma_x100")
+            if cs3 >= 0:
+                let sv3: Int = parse_int_text(cells[cs3])
+                if sv3 > strength:
+                    strength = sv3
+            if cd2 >= 0:
+                if parse_int_text(cells[cd2]) == 1:
+                    flagged = 1
+                    var fq2: Int = 0
+                    var pm2: Int = 0
+                    var sg3: Int = 0
+                    if cfq2 >= 0:
+                        fq2 = parse_int_text(cells[cfq2])
+                    if cp2 >= 0:
+                        pm2 = parse_int_text(cells[cp2])
+                    if cs3 >= 0:
+                        sg3 = parse_int_text(cells[cs3])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",FRAME," + str(fq2) + ",0," + str(pm2) + "," + str(sg3) + ",HIT," + src + "\n"
+        elif tool == 7:
+            let cfh: Int = col_index(header, "freq_hz")
+            let ck: Int = col_index(header, "kind")
+            let cs4: Int = col_index(header, "sigma_x100")
+            flagged = 1
+            var fh: Int = 0
+            var sg4: Int = 0
+            var kk: String = "tone"
+            if cfh >= 0:
+                fh = parse_int_text(cells[cfh])
+            if cs4 >= 0:
+                sg4 = parse_int_text(cells[cs4])
+                if sg4 > strength:
+                    strength = sg4
+            if ck >= 0:
+                kk = cells[ck]
+            ev = ev + tname + "," + leg + "," + str(chan) + ",DRIFT," + str(fh) + ",0,0," + str(sg4) + "," + kk + "," + src + "\n"
+        elif tool == 8:
+            let cv3: Int = col_index(header, "verdict")
+            let cs5: Int = col_index(header, "sigma_x100")
+            let cfq3: Int = col_index(header, "freq_hz_x100")
+            if cs5 >= 0:
+                let sv5: Int = parse_int_text(cells[cs5])
+                if sv5 > strength:
+                    strength = sv5
+            if cv3 >= 0:
+                if cells[cv3] != "CLEAN":
+                    flagged = 1
+                    var fq3: Int = 0
+                    var sg5: Int = 0
+                    if cfq3 >= 0:
+                        fq3 = parse_int_text(cells[cfq3])
+                    if cs5 >= 0:
+                        sg5 = parse_int_text(cells[cs5])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",LAG," + str(fq3) + ",0,0," + str(sg5) + "," + cells[cv3] + "," + src + "\n"
+        elif tool == 9:
+            let cv4: Int = col_index(header, "verdict")
+            let cs6: Int = col_index(header, "score_x100")
+            let cf0: Int = col_index(header, "f0_hz")
+            if cs6 >= 0:
+                let sv6: Int = parse_int_text(cells[cs6])
+                if sv6 > strength:
+                    strength = sv6
+            if cv4 >= 0:
+                if cells[cv4] != "QUIET":
+                    flagged = 1
+                    var f0: Int = 0
+                    var sg6: Int = 0
+                    if cf0 >= 0:
+                        f0 = parse_int_text(cells[cf0])
+                    if cs6 >= 0:
+                        sg6 = parse_int_text(cells[cs6])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",JERK," + str(f0) + ",0,0," + str(sg6) + "," + cells[cv4] + "," + src + "\n"
+        elif tool == 10:
+            let cc: Int = col_index(header, "class")
+            let cm: Int = col_index(header, "m_med_x100")
+            if cm >= 0:
+                let mv: Int = parse_int_text(cells[cm])
+                if mv > strength:
+                    strength = mv
+            if cc >= 0:
+                if cells[cc] != "QUIET":
+                    flagged = 1
+                    var mv2: Int = 0
+                    if cm >= 0:
+                        mv2 = parse_int_text(cells[cm])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",SCINT,0,0,0," + str(mv2) + "," + cells[cc] + "," + src + "\n"
+        elif tool == 11:
+            let cv5: Int = col_index(header, "verdict")
+            let co: Int = col_index(header, "on_best")
+            let cb: Int = col_index(header, "off_best")
+            if co >= 0:
+                let ov: Int = parse_int_text(cells[co])
+                if ov > strength:
+                    strength = ov
+            if cb >= 0:
+                let bv: Int = parse_int_text(cells[cb])
+                if bv > strength:
+                    strength = bv
+            if cv5 >= 0:
+                verdict = cells[cv5]
+                if verdict != "CLEAN":
+                    flagged = 1
+        i = i + 1
+    if tool != 11:
+        if flagged == 1:
+            if tool == 7:
+                verdict = "KEPT"
+            else:
+                verdict = "HIT"
+            if tool == 1:
+                verdict = "FLAG"
+            if tool == 2:
+                verdict = "FLAG"
+            if tool == 9:
+                verdict = "TRACK"
+            if tool == 10:
+                verdict = "ACTIVE"
+        else:
+            verdict = "CLEAN"
+    if tool == 7:
+        if n == 0:
+            verdict = "CLEAN"
+            flagged = 0
+            strength = 0
+    return verdict + "," + str(strength) + "," + str(flagged) + "\n" + ev
+
+pub fn unify_usage() -> String:
+    var t: String = "unify 0.1.0 — TurboKain campaign report unifier\n"
+    t = t + "Reads every detector table in a run dir, writes ONE REPORT.md +\n"
+    t = t + "ONE evidence.csv + ONE verdicts.json with cross-tool statistics.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  unify --dir <rundir> [--out REPORT.md] [--csv evidence.csv]\n"
+    t = t + "        [--json verdicts.json] [--target NAME] [--freq-mhz F]\n"
+    t = t + "        [--fs HZ] [--tables a,b,c] [--prove] [--help]\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 unified, 1 help, 2 error/prove failure.\n"
+    return t
+
+fn uni_prove() -> Int:
+    var fails: Int = 0
+    // 1. fam csv: 1 hit + 2 quiet.
+    let fam_text: String = "tag,seg,rank,bin,alpha_hz_x100,ratio_x100,log10p_x100,hit\nY2,32768,0,2,17881,116,-782,1\nY2,32768,1,1978,17684698,108,-3,0\nY4,32768,0,2,17881,114,-100,0\n"
+    let fam_h: Array<String> = uni_header_of(fam_text, 1)
+    let fam_r: Array<String> = uni_rows_of(fam_text, 1)
+    if len(fam_h) != 8:
+        println("unify prove: FAIL fam header len=" + str(len(fam_h)))
+        fails = fails + 1
+    if len(fam_r) != 3:
+        println("unify prove: FAIL fam rows len=" + str(len(fam_r)))
+        fails = fails + 1
+    let fam_blk: String = uni_harvest_file(3, fam_h, fam_r, "on", 8, "fam_on_c8.csv")
+    let fam_head: Array<String> = uni_csv_cells(text_split_lines(fam_blk)[0])
+    if fam_head[0] != "HIT":
+        println("unify prove: FAIL fam verdict=" + fam_head[0])
+        fails = fails + 1
+    if fam_head[1] != "116":
+        println("unify prove: FAIL fam strength=" + fam_head[1])
+        fails = fails + 1
+    // 2. fold md: 1 detected + 1 quiet.
+    let fold_text: String = "| rank | freq_hz_x100 | period_ms_x100 | sigma_x100 | detected |\n|---|---|---|---|---|\n| 1 | 566 | 17642 | 361789 | 1 |\n| 2 | 283 | 35285 | 2000 | 0 |\n"
+    let fold_h: Array<String> = uni_header_of(fold_text, 0)
+    let fold_r: Array<String> = uni_rows_of(fold_text, 0)
+    if len(fold_h) != 5:
+        println("unify prove: FAIL fold header len=" + str(len(fold_h)))
+        fails = fails + 1
+    if len(fold_r) != 2:
+        println("unify prove: FAIL fold rows len=" + str(len(fold_r)))
+        fails = fails + 1
+    let fold_blk: String = uni_harvest_file(4, fold_h, fold_r, "on", 8, "fold_on_c8.md")
+    let fold_head: Array<String> = uni_csv_cells(text_split_lines(fold_blk)[0])
+    if fold_head[0] != "HIT":
+        println("unify prove: FAIL fold verdict=" + fold_head[0])
+        fails = fails + 1
+    if fold_head[1] != "361789":
+        println("unify prove: FAIL fold strength=" + fold_head[1])
+        fails = fails + 1
+    // 3. sk md clean.
+    let sk_text: String = "| file | samples | nseg | skdev_x1e3 | skfrac_x1e4 | skflag | verdict |\n|---|---|---|---|---|---|---|\n| f.f32 | 100 | 512 | 721 | 4 | 0 | CLEAN |\n"
+    let sk_blk: String = uni_harvest_file(1, uni_header_of(sk_text, 0), uni_rows_of(sk_text, 0), "on", 8, "sk_on_c8.md")
+    let sk_head: Array<String> = uni_csv_cells(text_split_lines(sk_blk)[0])
+    if sk_head[0] != "CLEAN":
+        println("unify prove: FAIL sk verdict=" + sk_head[0])
+        fails = fails + 1
+    if sk_head[1] != "721":
+        println("unify prove: FAIL sk strength=" + sk_head[1])
+        fails = fails + 1
+    // 4. drift csv empty.
+    let dr_text: String = "freq_hz,drift_x100,sigma_x100,kind\n"
+    let dr_blk: String = uni_harvest_file(7, uni_header_of(dr_text, 1), uni_rows_of(dr_text, 1), "off", 8, "drift_off_c8.csv")
+    let dr_head: Array<String> = uni_csv_cells(text_split_lines(dr_blk)[0])
+    if dr_head[0] != "CLEAN":
+        println("unify prove: FAIL drift verdict=" + dr_head[0])
+        fails = fails + 1
+    // 5. structure count == 2 across fam+fold blocks.
+    var structs: Int = 0
+    var bi: Int = 1
+    let fam_lines: Array<String> = text_split_lines(fam_blk)
+    while bi < len(fam_lines):
+        if len(text_trim_string(fam_lines[bi])) > 0:
+            structs = structs + 1
+        bi = bi + 1
+    bi = 1
+    let fold_lines: Array<String> = text_split_lines(fold_blk)
+    while bi < len(fold_lines):
+        if len(text_trim_string(fold_lines[bi])) > 0:
+            structs = structs + 1
+        bi = bi + 1
+    if structs != 2:
+        println("unify prove: FAIL structures=" + str(structs))
+        fails = fails + 1
+    // 6. filename heuristics.
+    if uni_tool_of("h54155_fam_on_c8.csv") != 3:
+        println("unify prove: FAIL tool_of fam")
+        fails = fails + 1
+    if uni_leg_of("h54155_fam_on_c8.csv") != "on":
+        println("unify prove: FAIL leg_of on")
+        fails = fails + 1
+    if uni_chan_of("h54155_fam_on_c8.csv") != 8:
+        println("unify prove: FAIL chan_of 8")
+        fails = fails + 1
+    if uni_tool_of("h54155_cad_sk_c8.md") != 11:
+        println("unify prove: FAIL tool_of cad")
+        fails = fails + 1
+    // 7. star attribution (lattice key keeps every star in mixed dirs).
+    if uni_star_of("h11048_fam_on_c8.csv") != "h11048":
+        println("unify prove: FAIL star_of h11048")
+        fails = fails + 1
+    if uni_star_of("fam_ch32_p0.csv") != "-":
+        println("unify prove: FAIL star_of tk-prefix")
+        fails = fails + 1
+    if uni_star_of("hip11048_on_c32.f32") != "hip11048":
+        println("unify prove: FAIL star_of f32leg")
+        fails = fails + 1
+    if uni_star_of("h11048_cad_fam_c8.md") != "h11048":
+        println("unify prove: FAIL star_of cad")
+        fails = fails + 1
+    // 8. disposition logic: ON-only fam+fold structures with everything
+    //    else CLEAN -> WATCH (persistence still required for CANDIDATE).
+    var disp: String = "CLEAN"
+    var on_flag: Int = 1
+    var off_flag: Int = 0
+    if on_flag == 1:
+        if off_flag == 1:
+            disp = "COMMON"
+        else:
+            disp = "WATCH"
+    if disp != "WATCH":
+        println("unify prove: FAIL disposition=" + disp)
+        fails = fails + 1
+    // 8. lattice cell format.
+    let cell: String = fam_head[0] + "(" + fam_head[1] + ")"
+    if cell != "HIT(116)":
+        println("unify prove: FAIL cell=" + cell)
+        fails = fails + 1
+    if fails == 0:
+        println("unify prove: PASS (9 checks: fam/fold hits, sk clean, drift empty, structs==2, filenames, star, WATCH, cell)")
+        return EXIT_OK
+    println("unify prove: receipt=FAIL fails=" + str(fails))
+    return EXIT_ERROR
+
+pub fn unify_main(args: Array<String>) -> Int:
+    var dir: String = ""
+    var outn: String = ""
+    var csvn: String = ""
+    var jsonn: String = ""
+    var target: String = "UNKNOWN"
+    var freqmhz: String = "?"
+    var fshz: String = "2929687.5"
+    var tables_raw: String = ""
+    var show_help: Int = 0
+    var prove: Int = 0
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--prove":
+            prove = 1
+        elif a == "--dir":
+            if i + 1 < len(args):
+                dir = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                outn = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csvn = args[i + 1]
+                i = i + 1
+        elif a == "--json":
+            if i + 1 < len(args):
+                jsonn = args[i + 1]
+                i = i + 1
+        elif a == "--target":
+            if i + 1 < len(args):
+                target = args[i + 1]
+                i = i + 1
+        elif a == "--freq-mhz":
+            if i + 1 < len(args):
+                freqmhz = args[i + 1]
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fshz = args[i + 1]
+                i = i + 1
+        elif a == "--tables":
+            if i + 1 < len(args):
+                tables_raw = args[i + 1]
+                i = i + 1
+        i = i + 1
+    if show_help == 1:
+        print(unify_usage())
+        return EXIT_HELP
+    if prove == 1:
+        return uni_prove()
+    // Collect table paths: explicit --tables comma list, else --dir scan.
+    var paths: Array<String> = []
+    if len(tables_raw) > 0:
+        let parts: Array<String> = text_split_string(tables_raw, ",")
+        var pi: Int = 0
+        while pi < len(parts):
+            let pp: String = text_trim_string(parts[pi])
+            if len(pp) > 0:
+                push(paths, pp)
+            pi = pi + 1
+    else:
+        if dir == "":
+            println("unify: need --dir <rundir> or --tables a,b,c")
+            return EXIT_ERROR
+        let entries: Array<String> = fs_read_dir_paths(dir)
+        if len(entries) == 0:
+            println("unify: empty or unreadable dir: " + dir)
+            return EXIT_ERROR
+        var ei: Int = 0
+        while ei < len(entries):
+            let e: String = entries[ei]
+            let bn: String = uni_basename(e)
+            if uni_ends_with(bn, ".csv") == 1:
+                if find_from(e, "/", 0) >= 0:
+                    push(paths, e)
+                else:
+                    if find_from(e, "\\", 0) >= 0:
+                        push(paths, e)
+                    else:
+                        push(paths, dir + "/" + bn)
+            else:
+                if uni_ends_with(bn, ".md") == 1:
+                    if find_from(e, "/", 0) >= 0:
+                        push(paths, e)
+                    else:
+                        if find_from(e, "\\", 0) >= 0:
+                            push(paths, e)
+                        else:
+                            push(paths, dir + "/" + bn)
+            ei = ei + 1
+    if len(paths) == 0:
+        println("unify: no .csv/.md tables found")
+        return EXIT_ERROR
+    if outn == "":
+        if dir != "":
+            outn = dir + "/REPORT.md"
+        else:
+            outn = "REPORT.md"
+    if csvn == "":
+        if dir != "":
+            csvn = dir + "/evidence.csv"
+        else:
+            csvn = "evidence.csv"
+    if jsonn == "":
+        if dir != "":
+            jsonn = dir + "/verdicts.json"
+        else:
+            jsonn = "verdicts.json"
+    // Per-file accumulators.
+    var f_tool: Array<Int> = []
+    var f_leg: Array<String> = []
+    var f_chan: Array<Int> = []
+    var f_verdict: Array<String> = []
+    var f_strength: Array<Int> = []
+    var f_flag: Array<Int> = []
+    var f_path: Array<String> = []
+    var f_star: Array<String> = []
+    var ev_tool: Array<String> = []
+    var ev_leg: Array<String> = []
+    var ev_chan: Array<Int> = []
+    var ev_kind: Array<String> = []
+    var ev_freq: Array<Int> = []
+    var ev_alpha: Array<Int> = []
+    var ev_period: Array<Int> = []
+    var ev_sigma: Array<Int> = []
+    var ev_verdict: Array<String> = []
+    var ev_src: Array<String> = []
+    var ev_star: Array<String> = []
+    var cad_star: Array<String> = []
+    var cad_chan: Array<Int> = []
+    var cad_kind: Array<String> = []
+    var cad_verdict: Array<String> = []
+    var seen_csv: String = "\n"
+    var skipped: Int = 0
+    var fi: Int = 0
+    while fi < len(paths):
+        let p: String = uni_norm(paths[fi])
+        let bn2: String = uni_basename(p)
+        let stem: String = uni_stem(bn2)
+        if uni_ends_with(bn2, ".md") == 1:
+            if find_from(seen_csv, "\n" + stem + "\n", 0) >= 0:
+                skipped = skipped + 1
+                fi = fi + 1
+                continue
+        if uni_ends_with(bn2, ".csv") == 1:
+            seen_csv = seen_csv + stem + "\n"
+        if fs_exists(p) == false:
+            println("unify: missing: " + p)
+            fi = fi + 1
+            continue
+        let tool: Int = uni_tool_of(bn2)
+        if tool == 0:
+            skipped = skipped + 1
+            fi = fi + 1
+            continue
+        var leg: String = uni_leg_of(bn2)
+        var chan: Int = uni_chan_of(bn2)
+        var star: String = uni_star_of(bn2)
+        let text: String = fs_read_text(p)
+        var is_csv: Int = 0
+        if uni_ends_with(bn2, ".csv") == 1:
+            is_csv = 1
+        let header: Array<String> = uni_header_of(text, is_csv)
+        let rows: Array<String> = uni_rows_of(text, is_csv)
+        // Refine leg/chan from the `file` column when present.
+        let ci_file: Int = col_index(header, "file")
+        if ci_file >= 0:
+            if len(rows) > 0:
+                let fc: Array<String> = uni_cells_of(rows[0], is_csv)
+                // md rows need pipe cells; uni_cells_of above assumed csv.
+                // Re-derive with the correct splitter.
+                var fc2: Array<String> = row_cells(rows[0])
+                if is_csv == 1:
+                    fc2 = uni_csv_cells(rows[0])
+                if ci_file < len(fc2):
+                    let fv: String = uni_basename(fc2[ci_file])
+                    if leg == "UNKNOWN":
+                        leg = uni_leg_of(fv)
+                    if chan < 0:
+                        chan = uni_chan_of(fv)
+                    if star == "-":
+                        star = uni_star_of(fv)
+        var verdict2: String = "CLEAN"
+        var strength2: Int = 0
+        var flag2: Int = 0
+        if len(header) == 0:
+            if tool == 9:
+                let pv: String = uni_prose_verdict(text, 9)
+                let pvc: Array<String> = uni_csv_cells(pv)
+                verdict2 = pvc[0]
+                strength2 = parse_int_text(pvc[1])
+                if verdict2 != "QUIET":
+                    if verdict2 != "UNKNOWN":
+                        flag2 = 1
+            elif tool == 10:
+                let pv2: String = uni_prose_verdict(text, 10)
+                let pvc2: Array<String> = uni_csv_cells(pv2)
+                verdict2 = pvc2[0]
+                strength2 = parse_int_text(pvc2[1])
+                if verdict2 != "QUIET":
+                    if verdict2 != "UNKNOWN":
+                        flag2 = 1
+            else:
+                println("unify: no header, skip: " + p)
+                skipped = skipped + 1
+                fi = fi + 1
+                continue
+        else:
+            let blk: String = uni_harvest_file(tool, header, rows, leg, chan, p)
+            let blines: Array<String> = text_split_lines(blk)
+            let hcells: Array<String> = uni_csv_cells(blines[0])
+            verdict2 = hcells[0]
+            strength2 = parse_int_text(hcells[1])
+            flag2 = parse_int_text(hcells[2])
+            var bi2: Int = 1
+            while bi2 < len(blines):
+                if len(text_trim_string(blines[bi2])) > 0:
+                    let ec: Array<String> = uni_csv_cells(blines[bi2])
+                    // Dedupe per (tool,star,leg,chan,kind,freq,alpha,period):
+                    // segbank tables repeat one structure per segment; max sigma wins.
+                    var esig: Int = parse_int_text(ec[7])
+                    var ech: Int = parse_int_text(ec[2])
+                    var efq: Int = parse_int_text(ec[4])
+                    var eal: Int = parse_int_text(ec[5])
+                    var epe: Int = parse_int_text(ec[6])
+                    var ematch: Int = -1
+                    var es: Int = 0
+                    while es < len(ev_tool):
+                        if ev_tool[es] == ec[0]:
+                            if ev_leg[es] == ec[1]:
+                                if ev_chan[es] == ech:
+                                    if ev_kind[es] == ec[3]:
+                                        if ev_freq[es] == efq:
+                                            if ev_alpha[es] == eal:
+                                                if ev_period[es] == epe:
+                                                    ematch = es
+                        es = es + 1
+                    if ematch < 0:
+                        push(ev_tool, ec[0])
+                        push(ev_leg, ec[1])
+                        push(ev_chan, ech)
+                        push(ev_kind, ec[3])
+                        push(ev_freq, efq)
+                        push(ev_alpha, eal)
+                        push(ev_period, epe)
+                        push(ev_sigma, esig)
+                        push(ev_verdict, ec[8])
+                        push(ev_src, ec[9])
+                        push(ev_star, uni_star_of(uni_basename(ec[9])))
+                    else:
+                        if esig > ev_sigma[ematch]:
+                            ev_sigma[ematch] = esig
+                            ev_verdict[ematch] = ec[8]
+                            ev_src[ematch] = ec[9]
+                            ev_star[ematch] = uni_star_of(uni_basename(ec[9]))
+                bi2 = bi2 + 1
+        push(f_tool, tool)
+        push(f_leg, leg)
+        push(f_chan, chan)
+        push(f_verdict, verdict2)
+        push(f_strength, strength2)
+        push(f_flag, flag2)
+        push(f_path, p)
+        push(f_star, star)
+        if tool == 11:
+            // cad kind from the table's kind column when present.
+            var ckind: String = "?"
+            let ck2: Int = col_index(header, "kind")
+            if ck2 >= 0:
+                if len(rows) > 0:
+                    var cc2: Array<String> = row_cells(rows[0])
+                    if is_csv == 1:
+                        cc2 = uni_csv_cells(rows[0])
+                    if ck2 < len(cc2):
+                        ckind = cc2[ck2]
+            push(cad_star, uni_star_of(bn2))
+            push(cad_chan, chan)
+            push(cad_kind, ckind)
+            push(cad_verdict, verdict2)
+        fi = fi + 1
+    let ntables: Int = len(f_tool)
+    if ntables == 0:
+        println("unify: no recognized detector tables")
+        return EXIT_ERROR
+    // Unique (star,leg,chan) lattice rows for tools 1..10: stars in
+    // first-seen order, legs on/off/UNKNOWN, then chan.
+    var lat_star: Array<String> = []
+    var lat_leg: Array<String> = []
+    var lat_chan: Array<Int> = []
+    var li2: Int = 0
+    while li2 < ntables:
+        if f_tool[li2] != 11:
+            var g0: Int = -1
+            var g1: Int = -1
+            var lg: Int = 0
+            while lg < len(lat_star):
+                if lat_star[lg] == f_star[li2]:
+                    if g0 < 0:
+                        g0 = lg
+                    g1 = lg + 1
+                lg = lg + 1
+            if g0 < 0:
+                push(lat_star, f_star[li2])
+                push(lat_leg, f_leg[li2])
+                push(lat_chan, f_chan[li2])
+            else:
+                var found: Int = 0
+                var lj: Int = g0
+                while lj < g1:
+                    if lat_leg[lj] == f_leg[li2]:
+                        if lat_chan[lj] == f_chan[li2]:
+                            found = 1
+                    lj = lj + 1
+                if found == 0:
+                    // insert ordered within star group: on(0) off(1) UNKNOWN(2), then chan.
+                    var rank: Int = 2
+                    if f_leg[li2] == "on":
+                        rank = 0
+                    elif f_leg[li2] == "off":
+                        rank = 1
+                    var pos2: Int = g1
+                    var lk: Int = g0
+                    while lk < g1:
+                        var rk2: Int = 2
+                        if lat_leg[lk] == "on":
+                            rk2 = 0
+                        elif lat_leg[lk] == "off":
+                            rk2 = 1
+                        if rk2 > rank:
+                            pos2 = lk
+                            break
+                        else:
+                            if rk2 == rank:
+                                if lat_chan[lk] > f_chan[li2]:
+                                    pos2 = lk
+                                    break
+                        lk = lk + 1
+                    // insert at pos2 via append + shift.
+                    push(lat_star, "")
+                    push(lat_leg, "")
+                    push(lat_chan, 0)
+                    var lm: Int = len(lat_star) - 1
+                    while lm > pos2:
+                        lat_star[lm] = lat_star[lm - 1]
+                        lat_leg[lm] = lat_leg[lm - 1]
+                        lat_chan[lm] = lat_chan[lm - 1]
+                        lm = lm - 1
+                    lat_star[pos2] = f_star[li2]
+                    lat_leg[pos2] = f_leg[li2]
+                    lat_chan[pos2] = f_chan[li2]
+        li2 = li2 + 1
+    // Cell lookup helper data: linear scan per (row, tool).
+    // Per-tool flag counts + floors (max clean strength + best flagged).
+    var cnt_files: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var cnt_flag: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var fl_clean: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var fl_best: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var ci3: Int = 0
+    while ci3 < ntables:
+        let tt: Int = f_tool[ci3]
+        cnt_files[tt] = cnt_files[tt] + 1
+        if f_strength[ci3] > fl_best[tt]:
+            fl_best[tt] = f_strength[ci3]
+        if f_flag[ci3] == 1:
+            cnt_flag[tt] = cnt_flag[tt] + 1
+        else:
+            if f_strength[ci3] > fl_clean[tt]:
+                fl_clean[tt] = f_strength[ci3]
+        ci3 = ci3 + 1
+    // Cadence rollup per chan x detector from ON/OFF file verdicts.
+    var roll: String = ""
+    var n_common: Int = 0
+    var n_ononly: Int = 0
+    var n_offonly: Int = 0
+    var n_clean: Int = 0
+    var rstar: Array<String> = []
+    var rchan: Array<Int> = []
+    var ch2: Int = 0
+    while ch2 < len(lat_chan):
+        var seen: Int = 0
+        var sq: Int = 0
+        while sq < len(rchan):
+            if rchan[sq] == lat_chan[ch2]:
+                if rstar[sq] == lat_star[ch2]:
+                    seen = 1
+            sq = sq + 1
+        if seen == 0:
+            push(rstar, lat_star[ch2])
+            push(rchan, lat_chan[ch2])
+        ch2 = ch2 + 1
+    var tools9: Array<Int> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    var cx: Int = 0
+    while cx < len(rchan):
+        let ccx: Int = rchan[cx]
+        let scx: String = rstar[cx]
+        var tx: Int = 0
+        while tx < len(tools9):
+            let ttx: Int = tools9[tx]
+            var onf: Int = 0
+            var offf: Int = 0
+            var onv: String = "-"
+            var offv: String = "-"
+            var fx: Int = 0
+            while fx < ntables:
+                if f_tool[fx] == ttx:
+                    if f_star[fx] == scx:
+                        if f_chan[fx] == ccx:
+                            if f_leg[fx] == "on":
+                                onf = f_flag[fx]
+                                onv = f_verdict[fx]
+                            elif f_leg[fx] == "off":
+                                offf = f_flag[fx]
+                                offv = f_verdict[fx]
+                fx = fx + 1
+            var rr: String = "CLEAN"
+            if onf == 1:
+                if offf == 1:
+                    rr = "COMMON"
+                    n_common = n_common + 1
+                else:
+                    rr = "ON-ONLY"
+                    n_ononly = n_ononly + 1
+            else:
+                if offf == 1:
+                    rr = "OFF-ONLY"
+                    n_offonly = n_offonly + 1
+                else:
+                    n_clean = n_clean + 1
+            roll = roll + "| " + scx + " | c" + str(ccx) + " | " + uni_tool_name(ttx) + " | " + onv + " | " + offv + " | " + rr + " |\n"
+            tx = tx + 1
+        cx = cx + 1
+    // Disposition: ON-ONLY structured -> WATCH; elif COMMON -> COMMON.
+    var disp2: String = "CLEAN"
+    var why: String = "no structured detections above any gate"
+    if n_common > 0:
+        disp2 = "COMMON"
+        why = str(n_common) + " common-mode detector-chan pairs (scored, veto decides)"
+    if n_ononly > 0:
+        disp2 = "WATCH"
+        why = str(n_ononly) + " ON-only structured pairs (persistence required for CANDIDATE)"
+    // ── REPORT.md ──
+    var rep: String = "# Campaign Report — " + target + " (unify)\n\n"
+    rep = rep + "- Target: " + target + " | freq: " + freqmhz + " MHz | fs: " + fshz + " Hz\n"
+    rep = rep + "- Dir: " + dir + " | tables: " + str(ntables) + " | skipped: " + str(skipped) + "\n"
+    rep = rep + "- Structures: " + str(len(ev_tool)) + " | disposition: " + disp2 + " (" + why + ")\n\n"
+    rep = rep + "## File inventory\n\n"
+    rep = rep + "| tool | files | flagged |\n|---|---|---|\n"
+    var ti2: Int = 1
+    while ti2 <= 11:
+        if cnt_files[ti2] > 0:
+            rep = rep + "| " + uni_tool_name(ti2) + " | " + str(cnt_files[ti2]) + " | " + str(cnt_flag[ti2]) + " |\n"
+        ti2 = ti2 + 1
+    rep = rep + "\n## Verdict lattice (leg x chan)\n\n"
+    rep = rep + "| star | leg | chan | sk | xeno | fam | fold | boxcar | frame | drift | lag | jerk | scint |\n"
+    rep = rep + "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    var lr: Int = 0
+    while lr < len(lat_leg):
+        var row: String = "| " + lat_star[lr] + " | " + lat_leg[lr] + " | c" + str(lat_chan[lr]) + " "
+        var tj: Int = 0
+        while tj < len(tools9):
+            var cell2: String = "-"
+            var fk: Int = 0
+            while fk < ntables:
+                if f_tool[fk] == tools9[tj]:
+                    if f_star[fk] == lat_star[lr]:
+                        if f_leg[fk] == lat_leg[lr]:
+                            if f_chan[fk] == lat_chan[lr]:
+                                cell2 = f_verdict[fk] + "(" + str(f_strength[fk]) + ")"
+                fk = fk + 1
+            row = row + "| " + cell2 + " "
+            tj = tj + 1
+        row = row + "|\n"
+        rep = rep + row
+        lr = lr + 1
+    rep = rep + "\n## Structures (ranked harvested hits)\n\n"
+    rep = rep + "freq/alpha/period/sigma are x100 integers (17881 = 178.81 Hz, 566 = 5.66 Hz).\n\n"
+    rep = rep + "| # | tool | star | leg | chan | kind | freq_hz | alpha_hz | period_ms | sigma | verdict | source |\n"
+    rep = rep + "|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    var er: Int = 0
+    while er < len(ev_tool):
+        rep = rep + "| " + str(er + 1) + " | " + ev_tool[er] + " | " + ev_star[er] + " | " + ev_leg[er] + " | c" + str(ev_chan[er]) + " | " + ev_kind[er] + " | " + str(ev_freq[er]) + " | " + str(ev_alpha[er]) + " | " + str(ev_period[er]) + " | " + str(ev_sigma[er]) + " | " + ev_verdict[er] + " | " + uni_basename(ev_src[er]) + " |\n"
+        er = er + 1
+    if len(ev_tool) == 0:
+        rep = rep + "| - | none | - | - | - | - | - | - | - | - | - | - |\n"
+    rep = rep + "\n## Cadence rollup (ON vs OFF per chan x detector)\n\n"
+    rep = rep + "| star | chan | det | on | off | gate |\n|---|---|---|---|---|---|\n"
+    rep = rep + roll
+    rep = rep + "\nGates: COMMON=" + str(n_common) + " ON-ONLY=" + str(n_ononly) + " OFF-ONLY=" + str(n_offonly) + " CLEAN=" + str(n_clean) + "\n"
+    if len(cad_chan) > 0:
+        rep = rep + "\nGate receipts (cad tables):\n\n"
+        rep = rep + "| star | chan | kind | verdict |\n|---|---|---|---|\n"
+        var cr2: Int = 0
+        while cr2 < len(cad_chan):
+            rep = rep + "| " + cad_star[cr2] + " | c" + str(cad_chan[cr2]) + " | " + cad_kind[cr2] + " | " + cad_verdict[cr2] + " |\n"
+            cr2 = cr2 + 1
+    rep = rep + "\n## Floors (max sub-gate strength per detector)\n\n"
+    rep = rep + "| det | max clean | best flagged |\n|---|---|---|\n"
+    var tf: Int = 1
+    while tf <= 10:
+        if cnt_files[tf] > 0:
+            rep = rep + "| " + uni_tool_name(tf) + " | " + str(fl_clean[tf]) + " | " + str(fl_best[tf]) + " |\n"
+        tf = tf + 1
+    rep = rep + "\n## Disposition\n\n" + disp2 + " — " + why + ".\n"
+    // ── evidence.csv ──
+    var csv: String = "tool,star,leg,chan,kind,freq_hz,alpha_hz,period_ms,sigma,verdict,source\n"
+    var ce: Int = 0
+    while ce < len(ev_tool):
+        csv = csv + ev_tool[ce] + "," + ev_star[ce] + "," + ev_leg[ce] + "," + str(ev_chan[ce]) + "," + ev_kind[ce] + "," + str(ev_freq[ce]) + "," + str(ev_alpha[ce]) + "," + str(ev_period[ce]) + "," + str(ev_sigma[ce]) + "," + ev_verdict[ce] + "," + ev_src[ce] + "\n"
+        ce = ce + 1
+    // ── verdicts.json (fixed schema, ints only) ──
+    var js: String = "{\"meta\":{\"tool\":\"unify\",\"target\":\"" + target + "\",\"dir\":\"" + dir + "\",\"tables\":" + str(ntables) + "},\"lattice\":["
+    var jr: Int = 0
+    while jr < len(lat_leg):
+        if jr > 0:
+            js = js + ","
+        js = js + "{\"star\":\"" + lat_star[jr] + "\",\"leg\":\"" + lat_leg[jr] + "\",\"chan\":" + str(lat_chan[jr])
+        var jt2: Int = 0
+        while jt2 < len(tools9):
+            var cell3: String = "-"
+            var fm: Int = 0
+            while fm < ntables:
+                if f_tool[fm] == tools9[jt2]:
+                    if f_star[fm] == lat_star[jr]:
+                        if f_leg[fm] == lat_leg[jr]:
+                            if f_chan[fm] == lat_chan[jr]:
+                                cell3 = f_verdict[fm] + "(" + str(f_strength[fm]) + ")"
+                fm = fm + 1
+            js = js + ",\"" + uni_tool_name(tools9[jt2]) + "\":\"" + cell3 + "\""
+            jt2 = jt2 + 1
+        js = js + "}"
+        jr = jr + 1
+    js = js + "],\"structures\":["
+    var je: Int = 0
+    while je < len(ev_tool):
+        if je > 0:
+            js = js + ","
+        js = js + "{\"tool\":\"" + ev_tool[je] + "\",\"star\":\"" + ev_star[je] + "\",\"leg\":\"" + ev_leg[je] + "\",\"chan\":" + str(ev_chan[je]) + ",\"kind\":\"" + ev_kind[je] + "\",\"freq_hz\":" + str(ev_freq[je]) + ",\"alpha_hz\":" + str(ev_alpha[je]) + ",\"period_ms\":" + str(ev_period[je]) + ",\"sigma\":" + str(ev_sigma[je]) + ",\"verdict\":\"" + ev_verdict[je] + "\"}"
+        je = je + 1
+    js = js + "],\"floors\":{"
+    var jf: Int = 1
+    var first: Int = 1
+    while jf <= 10:
+        if cnt_files[jf] > 0:
+            if first == 0:
+                js = js + ","
+            js = js + "\"" + uni_tool_name(jf) + "_best_subgate\":" + str(fl_clean[jf])
+            first = 0
+        jf = jf + 1
+    js = js + "},\"disposition\":\"" + disp2 + "\"}"
+    fs_write_text(outn, rep)
+    fs_write_text(csvn, csv)
+    fs_write_text(jsonn, js)
+    println("unify: tables=" + str(ntables) + " skipped=" + str(skipped) + " structures=" + str(len(ev_tool)) + " disposition=" + disp2)
+    println("unify: wrote " + outn)
+    println("unify: wrote " + csvn)
+    println("unify: wrote " + jsonn)
     return EXIT_OK
 
 // ============================================================================

@@ -1,0 +1,757 @@
+// ============================================================================
+// stack.kn — TurboKain 19: incoherent multi-epoch power spectra stacker
+// (ON/OFF differencing, sqrt-Neff integration gain)
+//
+// Method (kept exact per spec):
+//   1. Per file: STFT waterfall (Hann + radix-2 sk_fft rows, drift_hunt
+//      shapes copied inline — no cross-import, per the small-ptr-callee
+//      crash workaround), hop = nfft (non-overlapping), power bins
+//      0..nfft/2. Each file time-averages to a mean spectrum m_i[f].
+//      The full waterfall is never stored: power accumulates per segment
+//      straight into m_i (streaming, O(nch) per file).
+//   2. ON-stack M_on[f] = mean over ON files; OFF-stack M_off[f] = mean
+//      over OFF files. >=1 ON required; OFF optional (absent -> whiten
+//      M_on directly and note it in the report).
+//   3. Difference D[f] = M_on[f] - M_off[f]. Whiten: running-median w=101
+//      background over D (stack_med100 converge: spec = insertion-sort /
+//      fast = quickselect, drift_hunt pattern — identical order statistic
+//      n/2, lanes agree by construction), MAD over residuals with 1.4826
+//      scale + epsilon floor. z[f] = (D[f]-bg[f])/scale * sqrt(Neff),
+//      Neff = (N_on*N_off)/(N_on+N_off), else N_on. The sqrt(N) gain.
+//   4. Inter-epoch drift trials: integer bin shifts -drift-bins..+drift-bins
+//      applied to each ON spectrum before averaging (shift-and-add across
+//      epochs); per-bin best z across shifts wins (best shift reported).
+//      Edge bins are always in range: evaluated bins sit drift-bins+4 from
+//      the edge, so f+s never leaves [4, nch-4).
+//   5. Detection: edge-mask drift-bins+4, NMS +-3 bins, top-64, thresh 6.0.
+//      Tables carry scaled ints only (freq_hz exact, sigma_x100, shift_bins)
+//      because str(Float) truncates in this lane.
+//   6. Law: stack_hit_ok gates every emitted hit (sig_x100 >= thresh_x100).
+//
+// Contract: ON/OFF .f32 voltage slices in -> stack.md + stack.csv out.
+// Exit codes: 0 searched, 1 help OR --prove FAIL, 2 error. No hardcoded data
+// paths: --data-dir / $SETIYETI_DATA only. Every detector takes --fs.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+// ── kernel32 file API (drift_hunt verbatim — no fs bridge for bulk) ─────────
+use _common::k_CreateFileA
+use _common::k_ReadFile
+use _common::k_GetFileSizeEx
+use _common::k_CloseHandle
+use _common::k_GetLastError
+use _common::null_ptr
+use _common::GEN_READ
+use _common::OPEN_EXISTING
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::FS_HZ
+use _common::SK_PI2
+use _common::bref
+use _common::parse_int_text
+use _common::parse_float_text
+use _common::find_from
+use _common::f32_of_quad
+use _common::sk_fft
+use _common::quickselect_k
+use _common::sig_clamp100
+
+// ── Geometry (data, not magic — argv overridable, see usage) ────────────────
+const STACK_F0_MHZ: Float = 1400.0
+const STACK_NFFT_DEFAULT: Int = 4096
+const STACK_NFFT_MIN: Int = 256
+const STACK_NFFT_MAX: Int = 16384
+const STACK_THRESH_DEFAULT: Float = 6.0
+const STACK_TOPK_DEFAULT: Int = 64
+const STACK_DBINS_DEFAULT: Int = 3
+const STACK_DBINS_MAX: Int = 16
+const STACK_WHITEN_W: Int = 101
+const STACK_MAX_N_DEFAULT: Int = 1048576
+const STACK_MAX_N_HARD: Int = 4194304
+const STACK_HIT_CAP: Int = 2048
+
+// ── Laws: gates the report must satisfy ─────────────────────────────────────
+law stack_hit_ok(sig_x100: Int, thresh_x100: Int) -> Bool:
+    return sig_x100 >= thresh_x100
+
+// ── Running-median converge (drift_hunt pattern, stack-owned names) ─────────
+fn stack_med_spec100(win: ptr<Float>, scratch: ptr<Float>, n: Int) -> Int:
+    var i: Int = 0
+    while i < n:
+        mem_store(ptr_offset(scratch, i, "Float"), mem_load(ptr_offset(win, i, "Float"), "Float"), "Float")
+        i = i + 1
+    var a: Int = 1
+    while a < n:
+        let key: Float = mem_load(ptr_offset(scratch, a, "Float"), "Float")
+        var b: Int = a - 1
+        var moved: Int = 0
+        while b >= 0:
+            if mem_load(ptr_offset(scratch, b, "Float"), "Float") > key:
+                mem_store(ptr_offset(scratch, b + 1, "Float"), mem_load(ptr_offset(scratch, b, "Float"), "Float"), "Float")
+                b = b - 1
+                moved = 1
+            else:
+                break
+        if moved == 1:
+            mem_store(ptr_offset(scratch, b + 1, "Float"), key, "Float")
+        a = a + 1
+    return (mem_load(ptr_offset(scratch, n / 2, "Float"), "Float") * 100.0) as Int
+
+fn stack_med_fast100(win: ptr<Float>, scratch: ptr<Float>, n: Int) -> Int:
+    var i: Int = 0
+    while i < n:
+        mem_store(ptr_offset(scratch, i, "Float"), mem_load(ptr_offset(win, i, "Float"), "Float"), "Float")
+        i = i + 1
+    return (quickselect_k(scratch, n, n / 2) * 100.0) as Int
+
+converge stack_med100(win: ptr<Float>, scratch: ptr<Float>, n: Int) -> Int:
+    spec exact:
+        return stack_med_spec100(win, scratch, n)
+    fast quick when capability("cpu.x86.avx2"):
+        return stack_med_fast100(win, scratch, n)
+
+// ── Core: mean spectra -> drift-trial ON/OFF stack hits ─────────────────────
+// specs holds (non+noff) mean spectra row-major, ON rows first. hbin/hsh/hsig
+// hold up to cap hits; zbest/shbest (caller arenas, nch) keep the per-bin
+// best scaled-z and winning shift across drift trials. Returns hit count.
+fn stk_detect(specs: ptr<Float>, non: Int, noff: Int, nch: Int, dbins: Int, thresh: Float, hbin: ptr<Int>, hsh: ptr<Int>, hsig: ptr<Int>, cap: Int, zbest: ptr<Float>, shbest: ptr<Int>) -> Int with Unsafe:
+    let half_w: Int = STACK_WHITEN_W / 2
+    let mut mon: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut mof: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut ddv: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut bgv: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut winv: ptr<Float> = alloc_zeroed(STACK_WHITEN_W + 32, "Float")
+    let mut scrv: ptr<Float> = alloc_zeroed(STACK_WHITEN_W + 32, "Float")
+    let mut resv: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut scr2: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut taken: ptr<Int> = alloc_zeroed(nch + 32, "Int")
+    var f: Int = 0
+    while f < nch:
+        mem_store(ptr_offset(mof, f, "Float"), 0.0, "Float")
+        f = f + 1
+    if noff > 0:
+        f = 0
+        while f < nch:
+            var acc: Float = 0.0
+            var r: Int = 0
+            while r < noff:
+                acc = acc + mem_load(ptr_offset(specs, (non + r) * nch + f, "Float"), "Float")
+                r = r + 1
+            mem_store(ptr_offset(mof, f, "Float"), acc / (noff as Float), "Float")
+            f = f + 1
+    var neff: Float = non as Float
+    if noff > 0:
+        neff = ((non * noff) as Float) / ((non + noff) as Float)
+    let gain: Float = sqrt(neff)
+    f = 0
+    while f < nch:
+        mem_store(ptr_offset(zbest, f, "Float"), 0.0 - 1000000000.0, "Float")
+        mem_store(ptr_offset(shbest, f, "Int"), 0, "Int")
+        f = f + 1
+    var s: Int = 0 - dbins
+    while s <= dbins:
+        f = 0
+        while f < nch:
+            var acc2: Float = 0.0
+            var r2: Int = 0
+            while r2 < non:
+                var src: Int = f + s
+                if src < 0:
+                    src = 0
+                if src >= nch:
+                    src = nch - 1
+                acc2 = acc2 + mem_load(ptr_offset(specs, r2 * nch + src, "Float"), "Float")
+                r2 = r2 + 1
+            mem_store(ptr_offset(mon, f, "Float"), acc2 / (non as Float), "Float")
+            f = f + 1
+        f = 0
+        while f < nch:
+            var d: Float = mem_load(ptr_offset(mon, f, "Float"), "Float")
+            if noff > 0:
+                d = d - mem_load(ptr_offset(mof, f, "Float"), "Float")
+            mem_store(ptr_offset(ddv, f, "Float"), d, "Float")
+            f = f + 1
+        f = 0
+        while f < nch:
+            var w0: Int = f - half_w
+            if w0 < 0:
+                w0 = 0
+            var w1: Int = f + half_w
+            if w1 >= nch:
+                w1 = nch - 1
+            let wn: Int = w1 - w0 + 1
+            var wk: Int = 0
+            while wk < wn:
+                mem_store(ptr_offset(winv, wk, "Float"), mem_load(ptr_offset(ddv, w0 + wk, "Float"), "Float"), "Float")
+                wk = wk + 1
+            let m100: Int = stack_med100(winv, scrv, wn)
+            mem_store(ptr_offset(bgv, f, "Float"), (m100 as Float) / 100.0, "Float")
+            f = f + 1
+        f = 0
+        while f < nch:
+            var rd: Float = mem_load(ptr_offset(ddv, f, "Float"), "Float") - mem_load(ptr_offset(bgv, f, "Float"), "Float")
+            if rd < 0.0:
+                rd = 0.0 - rd
+            mem_store(ptr_offset(resv, f, "Float"), rd, "Float")
+            f = f + 1
+        let mad100: Int = stack_med100(resv, scr2, nch)
+        var scale: Float = 1.4826 * ((mad100 as Float) / 100.0)
+        if scale <= 0.0:
+            scale = 0.000000001
+        f = 0
+        while f < nch:
+            let zv: Float = (mem_load(ptr_offset(ddv, f, "Float"), "Float") - mem_load(ptr_offset(bgv, f, "Float"), "Float")) / scale * gain
+            if zv > mem_load(ptr_offset(zbest, f, "Float"), "Float"):
+                mem_store(ptr_offset(zbest, f, "Float"), zv, "Float")
+                mem_store(ptr_offset(shbest, f, "Int"), s, "Int")
+            f = f + 1
+        s = s + 1
+    let m: Int = dbins + 4
+    f = 0
+    while f < m:
+        mem_store(ptr_offset(zbest, f, "Float"), 0.0 - 1000000000.0, "Float")
+        f = f + 1
+    f = nch - m
+    while f < nch:
+        mem_store(ptr_offset(zbest, f, "Float"), 0.0 - 1000000000.0, "Float")
+        f = f + 1
+    f = 0
+    while f < nch:
+        mem_store(ptr_offset(taken, f, "Int"), 0, "Int")
+        f = f + 1
+    var nhits: Int = 0
+    var found: Int = 0
+    while found < cap:
+        var bk: Int = -1
+        var bz: Float = thresh
+        f = 0
+        while f < nch:
+            if mem_load(ptr_offset(taken, f, "Int"), "Int") == 0:
+                if mem_load(ptr_offset(zbest, f, "Float"), "Float") >= bz:
+                    bz = mem_load(ptr_offset(zbest, f, "Float"), "Float")
+                    bk = f
+            f = f + 1
+        if bk < 0:
+            break
+        mem_store(ptr_offset(hbin, nhits, "Int"), bk, "Int")
+        mem_store(ptr_offset(hsh, nhits, "Int"), mem_load(ptr_offset(shbest, bk, "Int"), "Int"), "Int")
+        mem_store(ptr_offset(hsig, nhits, "Int"), sig_clamp100(bz), "Int")
+        nhits = nhits + 1
+        var s0: Int = bk - 3
+        if s0 < 0:
+            s0 = 0
+        var s1: Int = bk + 3
+        if s1 >= nch:
+            s1 = nch - 1
+        var sk: Int = s0
+        while sk <= s1:
+            mem_store(ptr_offset(taken, sk, "Int"), 1, "Int")
+            sk = sk + 1
+        found = found + 1
+    decay mon
+    decay mof
+    decay ddv
+    decay bgv
+    decay winv
+    decay scrv
+    decay resv
+    decay scr2
+    decay taken
+    return nhits
+
+pub fn stack_usage() -> String:
+    var t: String = "stack 0.1.0 — TurboKain incoherent multi-epoch ON/OFF power stacker\n"
+    t = t + "Per-file STFT mean spectra (Hann + radix-2 rows, hop=nfft), ON-mean minus\n"
+    t = t + "OFF-mean, median-whiten (w=101), MAD z * sqrt(Neff) integration gain,\n"
+    t = t + "integer shift-and-add drift trials across epochs, 6-sigma gate, NMS +-3.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  stack --on a.f32,b.f32,... --off c.f32,d.f32,... [--nfft 4096]\n"
+    t = t + "        [--thresh 6] [--fs 2929687.5] [--f0-mhz 1400] [--drift-bins 3]\n"
+    t = t + "        [--topk 64] [--max-n N] [--out stack.md] [--csv stack.csv]\n"
+    t = t + "        [--data-dir D]\n"
+    t = t + "  stack --prove           (self-test: CTRL / INJECT / RFI-CANCEL / single)\n"
+    t = t + "\n"
+    t = t + "OFF is optional (absent -> M_on whitened directly, noted in report).\n"
+    t = t + "CSV ints: freq_hz (exact Hz), shift_bins, sigma_x100. kind=stack.\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 searched, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+pub fn stack_main(args: Array<String>) -> Int with Unsafe:
+    // NOTE: `and`/`or` do not short-circuit — argv indexing sits behind
+    // nested ifs only.
+    var on_arg: String = ""
+    var off_arg: String = ""
+    var data_dir: String = ""
+    var out_path: String = ""
+    var csv_path: String = ""
+    var nfft: Int = STACK_NFFT_DEFAULT
+    var thresh: Float = STACK_THRESH_DEFAULT
+    var f0_mhz: Float = STACK_F0_MHZ
+    var fs: Float = FS_HZ
+    var dbins: Int = STACK_DBINS_DEFAULT
+    var topk: Int = STACK_TOPK_DEFAULT
+    var max_n: Int = STACK_MAX_N_DEFAULT
+    var show_help: Int = 0
+    var prove: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--prove":
+            prove = 1
+        elif a == "--on":
+            if i + 1 < len(args):
+                on_arg = args[i + 1]
+                i = i + 1
+        elif a == "--off":
+            if i + 1 < len(args):
+                off_arg = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif a == "--nfft":
+            if i + 1 < len(args):
+                nfft = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--thresh":
+            if i + 1 < len(args):
+                thresh = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--f0-mhz":
+            if i + 1 < len(args):
+                f0_mhz = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fs = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--drift-bins":
+            if i + 1 < len(args):
+                dbins = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--topk":
+            if i + 1 < len(args):
+                topk = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--max-n":
+            if i + 1 < len(args):
+                max_n = parse_int_text(args[i + 1])
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    if on_arg == "":
+        if len(pos) > 0:
+            on_arg = pos[0]
+    if off_arg == "":
+        if len(pos) > 1:
+            off_arg = pos[1]
+
+    if show_help == 1:
+        print(stack_usage())
+        return EXIT_HELP
+    if topk <= 0 or topk > 512:
+        topk = STACK_TOPK_DEFAULT
+    if max_n < 4096:
+        max_n = 4096
+    if max_n > STACK_MAX_N_HARD:
+        max_n = STACK_MAX_N_HARD
+    if dbins < 0:
+        dbins = 0
+    if dbins > STACK_DBINS_MAX:
+        dbins = STACK_DBINS_MAX
+    if thresh <= 0.0:
+        thresh = STACK_THRESH_DEFAULT
+
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+
+    // ── --prove: self-contained, no files ──
+    if prove == 1:
+        println("stack-prove: ON/OFF stack core on synthetic mean spectra (nch=513)")
+        var npass: Int = 0
+        var total: Int = 0
+        let pnch: Int = 513
+        let mut pspec: ptr<Float> = alloc_zeroed(16 * pnch + 32, "Float")
+        let mut phit_b: ptr<Int> = alloc_zeroed(256 + 32, "Int")
+        let mut phit_s: ptr<Int> = alloc_zeroed(256 + 32, "Int")
+        let mut phit_g: ptr<Int> = alloc_zeroed(256 + 32, "Int")
+        let mut pzb: ptr<Float> = alloc_zeroed(pnch + 32, "Float")
+        let mut pshb: ptr<Int> = alloc_zeroed(pnch + 32, "Int")
+        // P1: CTRL noise-only 2ON+2OFF -> 0 hits CLEAN.
+        var pseed: Int = 1001
+        var pr: Int = 0
+        while pr < 4:
+            var pf: Int = 0
+            while pf < pnch:
+                var accn: Float = 0.0
+                var u: Int = 0
+                while u < 6:
+                    pseed = (pseed * 1103515245 + 12345) % 2147483648
+                    accn = accn + (pseed as Float) / 2147483648.0
+                    u = u + 1
+                mem_store(ptr_offset(pspec, pr * pnch + pf, "Float"), (accn - 3.0) * 14.0 + 42.0, "Float")
+                pf = pf + 1
+            pr = pr + 1
+        let c0: Int = stk_detect(pspec, 2, 2, pnch, 3, 6.0, phit_b, phit_s, phit_g, 256, pzb, pshb)
+        total = total + 1
+        if c0 == 0:
+            npass = npass + 1
+            println("  [PASS] P1 CTRL noise-only 2ON+2OFF  hits=0 CLEAN")
+        else:
+            println("  [FAIL] P1 CTRL noise-only 2ON+2OFF  hits=" + str(c0))
+        // P2: INJECT 3-sigma tone (bin 500, +30 ~ 3x per-file sigma) in all
+        // 8 ONs only -> stacked sigma >= 5.5 at shift 0 (sqrt-8 gain ~ x2).
+        pseed = 2002
+        pr = 0
+        while pr < 16:
+            var pf: Int = 0
+            while pf < pnch:
+                var accn: Float = 0.0
+                var u: Int = 0
+                while u < 6:
+                    pseed = (pseed * 1103515245 + 12345) % 2147483648
+                    accn = accn + (pseed as Float) / 2147483648.0
+                    u = u + 1
+                mem_store(ptr_offset(pspec, pr * pnch + pf, "Float"), (accn - 3.0) * 14.0 + 42.0, "Float")
+                pf = pf + 1
+            pr = pr + 1
+        pr = 0
+        while pr < 8:
+            let at: Int = pr * pnch + 500
+            mem_store(ptr_offset(pspec, at, "Float"), mem_load(ptr_offset(pspec, at, "Float"), "Float") + 30.0, "Float")
+            pr = pr + 1
+        let c1: Int = stk_detect(pspec, 8, 8, pnch, 3, 6.0, phit_b, phit_s, phit_g, 256, pzb, pshb)
+        let z500: Float = mem_load(ptr_offset(pzb, 500, "Float"), "Float")
+        let sh500: Int = mem_load(ptr_offset(pshb, 500, "Int"), "Int")
+        let z500x: Int = (z500 * 100.0) as Int
+        var got2: Int = 0
+        var q2: Int = 0
+        while q2 < c1:
+            var dd2: Int = mem_load(ptr_offset(phit_b, q2, "Int"), "Int") - 500
+            if dd2 < 0:
+                dd2 = 0 - dd2
+            if dd2 <= 3:
+                got2 = 1
+            q2 = q2 + 1
+        total = total + 1
+        if z500 >= 5.5:
+            if sh500 == 0:
+                npass = npass + 1
+                println("  [PASS] P2 INJECT stacked sigma_x100=" + str(z500x) + " shift=0")
+            else:
+                println("  [FAIL] P2 INJECT shift=" + str(sh500) + " want 0 sigma_x100=" + str(z500x))
+        else:
+            println("  [FAIL] P2 INJECT stacked sigma_x100=" + str(z500x) + " want >=550")
+        total = total + 1
+        if got2 == 1:
+            npass = npass + 1
+            println("  [PASS] P2b INJECT bin ~500 in hit list  hits=" + str(c1))
+        else:
+            println("  [FAIL] P2b INJECT bin ~500 missing  hits=" + str(c1))
+        // P3: RFI-CANCEL tone in ONs AND OFFs -> cancelled, CLEAN.
+        pseed = 3003
+        pr = 0
+        while pr < 4:
+            var pf3: Int = 0
+            while pf3 < pnch:
+                var accn3: Float = 0.0
+                var u3: Int = 0
+                while u3 < 6:
+                    pseed = (pseed * 1103515245 + 12345) % 2147483648
+                    accn3 = accn3 + (pseed as Float) / 2147483648.0
+                    u3 = u3 + 1
+                mem_store(ptr_offset(pspec, pr * pnch + pf3, "Float"), (accn3 - 3.0) * 14.0 + 42.0, "Float")
+                pf3 = pf3 + 1
+            pr = pr + 1
+        pr = 0
+        while pr < 4:
+            let at3: Int = pr * pnch + 500
+            mem_store(ptr_offset(pspec, at3, "Float"), mem_load(ptr_offset(pspec, at3, "Float"), "Float") + 30.0, "Float")
+            pr = pr + 1
+        let c2: Int = stk_detect(pspec, 2, 2, pnch, 3, 6.0, phit_b, phit_s, phit_g, 256, pzb, pshb)
+        total = total + 1
+        if c2 == 0:
+            npass = npass + 1
+            println("  [PASS] P3 RFI-CANCEL common tone  hits=0 CLEAN")
+        else:
+            println("  [FAIL] P3 RFI-CANCEL common tone  hits=" + str(c2))
+        // P4: single-file mode (1 ON, 0 OFF) still runs.
+        pseed = 4004
+        pr = 0
+        while pr < 1:
+            var pf4: Int = 0
+            while pf4 < pnch:
+                var accn4: Float = 0.0
+                var u4: Int = 0
+                while u4 < 6:
+                    pseed = (pseed * 1103515245 + 12345) % 2147483648
+                    accn4 = accn4 + (pseed as Float) / 2147483648.0
+                    u4 = u4 + 1
+                mem_store(ptr_offset(pspec, pr * pnch + pf4, "Float"), (accn4 - 3.0) * 14.0 + 42.0, "Float")
+                pf4 = pf4 + 1
+            pr = pr + 1
+        let c3: Int = stk_detect(pspec, 1, 0, pnch, 3, 6.0, phit_b, phit_s, phit_g, 256, pzb, pshb)
+        total = total + 1
+        if c3 == 0:
+            npass = npass + 1
+            println("  [PASS] P4 single-file 1ON+0OFF runs  hits=0")
+        else:
+            println("  [FAIL] P4 single-file 1ON+0OFF  hits=" + str(c3))
+        decay pspec
+        decay phit_b
+        decay phit_s
+        decay phit_g
+        decay pzb
+        decay pshb
+        println("[prove] " + str(npass) + "/" + str(total))
+        if npass == total:
+            println("receipt=PASS prove=5/5")
+            return EXIT_OK
+        println("receipt=FAIL prove=" + str(npass) + "/" + str(total))
+        return EXIT_HELP
+
+    // ── File mode ──
+    var on_files: Array<String> = []
+    var off_files: Array<String> = []
+    if len(on_arg) > 0:
+        let parts: Array<String> = text_split_string(on_arg, ",")
+        var q: Int = 0
+        while q < len(parts):
+            let cc: String = text_trim_string(parts[q])
+            if len(cc) > 0:
+                push(on_files, cc)
+            q = q + 1
+    if len(off_arg) > 0:
+        let parts2: Array<String> = text_split_string(off_arg, ",")
+        var qoff: Int = 0
+        while qoff < len(parts2):
+            let cc2: String = text_trim_string(parts2[qoff])
+            if len(cc2) > 0:
+                push(off_files, cc2)
+            qoff = qoff + 1
+    let non: Int = len(on_files)
+    let noff: Int = len(off_files)
+    if non < 1:
+        println("stack: need >=1 ON file: stack --on a.f32,b.f32,... [--off c.f32,...]")
+        return EXIT_ERROR
+    // nfft must be pow2: bump up (documented).
+    var pw: Int = STACK_NFFT_MIN
+    while pw < nfft:
+        pw = pw * 2
+    if pw > STACK_NFFT_MAX:
+        pw = STACK_NFFT_MAX
+    nfft = pw
+    let nch: Int = nfft / 2 + 1
+    let ntot: Int = non + noff
+    println("stack: ON=" + str(non) + " OFF=" + str(noff) + " nfft=" + str(nfft) + " nch=" + str(nch))
+    let t0: Int = now_millis()
+    // Shared scratch (allocated once, reused per file, single decay each).
+    let mut specs: ptr<Float> = alloc_zeroed(ntot * nch + 32, "Float")
+    let mut rawbuf: ptr<Byte> = alloc_zeroed(max_n * 4 + 32, "Byte")
+    let mut xbuf: ptr<Float> = alloc_zeroed(max_n + 32, "Float")
+    let mut sre: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let mut sim: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let mut hann: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let mut p2t: ptr<Float> = alloc_zeroed(254 + 32, "Float")
+    let mut szslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    var pv: Float = 1.0
+    var di: Int = 0
+    while di < 126:
+        pv = pv / 2.0
+        di = di + 1
+    var pj: Int = 0
+    while pj < 254:
+        mem_store(ptr_offset(p2t, pj, "Float"), pv, "Float")
+        pv = pv * 2.0
+        pj = pj + 1
+    var hn: Int = 0
+    while hn < nfft:
+        mem_store(ptr_offset(hann, hn, "Float"), 0.5 * (1.0 - cos(SK_PI2 * (hn as Float) / ((nfft - 1) as Float))), "Float")
+        hn = hn + 1
+    // Per file: read .f32, decode, STFT-accumulate into mean spectrum row.
+    var fi: Int = 0
+    while fi < ntot:
+        var rawp: String = ""
+        if fi < non:
+            rawp = on_files[fi]
+        else:
+            rawp = off_files[fi - non]
+        var fpath: String = rawp
+        if data_dir != "":
+            if find_from(rawp, ":", 0) < 0:
+                if len(rawp) > 0:
+                    if char_at(rawp, 0) != "/":
+                        fpath = data_dir + "/" + rawp
+        var tag: String = "ON"
+        if fi >= non:
+            tag = "OFF"
+        let rown: Int = fi
+        let h: ptr<Void> = k_CreateFileA(fpath, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+        if ptr_to_int(h) == -1:
+            println("stack: open fail err=" + str(k_GetLastError()) + ": " + fpath)
+            return EXIT_ERROR
+        var fsize: Int = -1
+        if k_GetFileSizeEx(h, szslot) != 0:
+            fsize = mem_load(szslot, "Int")
+        if fsize < 64:
+            println("stack: file too small: " + fpath)
+            return EXIT_ERROR
+        var want: Int = fsize
+        if want > max_n * 4:
+            want = max_n * 4
+        mem_store(nslot, 0, "Int")
+        let rok: Int = k_ReadFile(h, rawbuf, want, nslot, null_ptr())
+        let got: Int = mem_load(nslot, "Int")
+        let ch2: Int = k_CloseHandle(h)
+        if rok == 0 or got < 64:
+            println("stack: short read: " + fpath)
+            return EXIT_ERROR
+        let nsamp: Int = got / 4
+        let nt: Int = nsamp / nfft
+        if nt < 1:
+            println("stack: too short for one STFT row: " + fpath)
+            return EXIT_ERROR
+        var ds: Int = 0
+        while ds < nsamp:
+            let v: Float = f32_of_quad(bref(rawbuf, ds * 4), bref(rawbuf, ds * 4 + 1), bref(rawbuf, ds * 4 + 2), bref(rawbuf, ds * 4 + 3), p2t)
+            mem_store(ptr_offset(xbuf, ds, "Float"), v, "Float")
+            ds = ds + 1
+        var ff: Int = 0
+        while ff < nch:
+            mem_store(ptr_offset(specs, rown * nch + ff, "Float"), 0.0, "Float")
+            ff = ff + 1
+        var sp: Int = 0
+        while sp < nt:
+            var kk: Int = 0
+            while kk < nfft:
+                mem_store(ptr_offset(sre, kk, "Float"), mem_load(ptr_offset(xbuf, sp * nfft + kk, "Float"), "Float") * mem_load(ptr_offset(hann, kk, "Float"), "Float"), "Float")
+                mem_store(ptr_offset(sim, kk, "Float"), 0.0, "Float")
+                kk = kk + 1
+            let fr2: Int = sk_fft(sre, sim, nfft)
+            var bb: Int = 0
+            while bb < nch:
+                let rv: Float = mem_load(ptr_offset(sre, bb, "Float"), "Float")
+                let iv: Float = mem_load(ptr_offset(sim, bb, "Float"), "Float")
+                let old: Float = mem_load(ptr_offset(specs, rown * nch + bb, "Float"), "Float")
+                mem_store(ptr_offset(specs, rown * nch + bb, "Float"), old + rv * rv + iv * iv, "Float")
+                bb = bb + 1
+            sp = sp + 1
+        ff = 0
+        while ff < nch:
+            let acc3: Float = mem_load(ptr_offset(specs, rown * nch + ff, "Float"), "Float")
+            mem_store(ptr_offset(specs, rown * nch + ff, "Float"), acc3 / (nt as Float), "Float")
+            ff = ff + 1
+        println("stack: [" + tag + "] " + fpath + " N=" + str(nsamp) + " segs=" + str(nt))
+        fi = fi + 1
+    decay rawbuf
+    decay xbuf
+    decay sre
+    decay sim
+    decay hann
+    decay p2t
+    decay szslot
+    decay nslot
+    // Drift-trial stack detection.
+    let mut f_hbin: ptr<Int> = alloc_zeroed(STACK_HIT_CAP + 32, "Int")
+    let mut f_hsh: ptr<Int> = alloc_zeroed(STACK_HIT_CAP + 32, "Int")
+    let mut f_hsig: ptr<Int> = alloc_zeroed(STACK_HIT_CAP + 32, "Int")
+    let mut f_zb: ptr<Float> = alloc_zeroed(nch + 32, "Float")
+    let mut f_shb: ptr<Int> = alloc_zeroed(nch + 32, "Int")
+    let t1: Int = now_millis()
+    let nh: Int = stk_detect(specs, non, noff, nch, dbins, thresh, f_hbin, f_hsh, f_hsig, STACK_HIT_CAP, f_zb, f_shb)
+    let t2: Int = now_millis()
+    decay specs
+    // Global sort desc by sigma.
+    var a: Int = 1
+    while a < nh:
+        let kb: Int = mem_load(ptr_offset(f_hbin, a, "Int"), "Int")
+        let ks: Int = mem_load(ptr_offset(f_hsh, a, "Int"), "Int")
+        let kg: Int = mem_load(ptr_offset(f_hsig, a, "Int"), "Int")
+        var b: Int = a - 1
+        var moved: Int = 0
+        while b >= 0:
+            let cb: Int = mem_load(ptr_offset(f_hbin, b, "Int"), "Int")
+            let cs: Int = mem_load(ptr_offset(f_hsh, b, "Int"), "Int")
+            let cg: Int = mem_load(ptr_offset(f_hsig, b, "Int"), "Int")
+            if cg < kg:
+                mem_store(ptr_offset(f_hbin, b + 1, "Int"), cb, "Int")
+                mem_store(ptr_offset(f_hsh, b + 1, "Int"), cs, "Int")
+                mem_store(ptr_offset(f_hsig, b + 1, "Int"), cg, "Int")
+                b = b - 1
+                moved = 1
+            else:
+                break
+        if moved == 1:
+            mem_store(ptr_offset(f_hbin, b + 1, "Int"), kb, "Int")
+            mem_store(ptr_offset(f_hsh, b + 1, "Int"), ks, "Int")
+            mem_store(ptr_offset(f_hsig, b + 1, "Int"), kg, "Int")
+        a = a + 1
+    var nkept: Int = nh
+    if nkept > topk:
+        nkept = topk
+    // Report (law: every kept hit clears the threshold gate).
+    let thresh_x100: Int = (thresh * 100.0) as Int
+    var neff_r: Float = non as Float
+    if noff > 0:
+        neff_r = ((non * noff) as Float) / ((non + noff) as Float)
+    let neff_x100: Int = (neff_r * 100.0) as Int
+    var md: String = "# stack: ON=" + str(non) + " OFF=" + str(noff) + " neff_x100=" + str(neff_x100) + " nfft=" + str(nfft) + " thresh_x100=" + str(thresh_x100) + "\n"
+    if noff == 0:
+        md = md + "# note: no OFF files — M_on whitened directly (no differencing)\n"
+    md = md + "| rank | freq_hz | shift_bins | sigma_x100 | kind |\n"
+    md = md + "|---|---|---|---|---|\n"
+    var csv: String = "freq_hz,shift_bins,sigma_x100,kind\n"
+    var r: Int = 0
+    while r < nkept:
+        let kb2: Int = mem_load(ptr_offset(f_hbin, r, "Int"), "Int")
+        let ks2: Int = mem_load(ptr_offset(f_hsh, r, "Int"), "Int")
+        let kg2: Int = mem_load(ptr_offset(f_hsig, r, "Int"), "Int")
+        let fh: Int = (f0_mhz * 1000000.0 + (kb2 as Float) * fs / (nfft as Float)) as Int
+        var ok_hi: Int = 0
+        if stack_hit_ok(kg2, thresh_x100) == true:
+            ok_hi = 1
+        md = md + "| " + str(r + 1) + " | " + str(fh) + " | " + str(ks2) + " | " + str(kg2) + " | stack law=" + str(ok_hi) + " |\n"
+        csv = csv + str(fh) + "," + str(ks2) + "," + str(kg2) + ",stack\n"
+        r = r + 1
+    decay f_hbin
+    decay f_hsh
+    decay f_hsig
+    decay f_zb
+    decay f_shb
+    println(md)
+    if out_path != "":
+        fs_write_text(out_path, md)
+    if csv_path != "":
+        fs_write_text(csv_path, csv)
+    println("stack: io_stft_ms=" + str(t1 - t0) + " stack_ms=" + str(t2 - t1) + " hits=" + str(nh) + " kept=" + str(nkept))
+    println("receipt=PASS searched=1 kept=" + str(nkept))
+    return EXIT_OK

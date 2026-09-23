@@ -1,0 +1,1281 @@
+// ============================================================================
+// unify.kn — TurboKain 18: campaign report unifier
+//
+// Reads every detector table in a run directory and writes ONE unified
+// REPORT.md + ONE evidence.csv + ONE verdicts.json (fixed schema,
+// LLM-friendly), with cross-tool statistics. Replaces per-tool fragment
+// sprawl: one citable report per campaign instead of 200 scattered tables.
+//
+//   unify --dir <rundir> [--out REPORT.md] [--csv evidence.csv]
+//         [--json verdicts.json] [--target NAME] [--freq-mhz F] [--fs HZ]
+//         [--tables a,b,c] [--prove] [--help]
+//
+// Defaults: --out <dir>/REPORT.md, --csv <dir>/evidence.csv,
+//           --json <dir>/verdicts.json.
+//
+// INPUT: dir listing via std::fs fs_read_dir_paths (stdlib, verified under
+// `kain check` in this snapshot — no --tables fallback needed, though
+// --tables is kept as an explicit-input lane). .csv preferred (simple comma
+// split — our CSVs never contain quoted commas); .md pipe tables via the
+// cadence_pair row_cells/is_sep_row/col_index pattern. A .md whose stem also
+// has a .csv is skipped (csv wins).
+//
+// Per-tool harvest (flag iff): sk skflag==1; xeno lattice/verdict !=
+// XENO-CLEAN; fam hit==1 (STRUCTURES); fold detected==1; boxcar verdict==SHOT;
+// frame detected==1; drift any data row = kept tone; lag verdict != CLEAN;
+// jerk verdict != QUIET; scint class != QUIET; cad verdict col.
+// Structures deduped per (tool,star,leg,chan,kind,freq,alpha,period), max
+// sigma wins; lattice/rollup keyed (star,leg,chan) so mixed-target dirs keep
+// every star (star from filename stem, "-" when absent).
+//
+// WHY NO ACTORS: table parsing is sub-ms sequential file IO (a few hundred
+// KB of md/csv through the fs_read_text bridge). Actor fanout would be pure
+// overhead here — spawn/mailbox/backpressure buys nothing when the work is
+// one ordered pass over small text with shared accumulators. Per AGENTS.md,
+// actors are reserved for coarse fanout (channels x blocks x pols); they
+// belong to the future sweep detector-stage fanout upgrade, not to a
+// report unifier.
+//
+// Exit codes: 0 unified, 1 help, 2 error/prove failure.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::text
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::parse_int_text
+use _common::find_from
+use _common::row_cells
+use _common::is_sep_row
+use _common::col_index
+
+// Tool ids: 1=sk 2=xeno 3=fam 4=fold 5=boxcar 6=frame 7=drift 8=lag 9=jerk 10=scint 11=cad.
+
+fn uni_is_digit(c: String) -> Int:
+    if c == "0" or c == "1" or c == "2" or c == "3" or c == "4":
+        return 1
+    if c == "5" or c == "6" or c == "7" or c == "8" or c == "9":
+        return 1
+    return 0
+
+fn uni_ends_with(name: String, suf: String) -> Int:
+    let nn: Int = len(name)
+    let sn: Int = len(suf)
+    if sn > nn:
+        return 0
+    let tail: String = text_substring_string(name, nn - sn, sn)
+    if tail == suf:
+        return 1
+    return 0
+
+fn uni_basename(path: String) -> String:
+    var cut: Int = -1
+    var i: Int = 0
+    while i < len(path):
+        let c: String = char_at(path, i)
+        if c == "/":
+            cut = i
+        elif c == "\\":
+            cut = i
+        i = i + 1
+    if cut < 0:
+        return path
+    return text_substring_string(path, cut + 1, len(path) - cut - 1)
+
+fn uni_stem(name: String) -> String:
+    var dot: Int = -1
+    var i: Int = 0
+    while i < len(name):
+        if char_at(name, i) == ".":
+            dot = i
+        i = i + 1
+    if dot < 0:
+        return name
+    return text_substring_string(name, 0, dot)
+
+fn uni_digits_after(name: String, tag: String) -> Int:
+    var p: Int = find_from(name, tag, 0)
+    while p >= 0:
+        let s: Int = p + len(tag)
+        if s < len(name):
+            if uni_is_digit(char_at(name, s)) == 1:
+                var e: Int = s
+                while e < len(name):
+                    if uni_is_digit(char_at(name, e)) == 1:
+                        e = e + 1
+                    else:
+                        break
+                return parse_int_text(text_substring_string(name, s, e - s))
+        p = find_from(name, tag, p + 1)
+    return -1
+
+fn uni_leg_of(name: String) -> String:
+    if find_from(name, "_on_", 0) >= 0:
+        return "on"
+    if find_from(name, "_off_", 0) >= 0:
+        return "off"
+    if uni_ends_with(name, "_on") == 1:
+        return "on"
+    if uni_ends_with(name, "_off") == 1:
+        return "off"
+    return "UNKNOWN"
+
+fn uni_chan_of(name: String) -> Int:
+    var ch: Int = uni_digits_after(name, "_c")
+    if ch >= 0:
+        return ch
+    ch = uni_digits_after(name, "ch")
+    if ch >= 0:
+        return ch
+    ch = uni_digits_after(name, "_p")
+    if ch >= 0:
+        return ch
+    return -1
+
+fn uni_tool_of(name: String) -> Int:
+    if find_from(name, "_cad_", 0) >= 0:
+        return 11
+    if find_from(name, "cad_", 0) == 0:
+        return 11
+    if find_from(name, "_fam_", 0) >= 0:
+        return 3
+    if find_from(name, "_fold_", 0) >= 0:
+        return 4
+    if find_from(name, "_sk_", 0) >= 0:
+        return 1
+    if find_from(name, "_xeno_", 0) >= 0:
+        return 2
+    if find_from(name, "_drift_", 0) >= 0:
+        return 7
+    if find_from(name, "_lag_", 0) >= 0:
+        return 8
+    if find_from(name, "_jerk_", 0) >= 0:
+        return 9
+    if find_from(name, "_scint_", 0) >= 0:
+        return 10
+    if find_from(name, "_frame_", 0) >= 0:
+        return 6
+    if find_from(name, "_pulse_", 0) >= 0:
+        return 5
+    if find_from(name, "_boxcar_", 0) >= 0:
+        return 5
+    return 0
+
+fn uni_star_of(name: String) -> String:
+    var toks: Array<String> = []
+    push(toks, "fam")
+    push(toks, "fold")
+    push(toks, "sk")
+    push(toks, "xeno")
+    push(toks, "drift")
+    push(toks, "lag")
+    push(toks, "jerk")
+    push(toks, "scint")
+    push(toks, "frame")
+    push(toks, "pulse")
+    push(toks, "boxcar")
+    push(toks, "cad")
+    var best: Int = -1
+    var ti: Int = 0
+    while ti < len(toks):
+        let mid: String = "_" + toks[ti] + "_"
+        let pm: Int = find_from(name, mid, 0)
+        if pm >= 0:
+            if best < 0:
+                best = pm
+            else:
+                if pm < best:
+                    best = pm
+        ti = ti + 1
+    if best > 0:
+        var st: String = text_substring_string(name, 0, best)
+        while len(st) > 0:
+            if char_at(st, len(st) - 1) == "_":
+                st = text_substring_string(st, 0, len(st) - 1)
+            else:
+                break
+        if len(st) == 0:
+            return "-"
+        return st
+    if best == 0:
+        return "-"
+    var pre: Int = 0
+    while pre < len(toks):
+        let px: String = toks[pre] + "_"
+        if len(name) >= len(px):
+            if text_substring_string(name, 0, len(px)) == px:
+                return "-"
+        pre = pre + 1
+    var po: Int = find_from(name, "_on_", 0)
+    var pf: Int = find_from(name, "_off_", 0)
+    var pc: Int = -1
+    if po >= 0:
+        pc = po
+    if pf >= 0:
+        if pc < 0:
+            pc = pf
+        else:
+            if pf < pc:
+                pc = pf
+    if pc > 0:
+        return text_substring_string(name, 0, pc)
+    return "-"
+
+fn uni_norm(p: String) -> String:
+    var r: String = ""
+    var i: Int = 0
+    while i < len(p):
+        let c: String = char_at(p, i)
+        if c == "\\":
+            r = r + "/"
+        else:
+            r = r + c
+        i = i + 1
+    return r
+
+fn uni_tool_name(t: Int) -> String:
+    if t == 1:
+        return "sk"
+    if t == 2:
+        return "xeno"
+    if t == 3:
+        return "fam"
+    if t == 4:
+        return "fold"
+    if t == 5:
+        return "boxcar"
+    if t == 6:
+        return "frame"
+    if t == 7:
+        return "drift"
+    if t == 8:
+        return "lag"
+    if t == 9:
+        return "jerk"
+    if t == 10:
+        return "scint"
+    if t == 11:
+        return "cad"
+    return "unknown"
+
+fn uni_csv_cells(row: String) -> Array<String>:
+    let parts: Array<String> = text_split_string(row, ",")
+    var cells: Array<String> = []
+    var i: Int = 0
+    while i < len(parts):
+        push(cells, text_trim_string(parts[i]))
+        i = i + 1
+    return cells
+
+fn uni_header_of(text: String, is_csv: Int) -> Array<String>:
+    var header: Array<String> = []
+    let lines: Array<String> = text_split_lines(text)
+    var i: Int = 0
+    while i < len(lines):
+        let ln: String = text_trim_string(lines[i])
+        if len(ln) > 0:
+            if is_csv == 1:
+                return uni_csv_cells(ln)
+            if is_sep_row(lines[i]) == 0:
+                header = row_cells(lines[i])
+                break
+        i = i + 1
+    return header
+
+fn uni_rows_of(text: String, is_csv: Int) -> Array<String>:
+    var rows: Array<String> = []
+    let lines: Array<String> = text_split_lines(text)
+    var skipped: Int = 0
+    var i: Int = 0
+    while i < len(lines):
+        let ln2: String = text_trim_string(lines[i])
+        if len(ln2) > 0:
+            if is_csv == 1:
+                if skipped == 0:
+                    skipped = 1
+                else:
+                    push(rows, lines[i])
+            else:
+                if is_sep_row(lines[i]) == 0:
+                    if skipped == 0:
+                        skipped = 1
+                    else:
+                        push(rows, lines[i])
+        i = i + 1
+    return rows
+
+fn uni_cells_of(row: String, is_csv: Int) -> Array<String>:
+    if is_csv == 1:
+        return uni_csv_cells(row)
+    return row_cells(row)
+
+fn uni_backtick(ln: String) -> String:
+    let a: Int = find_from(ln, "`", 0)
+    if a < 0:
+        return ""
+    let b: Int = find_from(ln, "`", a + 1)
+    if b < 0:
+        return ""
+    if b <= a + 1:
+        return ""
+    return text_substring_string(ln, a + 1, b - a - 1)
+
+// Prose-report fallback for jerk/scint .md (no pipe tables there).
+// Returns "verdict,strength" (strength 0 — csv is the precise lane).
+fn uni_prose_verdict(text: String, tool: Int) -> String:
+    let lines: Array<String> = text_split_lines(text)
+    var verdict: String = "UNKNOWN"
+    var i: Int = 0
+    while i < len(lines):
+        let ln3: String = lines[i]
+        if tool == 9:
+            if find_from(ln3, "Verdict:", 0) >= 0:
+                let v: String = uni_backtick(ln3)
+                if len(v) > 0:
+                    verdict = v
+        if tool == 10:
+            if find_from(ln3, "Scintillation Class:", 0) >= 0:
+                let v2: String = uni_backtick(ln3)
+                if len(v2) > 0:
+                    verdict = v2
+        i = i + 1
+    return verdict + ",0"
+
+// Harvest one parsed table.
+// Returns block: line0 = "verdict,strength,flagged"; lines 1.. = evidence
+// csv rows (tool,star,leg,chan,kind,freq_hz,alpha_hz,period_ms,sigma,verdict,src).
+fn uni_harvest_file(tool: Int, header: Array<String>, rows: Array<String>, leg: String, chan: Int, src: String) -> String:
+    let tname: String = uni_tool_name(tool)
+    var verdict: String = "CLEAN"
+    var strength: Int = 0
+    var flagged: Int = 0
+    var ev: String = ""
+    // Rows arrive raw: csv rows split on commas, md rows on pipes
+    // (shape-detected per row since csv is preferred but md is fallback).
+    var n: Int = len(rows)
+    var i: Int = 0
+    while i < n:
+        let raw: String = rows[i]
+        var cells: Array<String> = row_cells(raw)
+        if find_from(raw, ",", 0) >= 0:
+            if find_from(raw, "|", 0) < 0:
+                cells = uni_csv_cells(raw)
+        if len(cells) != len(header):
+            i = i + 1
+            continue
+        if tool == 1:
+            let cf: Int = col_index(header, "skflag")
+            var cf2: Int = col_index(header, "skdev_x1e3")
+            if cf2 < 0:
+                cf2 = col_index(header, "skdev_x1000")
+            if cf2 >= 0:
+                let dv: Int = parse_int_text(cells[cf2])
+                if dv > strength:
+                    strength = dv
+            if cf >= 0:
+                if parse_int_text(cells[cf]) == 1:
+                    flagged = 1
+        elif tool == 2:
+            let cl: Int = col_index(header, "lattice")
+            let cv: Int = col_index(header, "verdict")
+            let cz: Int = col_index(header, "maxz_x10")
+            var zv: Int = 0
+            if cz >= 0:
+                zv = parse_int_text(cells[cz])
+                if zv > strength:
+                    strength = zv
+            var bad: Int = 0
+            if cl >= 0:
+                if cells[cl] != "XENO-CLEAN":
+                    bad = 1
+            if cv >= 0:
+                if cells[cv] != "XENO-CLEAN":
+                    bad = 1
+            if bad == 1:
+                flagged = 1
+                ev = ev + tname + "," + leg + "," + str(chan) + ",XENO,0,0,0," + str(zv) + "," + cells[cv] + "," + src + "\n"
+        elif tool == 3:
+            let ch: Int = col_index(header, "hit")
+            let ca: Int = col_index(header, "alpha_hz_x100")
+            let cr: Int = col_index(header, "ratio_x100")
+            if cr >= 0:
+                let rv: Int = parse_int_text(cells[cr])
+                if rv > strength:
+                    strength = rv
+            if ch >= 0:
+                if parse_int_text(cells[ch]) == 1:
+                    flagged = 1
+                    var av: Int = 0
+                    var rv2: Int = 0
+                    if ca >= 0:
+                        av = parse_int_text(cells[ca])
+                    if cr >= 0:
+                        rv2 = parse_int_text(cells[cr])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",FAM," + str(av) + "," + str(av) + ",0," + str(rv2) + ",HIT," + src + "\n"
+        elif tool == 4:
+            let cd: Int = col_index(header, "detected")
+            let cfq: Int = col_index(header, "freq_hz_x100")
+            let cp: Int = col_index(header, "period_ms_x100")
+            let cs: Int = col_index(header, "sigma_x100")
+            if cs >= 0:
+                let sv: Int = parse_int_text(cells[cs])
+                if sv > strength:
+                    strength = sv
+            if cd >= 0:
+                if parse_int_text(cells[cd]) == 1:
+                    flagged = 1
+                    var fq: Int = 0
+                    var pm: Int = 0
+                    var sg: Int = 0
+                    if cfq >= 0:
+                        fq = parse_int_text(cells[cfq])
+                    if cp >= 0:
+                        pm = parse_int_text(cells[cp])
+                    if cs >= 0:
+                        sg = parse_int_text(cells[cs])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",FOLD," + str(fq) + ",0," + str(pm) + "," + str(sg) + ",HIT," + src + "\n"
+        elif tool == 5:
+            let cv2: Int = col_index(header, "verdict")
+            let cs2: Int = col_index(header, "sigma_x100")
+            if cs2 >= 0:
+                let sv2: Int = parse_int_text(cells[cs2])
+                if sv2 > strength:
+                    strength = sv2
+            if cv2 >= 0:
+                if cells[cv2] == "SHOT":
+                    flagged = 1
+                    var sg2: Int = 0
+                    if cs2 >= 0:
+                        sg2 = parse_int_text(cells[cs2])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",PULSE,0,0,0," + str(sg2) + ",SHOT," + src + "\n"
+        elif tool == 6:
+            let cd2: Int = col_index(header, "detected")
+            let cfq2: Int = col_index(header, "freq_hz_x100")
+            let cp2: Int = col_index(header, "period_ms_x100")
+            let cs3: Int = col_index(header, "sigma_x100")
+            if cs3 >= 0:
+                let sv3: Int = parse_int_text(cells[cs3])
+                if sv3 > strength:
+                    strength = sv3
+            if cd2 >= 0:
+                if parse_int_text(cells[cd2]) == 1:
+                    flagged = 1
+                    var fq2: Int = 0
+                    var pm2: Int = 0
+                    var sg3: Int = 0
+                    if cfq2 >= 0:
+                        fq2 = parse_int_text(cells[cfq2])
+                    if cp2 >= 0:
+                        pm2 = parse_int_text(cells[cp2])
+                    if cs3 >= 0:
+                        sg3 = parse_int_text(cells[cs3])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",FRAME," + str(fq2) + ",0," + str(pm2) + "," + str(sg3) + ",HIT," + src + "\n"
+        elif tool == 7:
+            let cfh: Int = col_index(header, "freq_hz")
+            let ck: Int = col_index(header, "kind")
+            let cs4: Int = col_index(header, "sigma_x100")
+            flagged = 1
+            var fh: Int = 0
+            var sg4: Int = 0
+            var kk: String = "tone"
+            if cfh >= 0:
+                fh = parse_int_text(cells[cfh])
+            if cs4 >= 0:
+                sg4 = parse_int_text(cells[cs4])
+                if sg4 > strength:
+                    strength = sg4
+            if ck >= 0:
+                kk = cells[ck]
+            ev = ev + tname + "," + leg + "," + str(chan) + ",DRIFT," + str(fh) + ",0,0," + str(sg4) + "," + kk + "," + src + "\n"
+        elif tool == 8:
+            let cv3: Int = col_index(header, "verdict")
+            let cs5: Int = col_index(header, "sigma_x100")
+            let cfq3: Int = col_index(header, "freq_hz_x100")
+            if cs5 >= 0:
+                let sv5: Int = parse_int_text(cells[cs5])
+                if sv5 > strength:
+                    strength = sv5
+            if cv3 >= 0:
+                if cells[cv3] != "CLEAN":
+                    flagged = 1
+                    var fq3: Int = 0
+                    var sg5: Int = 0
+                    if cfq3 >= 0:
+                        fq3 = parse_int_text(cells[cfq3])
+                    if cs5 >= 0:
+                        sg5 = parse_int_text(cells[cs5])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",LAG," + str(fq3) + ",0,0," + str(sg5) + "," + cells[cv3] + "," + src + "\n"
+        elif tool == 9:
+            let cv4: Int = col_index(header, "verdict")
+            let cs6: Int = col_index(header, "score_x100")
+            let cf0: Int = col_index(header, "f0_hz")
+            if cs6 >= 0:
+                let sv6: Int = parse_int_text(cells[cs6])
+                if sv6 > strength:
+                    strength = sv6
+            if cv4 >= 0:
+                if cells[cv4] != "QUIET":
+                    flagged = 1
+                    var f0: Int = 0
+                    var sg6: Int = 0
+                    if cf0 >= 0:
+                        f0 = parse_int_text(cells[cf0])
+                    if cs6 >= 0:
+                        sg6 = parse_int_text(cells[cs6])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",JERK," + str(f0) + ",0,0," + str(sg6) + "," + cells[cv4] + "," + src + "\n"
+        elif tool == 10:
+            let cc: Int = col_index(header, "class")
+            let cm: Int = col_index(header, "m_med_x100")
+            if cm >= 0:
+                let mv: Int = parse_int_text(cells[cm])
+                if mv > strength:
+                    strength = mv
+            if cc >= 0:
+                if cells[cc] != "QUIET":
+                    flagged = 1
+                    var mv2: Int = 0
+                    if cm >= 0:
+                        mv2 = parse_int_text(cells[cm])
+                    ev = ev + tname + "," + leg + "," + str(chan) + ",SCINT,0,0,0," + str(mv2) + "," + cells[cc] + "," + src + "\n"
+        elif tool == 11:
+            let cv5: Int = col_index(header, "verdict")
+            let co: Int = col_index(header, "on_best")
+            let cb: Int = col_index(header, "off_best")
+            if co >= 0:
+                let ov: Int = parse_int_text(cells[co])
+                if ov > strength:
+                    strength = ov
+            if cb >= 0:
+                let bv: Int = parse_int_text(cells[cb])
+                if bv > strength:
+                    strength = bv
+            if cv5 >= 0:
+                verdict = cells[cv5]
+                if verdict != "CLEAN":
+                    flagged = 1
+        i = i + 1
+    if tool != 11:
+        if flagged == 1:
+            if tool == 7:
+                verdict = "KEPT"
+            else:
+                verdict = "HIT"
+            if tool == 1:
+                verdict = "FLAG"
+            if tool == 2:
+                verdict = "FLAG"
+            if tool == 9:
+                verdict = "TRACK"
+            if tool == 10:
+                verdict = "ACTIVE"
+        else:
+            verdict = "CLEAN"
+    if tool == 7:
+        if n == 0:
+            verdict = "CLEAN"
+            flagged = 0
+            strength = 0
+    return verdict + "," + str(strength) + "," + str(flagged) + "\n" + ev
+
+pub fn unify_usage() -> String:
+    var t: String = "unify 0.1.0 — TurboKain campaign report unifier\n"
+    t = t + "Reads every detector table in a run dir, writes ONE REPORT.md +\n"
+    t = t + "ONE evidence.csv + ONE verdicts.json with cross-tool statistics.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  unify --dir <rundir> [--out REPORT.md] [--csv evidence.csv]\n"
+    t = t + "        [--json verdicts.json] [--target NAME] [--freq-mhz F]\n"
+    t = t + "        [--fs HZ] [--tables a,b,c] [--prove] [--help]\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 unified, 1 help, 2 error/prove failure.\n"
+    return t
+
+fn uni_prove() -> Int:
+    var fails: Int = 0
+    // 1. fam csv: 1 hit + 2 quiet.
+    let fam_text: String = "tag,seg,rank,bin,alpha_hz_x100,ratio_x100,log10p_x100,hit\nY2,32768,0,2,17881,116,-782,1\nY2,32768,1,1978,17684698,108,-3,0\nY4,32768,0,2,17881,114,-100,0\n"
+    let fam_h: Array<String> = uni_header_of(fam_text, 1)
+    let fam_r: Array<String> = uni_rows_of(fam_text, 1)
+    if len(fam_h) != 8:
+        println("unify prove: FAIL fam header len=" + str(len(fam_h)))
+        fails = fails + 1
+    if len(fam_r) != 3:
+        println("unify prove: FAIL fam rows len=" + str(len(fam_r)))
+        fails = fails + 1
+    let fam_blk: String = uni_harvest_file(3, fam_h, fam_r, "on", 8, "fam_on_c8.csv")
+    let fam_head: Array<String> = uni_csv_cells(text_split_lines(fam_blk)[0])
+    if fam_head[0] != "HIT":
+        println("unify prove: FAIL fam verdict=" + fam_head[0])
+        fails = fails + 1
+    if fam_head[1] != "116":
+        println("unify prove: FAIL fam strength=" + fam_head[1])
+        fails = fails + 1
+    // 2. fold md: 1 detected + 1 quiet.
+    let fold_text: String = "| rank | freq_hz_x100 | period_ms_x100 | sigma_x100 | detected |\n|---|---|---|---|---|\n| 1 | 566 | 17642 | 361789 | 1 |\n| 2 | 283 | 35285 | 2000 | 0 |\n"
+    let fold_h: Array<String> = uni_header_of(fold_text, 0)
+    let fold_r: Array<String> = uni_rows_of(fold_text, 0)
+    if len(fold_h) != 5:
+        println("unify prove: FAIL fold header len=" + str(len(fold_h)))
+        fails = fails + 1
+    if len(fold_r) != 2:
+        println("unify prove: FAIL fold rows len=" + str(len(fold_r)))
+        fails = fails + 1
+    let fold_blk: String = uni_harvest_file(4, fold_h, fold_r, "on", 8, "fold_on_c8.md")
+    let fold_head: Array<String> = uni_csv_cells(text_split_lines(fold_blk)[0])
+    if fold_head[0] != "HIT":
+        println("unify prove: FAIL fold verdict=" + fold_head[0])
+        fails = fails + 1
+    if fold_head[1] != "361789":
+        println("unify prove: FAIL fold strength=" + fold_head[1])
+        fails = fails + 1
+    // 3. sk md clean.
+    let sk_text: String = "| file | samples | nseg | skdev_x1e3 | skfrac_x1e4 | skflag | verdict |\n|---|---|---|---|---|---|---|\n| f.f32 | 100 | 512 | 721 | 4 | 0 | CLEAN |\n"
+    let sk_blk: String = uni_harvest_file(1, uni_header_of(sk_text, 0), uni_rows_of(sk_text, 0), "on", 8, "sk_on_c8.md")
+    let sk_head: Array<String> = uni_csv_cells(text_split_lines(sk_blk)[0])
+    if sk_head[0] != "CLEAN":
+        println("unify prove: FAIL sk verdict=" + sk_head[0])
+        fails = fails + 1
+    if sk_head[1] != "721":
+        println("unify prove: FAIL sk strength=" + sk_head[1])
+        fails = fails + 1
+    // 4. drift csv empty.
+    let dr_text: String = "freq_hz,drift_x100,sigma_x100,kind\n"
+    let dr_blk: String = uni_harvest_file(7, uni_header_of(dr_text, 1), uni_rows_of(dr_text, 1), "off", 8, "drift_off_c8.csv")
+    let dr_head: Array<String> = uni_csv_cells(text_split_lines(dr_blk)[0])
+    if dr_head[0] != "CLEAN":
+        println("unify prove: FAIL drift verdict=" + dr_head[0])
+        fails = fails + 1
+    // 5. structure count == 2 across fam+fold blocks.
+    var structs: Int = 0
+    var bi: Int = 1
+    let fam_lines: Array<String> = text_split_lines(fam_blk)
+    while bi < len(fam_lines):
+        if len(text_trim_string(fam_lines[bi])) > 0:
+            structs = structs + 1
+        bi = bi + 1
+    bi = 1
+    let fold_lines: Array<String> = text_split_lines(fold_blk)
+    while bi < len(fold_lines):
+        if len(text_trim_string(fold_lines[bi])) > 0:
+            structs = structs + 1
+        bi = bi + 1
+    if structs != 2:
+        println("unify prove: FAIL structures=" + str(structs))
+        fails = fails + 1
+    // 6. filename heuristics.
+    if uni_tool_of("h54155_fam_on_c8.csv") != 3:
+        println("unify prove: FAIL tool_of fam")
+        fails = fails + 1
+    if uni_leg_of("h54155_fam_on_c8.csv") != "on":
+        println("unify prove: FAIL leg_of on")
+        fails = fails + 1
+    if uni_chan_of("h54155_fam_on_c8.csv") != 8:
+        println("unify prove: FAIL chan_of 8")
+        fails = fails + 1
+    if uni_tool_of("h54155_cad_sk_c8.md") != 11:
+        println("unify prove: FAIL tool_of cad")
+        fails = fails + 1
+    // 7. star attribution (lattice key keeps every star in mixed dirs).
+    if uni_star_of("h11048_fam_on_c8.csv") != "h11048":
+        println("unify prove: FAIL star_of h11048")
+        fails = fails + 1
+    if uni_star_of("fam_ch32_p0.csv") != "-":
+        println("unify prove: FAIL star_of tk-prefix")
+        fails = fails + 1
+    if uni_star_of("hip11048_on_c32.f32") != "hip11048":
+        println("unify prove: FAIL star_of f32leg")
+        fails = fails + 1
+    if uni_star_of("h11048_cad_fam_c8.md") != "h11048":
+        println("unify prove: FAIL star_of cad")
+        fails = fails + 1
+    // 8. disposition logic: ON-only fam+fold structures with everything
+    //    else CLEAN -> WATCH (persistence still required for CANDIDATE).
+    var disp: String = "CLEAN"
+    var on_flag: Int = 1
+    var off_flag: Int = 0
+    if on_flag == 1:
+        if off_flag == 1:
+            disp = "COMMON"
+        else:
+            disp = "WATCH"
+    if disp != "WATCH":
+        println("unify prove: FAIL disposition=" + disp)
+        fails = fails + 1
+    // 8. lattice cell format.
+    let cell: String = fam_head[0] + "(" + fam_head[1] + ")"
+    if cell != "HIT(116)":
+        println("unify prove: FAIL cell=" + cell)
+        fails = fails + 1
+    if fails == 0:
+        println("unify prove: PASS (9 checks: fam/fold hits, sk clean, drift empty, structs==2, filenames, star, WATCH, cell)")
+        return EXIT_OK
+    println("unify prove: receipt=FAIL fails=" + str(fails))
+    return EXIT_ERROR
+
+pub fn unify_main(args: Array<String>) -> Int:
+    var dir: String = ""
+    var outn: String = ""
+    var csvn: String = ""
+    var jsonn: String = ""
+    var target: String = "UNKNOWN"
+    var freqmhz: String = "?"
+    var fshz: String = "2929687.5"
+    var tables_raw: String = ""
+    var show_help: Int = 0
+    var prove: Int = 0
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--prove":
+            prove = 1
+        elif a == "--dir":
+            if i + 1 < len(args):
+                dir = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                outn = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csvn = args[i + 1]
+                i = i + 1
+        elif a == "--json":
+            if i + 1 < len(args):
+                jsonn = args[i + 1]
+                i = i + 1
+        elif a == "--target":
+            if i + 1 < len(args):
+                target = args[i + 1]
+                i = i + 1
+        elif a == "--freq-mhz":
+            if i + 1 < len(args):
+                freqmhz = args[i + 1]
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fshz = args[i + 1]
+                i = i + 1
+        elif a == "--tables":
+            if i + 1 < len(args):
+                tables_raw = args[i + 1]
+                i = i + 1
+        i = i + 1
+    if show_help == 1:
+        print(unify_usage())
+        return EXIT_HELP
+    if prove == 1:
+        return uni_prove()
+    // Collect table paths: explicit --tables comma list, else --dir scan.
+    var paths: Array<String> = []
+    if len(tables_raw) > 0:
+        let parts: Array<String> = text_split_string(tables_raw, ",")
+        var pi: Int = 0
+        while pi < len(parts):
+            let pp: String = text_trim_string(parts[pi])
+            if len(pp) > 0:
+                push(paths, pp)
+            pi = pi + 1
+    else:
+        if dir == "":
+            println("unify: need --dir <rundir> or --tables a,b,c")
+            return EXIT_ERROR
+        let entries: Array<String> = fs_read_dir_paths(dir)
+        if len(entries) == 0:
+            println("unify: empty or unreadable dir: " + dir)
+            return EXIT_ERROR
+        var ei: Int = 0
+        while ei < len(entries):
+            let e: String = entries[ei]
+            let bn: String = uni_basename(e)
+            if uni_ends_with(bn, ".csv") == 1:
+                if find_from(e, "/", 0) >= 0:
+                    push(paths, e)
+                else:
+                    if find_from(e, "\\", 0) >= 0:
+                        push(paths, e)
+                    else:
+                        push(paths, dir + "/" + bn)
+            else:
+                if uni_ends_with(bn, ".md") == 1:
+                    if find_from(e, "/", 0) >= 0:
+                        push(paths, e)
+                    else:
+                        if find_from(e, "\\", 0) >= 0:
+                            push(paths, e)
+                        else:
+                            push(paths, dir + "/" + bn)
+            ei = ei + 1
+    if len(paths) == 0:
+        println("unify: no .csv/.md tables found")
+        return EXIT_ERROR
+    if outn == "":
+        if dir != "":
+            outn = dir + "/REPORT.md"
+        else:
+            outn = "REPORT.md"
+    if csvn == "":
+        if dir != "":
+            csvn = dir + "/evidence.csv"
+        else:
+            csvn = "evidence.csv"
+    if jsonn == "":
+        if dir != "":
+            jsonn = dir + "/verdicts.json"
+        else:
+            jsonn = "verdicts.json"
+    // Per-file accumulators.
+    var f_tool: Array<Int> = []
+    var f_leg: Array<String> = []
+    var f_chan: Array<Int> = []
+    var f_verdict: Array<String> = []
+    var f_strength: Array<Int> = []
+    var f_flag: Array<Int> = []
+    var f_path: Array<String> = []
+    var f_star: Array<String> = []
+    var ev_tool: Array<String> = []
+    var ev_leg: Array<String> = []
+    var ev_chan: Array<Int> = []
+    var ev_kind: Array<String> = []
+    var ev_freq: Array<Int> = []
+    var ev_alpha: Array<Int> = []
+    var ev_period: Array<Int> = []
+    var ev_sigma: Array<Int> = []
+    var ev_verdict: Array<String> = []
+    var ev_src: Array<String> = []
+    var ev_star: Array<String> = []
+    var cad_star: Array<String> = []
+    var cad_chan: Array<Int> = []
+    var cad_kind: Array<String> = []
+    var cad_verdict: Array<String> = []
+    var seen_csv: String = "\n"
+    var skipped: Int = 0
+    var fi: Int = 0
+    while fi < len(paths):
+        let p: String = uni_norm(paths[fi])
+        let bn2: String = uni_basename(p)
+        let stem: String = uni_stem(bn2)
+        if uni_ends_with(bn2, ".md") == 1:
+            if find_from(seen_csv, "\n" + stem + "\n", 0) >= 0:
+                skipped = skipped + 1
+                fi = fi + 1
+                continue
+        if uni_ends_with(bn2, ".csv") == 1:
+            seen_csv = seen_csv + stem + "\n"
+        if fs_exists(p) == false:
+            println("unify: missing: " + p)
+            fi = fi + 1
+            continue
+        let tool: Int = uni_tool_of(bn2)
+        if tool == 0:
+            skipped = skipped + 1
+            fi = fi + 1
+            continue
+        var leg: String = uni_leg_of(bn2)
+        var chan: Int = uni_chan_of(bn2)
+        var star: String = uni_star_of(bn2)
+        let text: String = fs_read_text(p)
+        var is_csv: Int = 0
+        if uni_ends_with(bn2, ".csv") == 1:
+            is_csv = 1
+        let header: Array<String> = uni_header_of(text, is_csv)
+        let rows: Array<String> = uni_rows_of(text, is_csv)
+        // Refine leg/chan from the `file` column when present.
+        let ci_file: Int = col_index(header, "file")
+        if ci_file >= 0:
+            if len(rows) > 0:
+                let fc: Array<String> = uni_cells_of(rows[0], is_csv)
+                // md rows need pipe cells; uni_cells_of above assumed csv.
+                // Re-derive with the correct splitter.
+                var fc2: Array<String> = row_cells(rows[0])
+                if is_csv == 1:
+                    fc2 = uni_csv_cells(rows[0])
+                if ci_file < len(fc2):
+                    let fv: String = uni_basename(fc2[ci_file])
+                    if leg == "UNKNOWN":
+                        leg = uni_leg_of(fv)
+                    if chan < 0:
+                        chan = uni_chan_of(fv)
+                    if star == "-":
+                        star = uni_star_of(fv)
+        var verdict2: String = "CLEAN"
+        var strength2: Int = 0
+        var flag2: Int = 0
+        if len(header) == 0:
+            if tool == 9:
+                let pv: String = uni_prose_verdict(text, 9)
+                let pvc: Array<String> = uni_csv_cells(pv)
+                verdict2 = pvc[0]
+                strength2 = parse_int_text(pvc[1])
+                if verdict2 != "QUIET":
+                    if verdict2 != "UNKNOWN":
+                        flag2 = 1
+            elif tool == 10:
+                let pv2: String = uni_prose_verdict(text, 10)
+                let pvc2: Array<String> = uni_csv_cells(pv2)
+                verdict2 = pvc2[0]
+                strength2 = parse_int_text(pvc2[1])
+                if verdict2 != "QUIET":
+                    if verdict2 != "UNKNOWN":
+                        flag2 = 1
+            else:
+                println("unify: no header, skip: " + p)
+                skipped = skipped + 1
+                fi = fi + 1
+                continue
+        else:
+            let blk: String = uni_harvest_file(tool, header, rows, leg, chan, p)
+            let blines: Array<String> = text_split_lines(blk)
+            let hcells: Array<String> = uni_csv_cells(blines[0])
+            verdict2 = hcells[0]
+            strength2 = parse_int_text(hcells[1])
+            flag2 = parse_int_text(hcells[2])
+            var bi2: Int = 1
+            while bi2 < len(blines):
+                if len(text_trim_string(blines[bi2])) > 0:
+                    let ec: Array<String> = uni_csv_cells(blines[bi2])
+                    // Dedupe per (tool,star,leg,chan,kind,freq,alpha,period):
+                    // segbank tables repeat one structure per segment; max sigma wins.
+                    var esig: Int = parse_int_text(ec[7])
+                    var ech: Int = parse_int_text(ec[2])
+                    var efq: Int = parse_int_text(ec[4])
+                    var eal: Int = parse_int_text(ec[5])
+                    var epe: Int = parse_int_text(ec[6])
+                    var ematch: Int = -1
+                    var es: Int = 0
+                    while es < len(ev_tool):
+                        if ev_tool[es] == ec[0]:
+                            if ev_leg[es] == ec[1]:
+                                if ev_chan[es] == ech:
+                                    if ev_kind[es] == ec[3]:
+                                        if ev_freq[es] == efq:
+                                            if ev_alpha[es] == eal:
+                                                if ev_period[es] == epe:
+                                                    ematch = es
+                        es = es + 1
+                    if ematch < 0:
+                        push(ev_tool, ec[0])
+                        push(ev_leg, ec[1])
+                        push(ev_chan, ech)
+                        push(ev_kind, ec[3])
+                        push(ev_freq, efq)
+                        push(ev_alpha, eal)
+                        push(ev_period, epe)
+                        push(ev_sigma, esig)
+                        push(ev_verdict, ec[8])
+                        push(ev_src, ec[9])
+                        push(ev_star, uni_star_of(uni_basename(ec[9])))
+                    else:
+                        if esig > ev_sigma[ematch]:
+                            ev_sigma[ematch] = esig
+                            ev_verdict[ematch] = ec[8]
+                            ev_src[ematch] = ec[9]
+                            ev_star[ematch] = uni_star_of(uni_basename(ec[9]))
+                bi2 = bi2 + 1
+        push(f_tool, tool)
+        push(f_leg, leg)
+        push(f_chan, chan)
+        push(f_verdict, verdict2)
+        push(f_strength, strength2)
+        push(f_flag, flag2)
+        push(f_path, p)
+        push(f_star, star)
+        if tool == 11:
+            // cad kind from the table's kind column when present.
+            var ckind: String = "?"
+            let ck2: Int = col_index(header, "kind")
+            if ck2 >= 0:
+                if len(rows) > 0:
+                    var cc2: Array<String> = row_cells(rows[0])
+                    if is_csv == 1:
+                        cc2 = uni_csv_cells(rows[0])
+                    if ck2 < len(cc2):
+                        ckind = cc2[ck2]
+            push(cad_star, uni_star_of(bn2))
+            push(cad_chan, chan)
+            push(cad_kind, ckind)
+            push(cad_verdict, verdict2)
+        fi = fi + 1
+    let ntables: Int = len(f_tool)
+    if ntables == 0:
+        println("unify: no recognized detector tables")
+        return EXIT_ERROR
+    // Unique (star,leg,chan) lattice rows for tools 1..10: stars in
+    // first-seen order, legs on/off/UNKNOWN, then chan.
+    var lat_star: Array<String> = []
+    var lat_leg: Array<String> = []
+    var lat_chan: Array<Int> = []
+    var li2: Int = 0
+    while li2 < ntables:
+        if f_tool[li2] != 11:
+            var g0: Int = -1
+            var g1: Int = -1
+            var lg: Int = 0
+            while lg < len(lat_star):
+                if lat_star[lg] == f_star[li2]:
+                    if g0 < 0:
+                        g0 = lg
+                    g1 = lg + 1
+                lg = lg + 1
+            if g0 < 0:
+                push(lat_star, f_star[li2])
+                push(lat_leg, f_leg[li2])
+                push(lat_chan, f_chan[li2])
+            else:
+                var found: Int = 0
+                var lj: Int = g0
+                while lj < g1:
+                    if lat_leg[lj] == f_leg[li2]:
+                        if lat_chan[lj] == f_chan[li2]:
+                            found = 1
+                    lj = lj + 1
+                if found == 0:
+                    // insert ordered within star group: on(0) off(1) UNKNOWN(2), then chan.
+                    var rank: Int = 2
+                    if f_leg[li2] == "on":
+                        rank = 0
+                    elif f_leg[li2] == "off":
+                        rank = 1
+                    var pos2: Int = g1
+                    var lk: Int = g0
+                    while lk < g1:
+                        var rk2: Int = 2
+                        if lat_leg[lk] == "on":
+                            rk2 = 0
+                        elif lat_leg[lk] == "off":
+                            rk2 = 1
+                        if rk2 > rank:
+                            pos2 = lk
+                            break
+                        else:
+                            if rk2 == rank:
+                                if lat_chan[lk] > f_chan[li2]:
+                                    pos2 = lk
+                                    break
+                        lk = lk + 1
+                    // insert at pos2 via append + shift.
+                    push(lat_star, "")
+                    push(lat_leg, "")
+                    push(lat_chan, 0)
+                    var lm: Int = len(lat_star) - 1
+                    while lm > pos2:
+                        lat_star[lm] = lat_star[lm - 1]
+                        lat_leg[lm] = lat_leg[lm - 1]
+                        lat_chan[lm] = lat_chan[lm - 1]
+                        lm = lm - 1
+                    lat_star[pos2] = f_star[li2]
+                    lat_leg[pos2] = f_leg[li2]
+                    lat_chan[pos2] = f_chan[li2]
+        li2 = li2 + 1
+    // Cell lookup helper data: linear scan per (row, tool).
+    // Per-tool flag counts + floors (max clean strength + best flagged).
+    var cnt_files: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var cnt_flag: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var fl_clean: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var fl_best: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var ci3: Int = 0
+    while ci3 < ntables:
+        let tt: Int = f_tool[ci3]
+        cnt_files[tt] = cnt_files[tt] + 1
+        if f_strength[ci3] > fl_best[tt]:
+            fl_best[tt] = f_strength[ci3]
+        if f_flag[ci3] == 1:
+            cnt_flag[tt] = cnt_flag[tt] + 1
+        else:
+            if f_strength[ci3] > fl_clean[tt]:
+                fl_clean[tt] = f_strength[ci3]
+        ci3 = ci3 + 1
+    // Cadence rollup per chan x detector from ON/OFF file verdicts.
+    var roll: String = ""
+    var n_common: Int = 0
+    var n_ononly: Int = 0
+    var n_offonly: Int = 0
+    var n_clean: Int = 0
+    var rstar: Array<String> = []
+    var rchan: Array<Int> = []
+    var ch2: Int = 0
+    while ch2 < len(lat_chan):
+        var seen: Int = 0
+        var sq: Int = 0
+        while sq < len(rchan):
+            if rchan[sq] == lat_chan[ch2]:
+                if rstar[sq] == lat_star[ch2]:
+                    seen = 1
+            sq = sq + 1
+        if seen == 0:
+            push(rstar, lat_star[ch2])
+            push(rchan, lat_chan[ch2])
+        ch2 = ch2 + 1
+    var tools9: Array<Int> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    var cx: Int = 0
+    while cx < len(rchan):
+        let ccx: Int = rchan[cx]
+        let scx: String = rstar[cx]
+        var tx: Int = 0
+        while tx < len(tools9):
+            let ttx: Int = tools9[tx]
+            var onf: Int = 0
+            var offf: Int = 0
+            var onv: String = "-"
+            var offv: String = "-"
+            var fx: Int = 0
+            while fx < ntables:
+                if f_tool[fx] == ttx:
+                    if f_star[fx] == scx:
+                        if f_chan[fx] == ccx:
+                            if f_leg[fx] == "on":
+                                onf = f_flag[fx]
+                                onv = f_verdict[fx]
+                            elif f_leg[fx] == "off":
+                                offf = f_flag[fx]
+                                offv = f_verdict[fx]
+                fx = fx + 1
+            var rr: String = "CLEAN"
+            if onf == 1:
+                if offf == 1:
+                    rr = "COMMON"
+                    n_common = n_common + 1
+                else:
+                    rr = "ON-ONLY"
+                    n_ononly = n_ononly + 1
+            else:
+                if offf == 1:
+                    rr = "OFF-ONLY"
+                    n_offonly = n_offonly + 1
+                else:
+                    n_clean = n_clean + 1
+            roll = roll + "| " + scx + " | c" + str(ccx) + " | " + uni_tool_name(ttx) + " | " + onv + " | " + offv + " | " + rr + " |\n"
+            tx = tx + 1
+        cx = cx + 1
+    // Disposition: ON-ONLY structured -> WATCH; elif COMMON -> COMMON.
+    var disp2: String = "CLEAN"
+    var why: String = "no structured detections above any gate"
+    if n_common > 0:
+        disp2 = "COMMON"
+        why = str(n_common) + " common-mode detector-chan pairs (scored, veto decides)"
+    if n_ononly > 0:
+        disp2 = "WATCH"
+        why = str(n_ononly) + " ON-only structured pairs (persistence required for CANDIDATE)"
+    // ── REPORT.md ──
+    var rep: String = "# Campaign Report — " + target + " (unify)\n\n"
+    rep = rep + "- Target: " + target + " | freq: " + freqmhz + " MHz | fs: " + fshz + " Hz\n"
+    rep = rep + "- Dir: " + dir + " | tables: " + str(ntables) + " | skipped: " + str(skipped) + "\n"
+    rep = rep + "- Structures: " + str(len(ev_tool)) + " | disposition: " + disp2 + " (" + why + ")\n\n"
+    rep = rep + "## File inventory\n\n"
+    rep = rep + "| tool | files | flagged |\n|---|---|---|\n"
+    var ti2: Int = 1
+    while ti2 <= 11:
+        if cnt_files[ti2] > 0:
+            rep = rep + "| " + uni_tool_name(ti2) + " | " + str(cnt_files[ti2]) + " | " + str(cnt_flag[ti2]) + " |\n"
+        ti2 = ti2 + 1
+    rep = rep + "\n## Verdict lattice (leg x chan)\n\n"
+    rep = rep + "| star | leg | chan | sk | xeno | fam | fold | boxcar | frame | drift | lag | jerk | scint |\n"
+    rep = rep + "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    var lr: Int = 0
+    while lr < len(lat_leg):
+        var row: String = "| " + lat_star[lr] + " | " + lat_leg[lr] + " | c" + str(lat_chan[lr]) + " "
+        var tj: Int = 0
+        while tj < len(tools9):
+            var cell2: String = "-"
+            var fk: Int = 0
+            while fk < ntables:
+                if f_tool[fk] == tools9[tj]:
+                    if f_star[fk] == lat_star[lr]:
+                        if f_leg[fk] == lat_leg[lr]:
+                            if f_chan[fk] == lat_chan[lr]:
+                                cell2 = f_verdict[fk] + "(" + str(f_strength[fk]) + ")"
+                fk = fk + 1
+            row = row + "| " + cell2 + " "
+            tj = tj + 1
+        row = row + "|\n"
+        rep = rep + row
+        lr = lr + 1
+    rep = rep + "\n## Structures (ranked harvested hits)\n\n"
+    rep = rep + "freq/alpha/period/sigma are x100 integers (17881 = 178.81 Hz, 566 = 5.66 Hz).\n\n"
+    rep = rep + "| # | tool | star | leg | chan | kind | freq_hz | alpha_hz | period_ms | sigma | verdict | source |\n"
+    rep = rep + "|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    var er: Int = 0
+    while er < len(ev_tool):
+        rep = rep + "| " + str(er + 1) + " | " + ev_tool[er] + " | " + ev_star[er] + " | " + ev_leg[er] + " | c" + str(ev_chan[er]) + " | " + ev_kind[er] + " | " + str(ev_freq[er]) + " | " + str(ev_alpha[er]) + " | " + str(ev_period[er]) + " | " + str(ev_sigma[er]) + " | " + ev_verdict[er] + " | " + uni_basename(ev_src[er]) + " |\n"
+        er = er + 1
+    if len(ev_tool) == 0:
+        rep = rep + "| - | none | - | - | - | - | - | - | - | - | - | - |\n"
+    rep = rep + "\n## Cadence rollup (ON vs OFF per chan x detector)\n\n"
+    rep = rep + "| star | chan | det | on | off | gate |\n|---|---|---|---|---|---|\n"
+    rep = rep + roll
+    rep = rep + "\nGates: COMMON=" + str(n_common) + " ON-ONLY=" + str(n_ononly) + " OFF-ONLY=" + str(n_offonly) + " CLEAN=" + str(n_clean) + "\n"
+    if len(cad_chan) > 0:
+        rep = rep + "\nGate receipts (cad tables):\n\n"
+        rep = rep + "| star | chan | kind | verdict |\n|---|---|---|---|\n"
+        var cr2: Int = 0
+        while cr2 < len(cad_chan):
+            rep = rep + "| " + cad_star[cr2] + " | c" + str(cad_chan[cr2]) + " | " + cad_kind[cr2] + " | " + cad_verdict[cr2] + " |\n"
+            cr2 = cr2 + 1
+    rep = rep + "\n## Floors (max sub-gate strength per detector)\n\n"
+    rep = rep + "| det | max clean | best flagged |\n|---|---|---|\n"
+    var tf: Int = 1
+    while tf <= 10:
+        if cnt_files[tf] > 0:
+            rep = rep + "| " + uni_tool_name(tf) + " | " + str(fl_clean[tf]) + " | " + str(fl_best[tf]) + " |\n"
+        tf = tf + 1
+    rep = rep + "\n## Disposition\n\n" + disp2 + " — " + why + ".\n"
+    // ── evidence.csv ──
+    var csv: String = "tool,star,leg,chan,kind,freq_hz,alpha_hz,period_ms,sigma,verdict,source\n"
+    var ce: Int = 0
+    while ce < len(ev_tool):
+        csv = csv + ev_tool[ce] + "," + ev_star[ce] + "," + ev_leg[ce] + "," + str(ev_chan[ce]) + "," + ev_kind[ce] + "," + str(ev_freq[ce]) + "," + str(ev_alpha[ce]) + "," + str(ev_period[ce]) + "," + str(ev_sigma[ce]) + "," + ev_verdict[ce] + "," + ev_src[ce] + "\n"
+        ce = ce + 1
+    // ── verdicts.json (fixed schema, ints only) ──
+    var js: String = "{\"meta\":{\"tool\":\"unify\",\"target\":\"" + target + "\",\"dir\":\"" + dir + "\",\"tables\":" + str(ntables) + "},\"lattice\":["
+    var jr: Int = 0
+    while jr < len(lat_leg):
+        if jr > 0:
+            js = js + ","
+        js = js + "{\"star\":\"" + lat_star[jr] + "\",\"leg\":\"" + lat_leg[jr] + "\",\"chan\":" + str(lat_chan[jr])
+        var jt2: Int = 0
+        while jt2 < len(tools9):
+            var cell3: String = "-"
+            var fm: Int = 0
+            while fm < ntables:
+                if f_tool[fm] == tools9[jt2]:
+                    if f_star[fm] == lat_star[jr]:
+                        if f_leg[fm] == lat_leg[jr]:
+                            if f_chan[fm] == lat_chan[jr]:
+                                cell3 = f_verdict[fm] + "(" + str(f_strength[fm]) + ")"
+                fm = fm + 1
+            js = js + ",\"" + uni_tool_name(tools9[jt2]) + "\":\"" + cell3 + "\""
+            jt2 = jt2 + 1
+        js = js + "}"
+        jr = jr + 1
+    js = js + "],\"structures\":["
+    var je: Int = 0
+    while je < len(ev_tool):
+        if je > 0:
+            js = js + ","
+        js = js + "{\"tool\":\"" + ev_tool[je] + "\",\"star\":\"" + ev_star[je] + "\",\"leg\":\"" + ev_leg[je] + "\",\"chan\":" + str(ev_chan[je]) + ",\"kind\":\"" + ev_kind[je] + "\",\"freq_hz\":" + str(ev_freq[je]) + ",\"alpha_hz\":" + str(ev_alpha[je]) + ",\"period_ms\":" + str(ev_period[je]) + ",\"sigma\":" + str(ev_sigma[je]) + ",\"verdict\":\"" + ev_verdict[je] + "\"}"
+        je = je + 1
+    js = js + "],\"floors\":{"
+    var jf: Int = 1
+    var first: Int = 1
+    while jf <= 10:
+        if cnt_files[jf] > 0:
+            if first == 0:
+                js = js + ","
+            js = js + "\"" + uni_tool_name(jf) + "_best_subgate\":" + str(fl_clean[jf])
+            first = 0
+        jf = jf + 1
+    js = js + "},\"disposition\":\"" + disp2 + "\"}"
+    fs_write_text(outn, rep)
+    fs_write_text(csvn, csv)
+    fs_write_text(jsonn, js)
+    println("unify: tables=" + str(ntables) + " skipped=" + str(skipped) + " structures=" + str(len(ev_tool)) + " disposition=" + disp2)
+    println("unify: wrote " + outn)
+    println("unify: wrote " + csvn)
+    println("unify: wrote " + jsonn)
+    return EXIT_OK

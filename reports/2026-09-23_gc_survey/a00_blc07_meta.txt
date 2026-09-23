@@ -1,0 +1,8 @@
+src=D:/data/gc/blc07_guppi_58705_15130_BLGCsurvey_Cband_A00_0062.gpuspec.0002.h5
+nchans=65536
+ntime=3352
+tsamp=1.0737418239999998
+fs_hz=0.9313225746154786
+fch1=7126.46484375
+foff=-0.00286102294921875
+source=BLGCsurvey_Cband_A00
