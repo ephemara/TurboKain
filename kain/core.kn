@@ -1,7 +1,7 @@
 // -- KAIN RAW AMALGAMATION -- core ----------------------------------------------------------
 // kind:       directory
 // contents:   source
-// structure:  21 files | 21 modules
+// structure:  22 files | 22 modules
 //
 // -- PUBLIC INTERFACE DIRECTORY -----------------------------------------------
 //
@@ -688,6 +688,17 @@ pub fn col_index(header: Array<String>, name: String) -> Int:
             return i
         i = i + 1
     return -1
+
+
+pub fn str_ends_with(name: String, suf: String) -> Int:
+    let nn: Int = len(name)
+    let sn: Int = len(suf)
+    if sn > nn:
+        return 0
+    let tail: String = text_substring_string(name, nn - sn, sn)
+    if tail == suf:
+        return 1
+    return 0
 
 // ============================================================================
 // bitslice.kn
@@ -3736,6 +3747,7 @@ use _common::EXIT_OK
 use _common::EXIT_HELP
 use _common::EXIT_ERROR
 use _common::bref
+use _common::str_ends_with
 
 @extern @link_name("GetCommandLineA")
 fn k_GetCommandLineA() -> ptr<Byte>
@@ -3747,24 +3759,25 @@ fn usage() -> String:
     t = t + "USAGE:\n"
     t = t + "  tkc <tool> [args...]             Run any instrument directly (shorthands work)\n"
     t = t + "  tkc help <tool>                  Detailed CLI help for a specific tool\n"
-    t = t + "  tkc prove                        Run all 14 formal prove batteries in-memory\n"
-    t = t + "  tkc sweep <f32> [options...]     Run full detector battery over a time series\n\n"
+    t = t + "  tkc prove                        Run all 15 formal prove batteries in-memory\n"
+    t = t + "  tkc sweep <input> [options...]   Run full detector battery over .f32, .h5, .fil, or .raw\n\n"
     t = t + "BINARY ALIASES:  tkc / core / turbokain_core / turbokain are all identical\n\n"
     t = t + "TOOL SHORTHANDS:\n"
     t = t + "  bitslice     -> bits              boxcar_bank  -> boxcar, bb\n"
     t = t + "  cadence_pair -> cadence, cad      config       -> cfg\n"
     t = t + "  drift_hunt   -> drift             fam_god      -> fam\n"
     t = t + "  fil_reader   -> fil               fold_sum     -> fold\n"
-    t = t + "  frame_hunt   -> frame             jerk_track   -> jerk\n"
-    t = t + "  lag_hunt     -> lag               raster_hunt  -> raster\n"
-    t = t + "  scint_pol    -> scint, pol        sk_gate      -> sk\n"
-    t = t + "  xeno_scan    -> xeno              xvm_sandbox  -> xvm\n"
-    t = t + "  slice        -> slice\n"
-    t = t + "  stack        -> stk\n\n"
-    t = t + "INSTRUMENTS (19 total):\n"
+    t = t + "  frame_hunt   -> frame             h5_reader    -> h5, h5reader\n"
+    t = t + "  jerk_track   -> jerk              lag_hunt     -> lag\n"
+    t = t + "  raster_hunt  -> raster            scint_pol    -> scint, pol\n"
+    t = t + "  sk_gate      -> sk                slice        -> slice\n"
+    t = t + "  stack        -> stk               xeno_scan    -> xeno\n"
+    t = t + "  xvm_sandbox  -> xvm\n\n"
+    t = t + "INSTRUMENTS (20 total):\n"
     t = t + "  [Ingest / Calibration]\n"
     t = t + "    slice         GUPPI .raw -> .f32 channel/pol voltage slice (2/8-bit)\n"
     t = t + "    fil_reader    Sigproc .fil -> .f32 voltage slice (8/16/32-bit)\n"
+    t = t + "    h5_reader     BL HDF5 filterbank -> .f32 voltage slice (bitshuffle/gzip, 8/16/32-bit)\n"
     t = t + "    config        Header/CLI/preset geometry resolver (40 parameters)\n\n"
     t = t + "  [Anomaly & RFI Screening]\n"
     t = t + "    sk_gate       Spectral kurtosis excision gate (4096/2048 STFT)\n"
@@ -3800,6 +3813,8 @@ fn tool_help(tool: String) -> Int:
         print(slice_usage())
     elif tool == "fil_reader" or tool == "fil":
         print(fil_reader_usage())
+    elif tool == "h5_reader" or tool == "h5" or tool == "h5reader":
+        print(h5_reader_usage())
     elif tool == "sk_gate" or tool == "sk":
         print(sk_gate_usage())
     elif tool == "boxcar_bank" or tool == "boxcar" or tool == "bb":
@@ -3906,6 +3921,8 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return fam_god_main(sub)
     elif tool == "fil_reader" or tool == "fil":
         return fil_reader_main(sub)
+    elif tool == "h5_reader" or tool == "h5" or tool == "h5reader":
+        return h5_reader_main(sub)
     elif tool == "fold_sum" or tool == "fold":
         return fold_sum_main(sub)
     elif tool == "frame_hunt" or tool == "frame":
@@ -3942,55 +3959,58 @@ fn is_suite_binary(stem: String) -> Int:
 
 fn run_prove_all() -> Int with Unsafe:
     println("================================================================================")
-    println(" TurboKain Core Suite — Unified Native Prove Battery (14 instruments)")
+    println(" TurboKain Core Suite — Unified Native Prove Battery (15 instruments)")
     println("================================================================================")
     var failed: Int = 0
 
-    println("\n[1/14] bitslice --prove")
+    println("\n[1/15] bitslice --prove")
     if bitslice_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[2/14] boxcar_bank --prove")
+    println("\n[2/15] boxcar_bank --prove")
     if boxcar_bank_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[3/14] config --prove")
+    println("\n[3/15] config --prove")
     if config_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[4/14] drift_hunt --prove")
+    println("\n[4/15] drift_hunt --prove")
     if drift_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[5/14] fil_reader --prove")
+    println("\n[5/15] fil_reader --prove")
     if fil_reader_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[6/14] frame_hunt --prove")
+    println("\n[6/15] frame_hunt --prove")
     if frame_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[7/14] lag_hunt --prove")
+    println("\n[7/15] lag_hunt --prove")
     if lag_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[8/14] xeno_scan --selftest")
+    println("\n[8/15] xeno_scan --selftest")
     if xeno_scan_main(["--selftest"]) != 0: failed = failed + 1
 
-    println("\n[9/14] xvm_sandbox --selftest")
+    println("\n[9/15] xvm_sandbox --selftest")
     if xvm_sandbox_main(["--selftest"]) != 0: failed = failed + 1
 
-    println("\n[10/14] raster_hunt --prove")
+    println("\n[10/15] raster_hunt --prove")
     if raster_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[11/14] jerk_track --prove")
+    println("\n[11/15] jerk_track --prove")
     if jerk_track_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[12/14] scint_pol --prove")
+    println("\n[12/15] scint_pol --prove")
     if scint_pol_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[13/14] unify --prove")
+    println("\n[13/15] unify --prove")
     if unify_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[14/14] stack --prove")
+    println("\n[14/15] stack --prove")
     if stack_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[15/15] h5_reader --prove")
+    if h5_reader_main(["--prove"]) != 0: failed = failed + 1
 
     println("\n================================================================================")
     if failed == 0:
-        println(" Core Battery Receipt: ALL 14 PROVE BATTERIES PASSED (receipt=PASS)")
+        println(" Core Battery Receipt: ALL 15 PROVE BATTERIES PASSED (receipt=PASS)")
         println("================================================================================")
         return EXIT_OK
     else:
@@ -4000,12 +4020,17 @@ fn run_prove_all() -> Int with Unsafe:
 
 fn run_sweep(sub: Array<String>) -> Int with Unsafe:
     if len(sub) == 0:
-        println("Usage: core sweep <file.f32> [--out-dir DIR] [--fs HZ]")
-        println("Runs full detector battery over a .f32 voltage series in a single pass.")
+        println("Usage: core sweep <file.f32|file.h5|file.fil|file.raw> [--out-dir DIR] [--chan C] [--pol P] [--fs HZ] [--target T] [--freq-mhz F]")
+        println("Runs full detector battery over a time series in a single pass.")
+        println("Stage 10 (unify) auto-writes REPORT.md + evidence.csv + verdicts.json.")
         return EXIT_HELP
-    let f32_path: String = sub[0]
+    var f32_path: String = sub[0]
     var out_dir: String = "reports/sweep"
     var fs_hz: String = "2929687.5"
+    var target: String = "UNKNOWN"
+    var freqmhz: String = "?"
+    var want_chan: String = "0"
+    var want_pol: String = "0"
     var i: Int = 1
     while i < len(sub):
         if sub[i] == "--out-dir" and i + 1 < len(sub):
@@ -4014,7 +4039,44 @@ fn run_sweep(sub: Array<String>) -> Int with Unsafe:
         elif sub[i] == "--fs" and i + 1 < len(sub):
             fs_hz = sub[i + 1]
             i = i + 1
+        elif sub[i] == "--chan" and i + 1 < len(sub):
+            want_chan = sub[i + 1]
+            i = i + 1
+        elif sub[i] == "--pol" and i + 1 < len(sub):
+            want_pol = sub[i + 1]
+            i = i + 1
+        elif sub[i] == "--target" and i + 1 < len(sub):
+            target = sub[i + 1]
+            i = i + 1
+        elif sub[i] == "--freq-mhz" and i + 1 < len(sub):
+            freqmhz = sub[i + 1]
+            i = i + 1
         i = i + 1
+
+    if str_ends_with(f32_path, ".h5") == 1 or str_ends_with(f32_path, ".hdf5") == 1:
+        println("\n[Ingest] h5_reader (BL HDF5 filterbank chan=" + want_chan + " pol=" + want_pol + ")")
+        let h5_out: String = out_dir + "/slice.f32"
+        let h5_rc: Int = h5_reader_main(["--in", f32_path, "--chan", want_chan, "--pol", want_pol, "--out", h5_out])
+        if h5_rc != 0:
+            println("core sweep: h5_reader failed on " + f32_path)
+            return EXIT_ERROR
+        f32_path = h5_out
+    elif str_ends_with(f32_path, ".fil") == 1:
+        println("\n[Ingest] fil_reader (Sigproc .fil chan=" + want_chan + ")")
+        let fil_out: String = out_dir + "/slice.f32"
+        let fil_rc: Int = fil_reader_main(["--in", f32_path, "--chan", want_chan, "--out", fil_out])
+        if fil_rc != 0:
+            println("core sweep: fil_reader failed on " + f32_path)
+            return EXIT_ERROR
+        f32_path = fil_out
+    elif str_ends_with(f32_path, ".raw") == 1:
+        println("\n[Ingest] slice (GUPPI raw chan=" + want_chan + " pol=" + want_pol + ")")
+        let raw_out: String = out_dir + "/slice.f32"
+        let raw_rc: Int = slice_main(["--in", f32_path, "--chan", want_chan, "--pol", want_pol, "--out", raw_out])
+        if raw_rc != 0:
+            println("core sweep: slice failed on " + f32_path)
+            return EXIT_ERROR
+        f32_path = raw_out
 
     println("================================================================================")
     println(" TurboKain Unified Sweep Battery -> " + f32_path)
@@ -4047,6 +4109,9 @@ fn run_sweep(sub: Array<String>) -> Int with Unsafe:
 
     println("\n[Stage 9/9] scint_pol (Interstellar scintillation & polarization coherence)")
     let _sp: Int = scint_pol_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/scint"])
+
+    println("\n[Stage 10/10] unify (campaign report pack: REPORT.md + evidence.csv + verdicts.json)")
+    let _un: Int = unify_main(["--dir", out_dir, "--target", target, "--freq-mhz", freqmhz, "--fs", fs_hz])
 
     println("\n================================================================================")
     println(" Sweep complete. Review tables under " + out_dir)
@@ -8495,6 +8560,99 @@ pub fn frame_hunt_main(args: Array<String>) -> Int with Unsafe:
     println("frame_hunt: N=" + str(nsamp) + " span_x100=" + str((span2 * 100.0) as Int) + "s best_ms_x100=" + str(bper) + " freq_x100=" + str(bfr) + " sig_x100=" + str(bsig) + " law=" + str(lok) + " ms=" + str(t1 - t0))
     println("receipt=PASS searched=1 detected=" + str(bdet))
     return EXIT_OK
+
+// ============================================================================
+// h5_reader.kn
+// ============================================================================
+// ============================================================================
+// h5_reader.kn — TurboKain 15: BL HDF5 filterbank ingest at slice parity
+//
+// The 55 GB GC survey unlock: Breakthrough Listen Galactic Center survey
+// (blc00..35 C-band gpuspec) and Sgr B2 data exist as HDF5 filterbank (.h5).
+// Logically identical to .fil (time x freq power spectra + header metadata),
+// stored in HDF5 containers with bitshuffle compression.
+//
+// CLI/CSV contract mirrors fil_reader.kn and slice.kn:
+//   h5_reader <file.h5> [chan] [out.f32]   (positional shorthand)
+//   h5_reader --in <file.h5> --chan N --out x.f32 [--pol P] [--out-md m.md] [--csv c.csv]
+//   h5_reader --in <file.h5> --chan-lo A --chan-hi B --mean --out light.f32
+//   h5_reader --in <file.h5> --spec T --out spec.f32
+//   h5_reader --prove                  (synthetic H5 roundtrip)
+//   no --out -> probe-only (header, geometry, sample rate, compression).
+//
+// Exit codes: 0 ok, 1 help / prove FAIL, 2 error.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::text
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+
+fn resolve_h5_script() -> String:
+    if fs_exists("python/turbokain/h5_reader.py"):
+        return "python/turbokain/h5_reader.py"
+    if fs_exists("../python/turbokain/h5_reader.py"):
+        return "../python/turbokain/h5_reader.py"
+    if fs_exists("../../python/turbokain/h5_reader.py"):
+        return "../../python/turbokain/h5_reader.py"
+    if fs_exists("D:/TurboKain/python/turbokain/h5_reader.py"):
+        return "D:/TurboKain/python/turbokain/h5_reader.py"
+    return ""
+
+pub fn h5_reader_usage() -> String:
+    var t: String = "h5_reader 0.1.0 — TurboKain BL HDF5 filterbank ingest\n"
+    t = t + ".h5 in -> .f32 LE time-series out (slice contract for BL filterbank).\n"
+    t = t + "Supports bitshuffle/gzip compression, 8/16/32-bit spectra, feed selection.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  h5_reader <file.h5> [chan] [out.f32]   (positional shorthand)\n"
+    t = t + "  h5_reader --in <file.h5> --chan N --out x.f32 [--pol P] [--out-md m.md] [--csv c.csv]\n"
+    t = t + "  h5_reader --in <file.h5> --chan-lo A --chan-hi B --mean --out light.f32\n"
+    t = t + "  h5_reader --in <file.h5> --spec T --out spec.f32\n"
+    t = t + "  h5_reader --prove                  (synthetic roundtrip)\n"
+    t = t + "  no --out -> probe-only (header + geometry + compression).\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 ok, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+pub fn h5_reader_main(args: Array<String>) -> Int with Unsafe:
+    var show_help: Int = 0
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help" or a == "-h":
+            show_help = 1
+        i = i + 1
+
+    if show_help == 1:
+        print(h5_reader_usage())
+        return EXIT_HELP
+
+    let script: String = resolve_h5_script()
+    if script == "":
+        println("h5_reader: error: python/turbokain/h5_reader.py not found in search paths")
+        return EXIT_ERROR
+
+    let spec: Int = process_spec_create("python")
+    let _s0: Int = process_spec_add_arg(spec, script)
+    var j: Int = 0
+    while j < len(args):
+        let _a: Int = process_spec_add_arg(spec, args[j])
+        j = j + 1
+
+    let pid: Int = process_spawn(spec)
+    if pid < 0:
+        println("h5_reader: error: failed to spawn python process")
+        let _ds0: Int = process_spec_destroy(spec)
+        return EXIT_ERROR
+
+    let _w: Int = process_wait(pid, 3600000)
+    let code: Int = process_exit_code(pid)
+    let _cl: Int = process_close(pid)
+    let _ds: Int = process_spec_destroy(spec)
+    return code
 
 // ============================================================================
 // jerk_track.kn
@@ -14857,32 +15015,69 @@ fn uni_chan_of(name: String) -> Int:
         return ch
     return -1
 
-fn uni_tool_of(name: String) -> Int:
-    if find_from(name, "_cad_", 0) >= 0:
-        return 11
-    if find_from(name, "cad_", 0) == 0:
-        return 11
-    if find_from(name, "_fam_", 0) >= 0:
-        return 3
-    if find_from(name, "_fold_", 0) >= 0:
-        return 4
-    if find_from(name, "_sk_", 0) >= 0:
+fn uni_tool_hit(name: String, word: String) -> Int:
+    if name == word:
         return 1
-    if find_from(name, "_xeno_", 0) >= 0:
+    if len(name) > len(word):
+        if text_substring_string(name, 0, len(word) + 1) == word + "_":
+            return 1
+        let tail: String = text_substring_string(name, len(name) - len(word) - 1, len(word) + 1)
+        if tail == "_" + word:
+            return 1
+    let mid: String = "_" + word + "_"
+    if find_from(name, mid, 0) >= 0:
+        return 1
+    return 0
+
+fn uni_tool_of(name: String) -> Int:
+    let st: String = uni_stem(uni_basename(name))
+    if uni_tool_hit(st, "cad") == 1:
+        return 11
+    if uni_tool_hit(st, "cadence") == 1:
+        return 11
+    if uni_tool_hit(st, "cadence_pair") == 1:
+        return 11
+    if uni_tool_hit(st, "fam") == 1:
+        return 3
+    if uni_tool_hit(st, "fam_god") == 1:
+        return 3
+    if uni_tool_hit(st, "fold") == 1:
+        return 4
+    if uni_tool_hit(st, "fold_sum") == 1:
+        return 4
+    if uni_tool_hit(st, "sk") == 1:
+        return 1
+    if uni_tool_hit(st, "sk_gate") == 1:
+        return 1
+    if uni_tool_hit(st, "xeno") == 1:
         return 2
-    if find_from(name, "_drift_", 0) >= 0:
+    if uni_tool_hit(st, "xeno_scan") == 1:
+        return 2
+    if uni_tool_hit(st, "drift") == 1:
         return 7
-    if find_from(name, "_lag_", 0) >= 0:
+    if uni_tool_hit(st, "drift_hunt") == 1:
+        return 7
+    if uni_tool_hit(st, "lag") == 1:
         return 8
-    if find_from(name, "_jerk_", 0) >= 0:
+    if uni_tool_hit(st, "lag_hunt") == 1:
+        return 8
+    if uni_tool_hit(st, "jerk") == 1:
         return 9
-    if find_from(name, "_scint_", 0) >= 0:
+    if uni_tool_hit(st, "jerk_track") == 1:
+        return 9
+    if uni_tool_hit(st, "scint") == 1:
         return 10
-    if find_from(name, "_frame_", 0) >= 0:
+    if uni_tool_hit(st, "scint_pol") == 1:
+        return 10
+    if uni_tool_hit(st, "frame") == 1:
         return 6
-    if find_from(name, "_pulse_", 0) >= 0:
+    if uni_tool_hit(st, "frame_hunt") == 1:
+        return 6
+    if uni_tool_hit(st, "pulse") == 1:
         return 5
-    if find_from(name, "_boxcar_", 0) >= 0:
+    if uni_tool_hit(st, "boxcar") == 1:
+        return 5
+    if uni_tool_hit(st, "boxcar_bank") == 1:
         return 5
     return 0
 
@@ -15400,6 +15595,19 @@ fn uni_prove() -> Int:
     if uni_tool_of("h54155_cad_sk_c8.md") != 11:
         println("unify prove: FAIL tool_of cad")
         fails = fails + 1
+    // 7. bare sweep stems + tk-scan stems resolve to the same tools.
+    if uni_tool_of("fam.md") != 3:
+        println("unify prove: FAIL tool_of bare fam")
+        fails = fails + 1
+    if uni_tool_of("sk_gate_ch8_p0.md") != 1:
+        println("unify prove: FAIL tool_of tk sk")
+        fails = fails + 1
+    if uni_tool_of("pulse.csv") != 5:
+        println("unify prove: FAIL tool_of bare pulse")
+        fails = fails + 1
+    if uni_tool_of("jerk.csv") != 9:
+        println("unify prove: FAIL tool_of bare jerk")
+        fails = fails + 1
     // 7. star attribution (lattice key keeps every star in mixed dirs).
     if uni_star_of("h11048_fam_on_c8.csv") != "h11048":
         println("unify prove: FAIL star_of h11048")
@@ -15426,13 +15634,13 @@ fn uni_prove() -> Int:
     if disp != "WATCH":
         println("unify prove: FAIL disposition=" + disp)
         fails = fails + 1
-    // 8. lattice cell format.
+    // 9. lattice cell format.
     let cell: String = fam_head[0] + "(" + fam_head[1] + ")"
     if cell != "HIT(116)":
         println("unify prove: FAIL cell=" + cell)
         fails = fails + 1
     if fails == 0:
-        println("unify prove: PASS (9 checks: fam/fold hits, sk clean, drift empty, structs==2, filenames, star, WATCH, cell)")
+        println("unify prove: PASS (10 checks: fam/fold hits, sk clean, drift empty, structs==2, filenames, star, stems, WATCH, cell)")
         return EXIT_OK
     println("unify prove: receipt=FAIL fails=" + str(fails))
     return EXIT_ERROR
@@ -17201,8 +17409,8 @@ fn stack_run(sym: ptr<Byte>, plen: Int, w: Int, out3: ptr<Int>, budget: Int) wit
 
 // Sweep widths 3..8, winner = most backward jumps, ties = most ops.
 fn stack_best(buf: ptr<Byte>, nbits: Int, out4: ptr<Int>, budget: Int) with Unsafe:
-    let mut bits: ptr<Byte> = alloc_zeroed(STK_MAXSYM * 8, "Byte")
-    let mut sym: ptr<Byte> = alloc_zeroed(STK_MAXSYM, "Byte")
+    let mut bits: ptr<Byte> = alloc_zeroed(STK_MAXSYM * 8 + 32, "Byte")
+    let mut sym: ptr<Byte> = alloc_zeroed(STK_MAXSYM + 32, "Byte")
     let mut o3: ptr<Int> = alloc_zeroed(3, "Int")
     var cap: Int = STK_MAXSYM * 8
     if nbits < cap:
@@ -17256,8 +17464,8 @@ fn stack_best(buf: ptr<Byte>, nbits: Int, out4: ptr<Int>, budget: Int) with Unsa
 
 // ── Rule-110 CA: density-trajectory variance, best of 4 windows ─────────────
 fn ca110_window(buf: ptr<Byte>, nbits: Int, off: Int) -> Int with Unsafe:
-    let mut cur: ptr<Byte> = alloc_zeroed(CA_W, "Byte")
-    let mut nxt: ptr<Byte> = alloc_zeroed(CA_W, "Byte")
+    let mut cur: ptr<Byte> = alloc_zeroed(CA_W + 32, "Byte")
+    let mut nxt: ptr<Byte> = alloc_zeroed(CA_W + 32, "Byte")
     var i: Int = 0
     while i < CA_W:
         bstore(cur, i, getbit(buf, (off + i) % nbits))
@@ -17429,7 +17637,7 @@ fn bm_region(buf: ptr<Byte>, off: Int, len: Int, lout: ptr<Int>) -> Int with Uns
     if n < BM_MIN_N:
         mem_store(lout, 0, "Int")
         return 0
-    let mut b: ptr<Byte> = alloc_zeroed(BM_N, "Byte")
+    let mut b: ptr<Byte> = alloc_zeroed(BM_N + 32, "Byte")
     var i: Int = 0
     while i < n:
         bstore(b, i, getbit(buf, off + i))
@@ -17611,7 +17819,7 @@ fn tag_run(buf: ptr<Byte>, nbits: Int, budget: Int, out2: ptr<Int>) with Unsafe:
     var seedn: Int = TAG_SEEDB
     if nbits < seedn:
         seedn = nbits
-    let mut q: ptr<Byte> = alloc_zeroed(TAG_CAP, "Byte")
+    let mut q: ptr<Byte> = alloc_zeroed(TAG_CAP + 32, "Byte")
     var head: Int = 0
     var tail: Int = 0
     var i: Int = 0
@@ -17884,7 +18092,7 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
             seed = 2863311530 % 2147483648
         elif s == 4:
             seed = 388790397
-        let mut rnd: ptr<Byte> = alloc_zeroed(NB, "Byte")
+        let mut rnd: ptr<Byte> = alloc_zeroed(NB + 32, "Byte")
         var bi: Int = 0
         while bi < NB:
             seed = xvm_lcg_next(seed)
@@ -17955,7 +18163,7 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
         decay tg
         s = s + 1
     // 2. dark: gate refuses
-    let mut zbuf: ptr<Byte> = alloc_zeroed(NB, "Byte")
+    let mut zbuf: ptr<Byte> = alloc_zeroed(NB + 32, "Byte")
     let mut ze: ptr<Int> = alloc_zeroed(2, "Int")
     entropy_gate(zbuf, NB, ze)
     let zfr: Int = mem_load(ptr_offset(ze, 0, "Int"), "Int")
@@ -17969,14 +18177,14 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
     decay zbuf
     decay ze
     // 3. engineered: STACK loop + LFSR-A/B + 23x73 bitmap
-    let mut eng: ptr<Byte> = alloc_zeroed(NB, "Byte")
+    let mut eng: ptr<Byte> = alloc_zeroed(NB + 32, "Byte")
     var esd: Int = 3267000509 % 2147483648
     var ei: Int = 0
     while ei < NB:
         esd = xvm_lcg_next(esd)
         bstore(eng, ei, (esd >> 16) & 255)
         ei = ei + 1
-    let mut prog5: ptr<Byte> = alloc_zeroed(5, "Byte")
+    let mut prog5: ptr<Byte> = alloc_zeroed(5 + 32, "Byte")
     bstore(prog5, 0, 21)
     bstore(prog5, 1, 11)
     bstore(prog5, 2, 32)
@@ -18128,7 +18336,7 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
     decay etg
     // 4. raster natural width on small image window
     let IW: Int = 4096
-    let mut im: ptr<Byte> = alloc_zeroed(IW / 8, "Byte")
+    let mut im: ptr<Byte> = alloc_zeroed(IW / 8 + 32, "Byte")
     var isd: Int = 305419896
     var ii2: Int = 0
     while ii2 < IW:

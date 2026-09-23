@@ -332,9 +332,9 @@ Working directly in `core.kn` allows the tools to interact like **yin and yang**
 
 ---
 
-## Ledgers — memory.tsv + catalog.tsv
+## Ledgers — memory.tsv + catalog.tsv + sky_catalog.tsv
 
-Two append-mostly ledgers carry the history. Both are modeled on the Kain
+Three append-mostly ledgers carry the history. All three are modeled on the Kain
 repo's `memory.tsv` and SetiYeti's `catalog.tsv`. **Update them as part of the
 change, not after.**
 
@@ -374,6 +374,24 @@ Columns: `tool  source  exe  kind  status  prove  receipt  consumes  produces  n
   Do not fork it — one ledger for the sky, one for our tools.
 - `prove` / `receipt` must be real: the prove harness and the actual result.
   `status=proven` with an empty receipt is a lie.
+
+### `sky_catalog.tsv` — the sky ledger (what we have scanned)
+
+Columns: `target  common  kind  dist_ly  band  pointings  coverage  battery  disposition  report  updated  notes` (tab-separated).
+
+- One row per sky target (star, dwarf, galaxy, transient, object, survey field, calibrator).
+  `catalog.tsv` tracks our tools; this tracks the sky those tools interrogated.
+- `coverage` is FULL or it is not: `FULL` (whole file, all chans/blocks) vs
+  `PARTIAL` (+ qualifier: which chans, spot vs survey), `SPOT`, `ATTRIBUTION-ONLY`
+  (verdict adopted from SetiYeti-side analysis, no Kain battery), `UNSCANNED`
+  (raw on disk, never run — the backlog rows are the hunt queue).
+- `disposition` is honest: `HONEST-NEGATIVE`, `FLOOR-ONLY`, `ATTRIBUTION-ONLY`/`ATTRIBUTED`,
+  `UNSCANNED`, or the unresolved `RESIDUE` (exactly one exists: Sgr A* microstructure).
+- **Every campaign updates this file as part of the change**: extend `battery` /
+  `disposition` / `report` on rows you deepened, flip `UNSCANNED` rows you touched,
+  append rows for new targets. A scan is not done until its sky row says so.
+- The `HIP-BACKLOG` row is the untouched archive (~29 ON/OFF pairs on disk).
+  Break targets out of it into their own rows when scanned.
 
 A tool is not done until both ledgers say so: a `memory.tsv` row for the
 change, and a `catalog.tsv` row with its status and receipt.
@@ -452,6 +470,7 @@ scripts/     Kain helpers (memlog.kn — append a memory.tsv row)
 python/      Python orchestration layer (tk driver — wrap exes, unified scans)
 memory.tsv   append-only change log — EVERY file change gets a row
 catalog.tsv  TurboKain tool/artifact ledger (see the Ledgers section above)
+sky_catalog.tsv  sky ledger — every target scanned, coverage FULL-or-not + disposition
 AGENTS.md    this file
 ```
 

@@ -134,32 +134,69 @@ fn uni_chan_of(name: String) -> Int:
         return ch
     return -1
 
-fn uni_tool_of(name: String) -> Int:
-    if find_from(name, "_cad_", 0) >= 0:
-        return 11
-    if find_from(name, "cad_", 0) == 0:
-        return 11
-    if find_from(name, "_fam_", 0) >= 0:
-        return 3
-    if find_from(name, "_fold_", 0) >= 0:
-        return 4
-    if find_from(name, "_sk_", 0) >= 0:
+fn uni_tool_hit(name: String, word: String) -> Int:
+    if name == word:
         return 1
-    if find_from(name, "_xeno_", 0) >= 0:
+    if len(name) > len(word):
+        if text_substring_string(name, 0, len(word) + 1) == word + "_":
+            return 1
+        let tail: String = text_substring_string(name, len(name) - len(word) - 1, len(word) + 1)
+        if tail == "_" + word:
+            return 1
+    let mid: String = "_" + word + "_"
+    if find_from(name, mid, 0) >= 0:
+        return 1
+    return 0
+
+fn uni_tool_of(name: String) -> Int:
+    let st: String = uni_stem(uni_basename(name))
+    if uni_tool_hit(st, "cad") == 1:
+        return 11
+    if uni_tool_hit(st, "cadence") == 1:
+        return 11
+    if uni_tool_hit(st, "cadence_pair") == 1:
+        return 11
+    if uni_tool_hit(st, "fam") == 1:
+        return 3
+    if uni_tool_hit(st, "fam_god") == 1:
+        return 3
+    if uni_tool_hit(st, "fold") == 1:
+        return 4
+    if uni_tool_hit(st, "fold_sum") == 1:
+        return 4
+    if uni_tool_hit(st, "sk") == 1:
+        return 1
+    if uni_tool_hit(st, "sk_gate") == 1:
+        return 1
+    if uni_tool_hit(st, "xeno") == 1:
         return 2
-    if find_from(name, "_drift_", 0) >= 0:
+    if uni_tool_hit(st, "xeno_scan") == 1:
+        return 2
+    if uni_tool_hit(st, "drift") == 1:
         return 7
-    if find_from(name, "_lag_", 0) >= 0:
+    if uni_tool_hit(st, "drift_hunt") == 1:
+        return 7
+    if uni_tool_hit(st, "lag") == 1:
         return 8
-    if find_from(name, "_jerk_", 0) >= 0:
+    if uni_tool_hit(st, "lag_hunt") == 1:
+        return 8
+    if uni_tool_hit(st, "jerk") == 1:
         return 9
-    if find_from(name, "_scint_", 0) >= 0:
+    if uni_tool_hit(st, "jerk_track") == 1:
+        return 9
+    if uni_tool_hit(st, "scint") == 1:
         return 10
-    if find_from(name, "_frame_", 0) >= 0:
+    if uni_tool_hit(st, "scint_pol") == 1:
+        return 10
+    if uni_tool_hit(st, "frame") == 1:
         return 6
-    if find_from(name, "_pulse_", 0) >= 0:
+    if uni_tool_hit(st, "frame_hunt") == 1:
+        return 6
+    if uni_tool_hit(st, "pulse") == 1:
         return 5
-    if find_from(name, "_boxcar_", 0) >= 0:
+    if uni_tool_hit(st, "boxcar") == 1:
+        return 5
+    if uni_tool_hit(st, "boxcar_bank") == 1:
         return 5
     return 0
 
@@ -677,6 +714,19 @@ fn uni_prove() -> Int:
     if uni_tool_of("h54155_cad_sk_c8.md") != 11:
         println("unify prove: FAIL tool_of cad")
         fails = fails + 1
+    // 7. bare sweep stems + tk-scan stems resolve to the same tools.
+    if uni_tool_of("fam.md") != 3:
+        println("unify prove: FAIL tool_of bare fam")
+        fails = fails + 1
+    if uni_tool_of("sk_gate_ch8_p0.md") != 1:
+        println("unify prove: FAIL tool_of tk sk")
+        fails = fails + 1
+    if uni_tool_of("pulse.csv") != 5:
+        println("unify prove: FAIL tool_of bare pulse")
+        fails = fails + 1
+    if uni_tool_of("jerk.csv") != 9:
+        println("unify prove: FAIL tool_of bare jerk")
+        fails = fails + 1
     // 7. star attribution (lattice key keeps every star in mixed dirs).
     if uni_star_of("h11048_fam_on_c8.csv") != "h11048":
         println("unify prove: FAIL star_of h11048")
@@ -703,13 +753,13 @@ fn uni_prove() -> Int:
     if disp != "WATCH":
         println("unify prove: FAIL disposition=" + disp)
         fails = fails + 1
-    // 8. lattice cell format.
+    // 9. lattice cell format.
     let cell: String = fam_head[0] + "(" + fam_head[1] + ")"
     if cell != "HIT(116)":
         println("unify prove: FAIL cell=" + cell)
         fails = fails + 1
     if fails == 0:
-        println("unify prove: PASS (9 checks: fam/fold hits, sk clean, drift empty, structs==2, filenames, star, WATCH, cell)")
+        println("unify prove: PASS (10 checks: fam/fold hits, sk clean, drift empty, structs==2, filenames, star, stems, WATCH, cell)")
         return EXIT_OK
     println("unify prove: receipt=FAIL fails=" + str(fails))
     return EXIT_ERROR

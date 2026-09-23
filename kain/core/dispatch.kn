@@ -32,6 +32,7 @@ use _common::EXIT_OK
 use _common::EXIT_HELP
 use _common::EXIT_ERROR
 use _common::bref
+use _common::str_ends_with
 
 @extern @link_name("GetCommandLineA")
 fn k_GetCommandLineA() -> ptr<Byte>
@@ -43,24 +44,25 @@ fn usage() -> String:
     t = t + "USAGE:\n"
     t = t + "  tkc <tool> [args...]             Run any instrument directly (shorthands work)\n"
     t = t + "  tkc help <tool>                  Detailed CLI help for a specific tool\n"
-    t = t + "  tkc prove                        Run all 14 formal prove batteries in-memory\n"
-    t = t + "  tkc sweep <f32> [options...]     Run full detector battery over a time series\n\n"
+    t = t + "  tkc prove                        Run all 15 formal prove batteries in-memory\n"
+    t = t + "  tkc sweep <input> [options...]   Run full detector battery over .f32, .h5, .fil, or .raw\n\n"
     t = t + "BINARY ALIASES:  tkc / core / turbokain_core / turbokain are all identical\n\n"
     t = t + "TOOL SHORTHANDS:\n"
     t = t + "  bitslice     -> bits              boxcar_bank  -> boxcar, bb\n"
     t = t + "  cadence_pair -> cadence, cad      config       -> cfg\n"
     t = t + "  drift_hunt   -> drift             fam_god      -> fam\n"
     t = t + "  fil_reader   -> fil               fold_sum     -> fold\n"
-    t = t + "  frame_hunt   -> frame             jerk_track   -> jerk\n"
-    t = t + "  lag_hunt     -> lag               raster_hunt  -> raster\n"
-    t = t + "  scint_pol    -> scint, pol        sk_gate      -> sk\n"
-    t = t + "  xeno_scan    -> xeno              xvm_sandbox  -> xvm\n"
-    t = t + "  slice        -> slice\n"
-    t = t + "  stack        -> stk\n\n"
-    t = t + "INSTRUMENTS (19 total):\n"
+    t = t + "  frame_hunt   -> frame             h5_reader    -> h5, h5reader\n"
+    t = t + "  jerk_track   -> jerk              lag_hunt     -> lag\n"
+    t = t + "  raster_hunt  -> raster            scint_pol    -> scint, pol\n"
+    t = t + "  sk_gate      -> sk                slice        -> slice\n"
+    t = t + "  stack        -> stk               xeno_scan    -> xeno\n"
+    t = t + "  xvm_sandbox  -> xvm\n\n"
+    t = t + "INSTRUMENTS (20 total):\n"
     t = t + "  [Ingest / Calibration]\n"
     t = t + "    slice         GUPPI .raw -> .f32 channel/pol voltage slice (2/8-bit)\n"
     t = t + "    fil_reader    Sigproc .fil -> .f32 voltage slice (8/16/32-bit)\n"
+    t = t + "    h5_reader     BL HDF5 filterbank -> .f32 voltage slice (bitshuffle/gzip, 8/16/32-bit)\n"
     t = t + "    config        Header/CLI/preset geometry resolver (40 parameters)\n\n"
     t = t + "  [Anomaly & RFI Screening]\n"
     t = t + "    sk_gate       Spectral kurtosis excision gate (4096/2048 STFT)\n"
@@ -96,6 +98,8 @@ fn tool_help(tool: String) -> Int:
         print(slice_usage())
     elif tool == "fil_reader" or tool == "fil":
         print(fil_reader_usage())
+    elif tool == "h5_reader" or tool == "h5" or tool == "h5reader":
+        print(h5_reader_usage())
     elif tool == "sk_gate" or tool == "sk":
         print(sk_gate_usage())
     elif tool == "boxcar_bank" or tool == "boxcar" or tool == "bb":
@@ -202,6 +206,8 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return fam_god_main(sub)
     elif tool == "fil_reader" or tool == "fil":
         return fil_reader_main(sub)
+    elif tool == "h5_reader" or tool == "h5" or tool == "h5reader":
+        return h5_reader_main(sub)
     elif tool == "fold_sum" or tool == "fold":
         return fold_sum_main(sub)
     elif tool == "frame_hunt" or tool == "frame":
@@ -238,55 +244,58 @@ fn is_suite_binary(stem: String) -> Int:
 
 fn run_prove_all() -> Int with Unsafe:
     println("================================================================================")
-    println(" TurboKain Core Suite — Unified Native Prove Battery (14 instruments)")
+    println(" TurboKain Core Suite — Unified Native Prove Battery (15 instruments)")
     println("================================================================================")
     var failed: Int = 0
 
-    println("\n[1/14] bitslice --prove")
+    println("\n[1/15] bitslice --prove")
     if bitslice_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[2/14] boxcar_bank --prove")
+    println("\n[2/15] boxcar_bank --prove")
     if boxcar_bank_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[3/14] config --prove")
+    println("\n[3/15] config --prove")
     if config_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[4/14] drift_hunt --prove")
+    println("\n[4/15] drift_hunt --prove")
     if drift_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[5/14] fil_reader --prove")
+    println("\n[5/15] fil_reader --prove")
     if fil_reader_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[6/14] frame_hunt --prove")
+    println("\n[6/15] frame_hunt --prove")
     if frame_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[7/14] lag_hunt --prove")
+    println("\n[7/15] lag_hunt --prove")
     if lag_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[8/14] xeno_scan --selftest")
+    println("\n[8/15] xeno_scan --selftest")
     if xeno_scan_main(["--selftest"]) != 0: failed = failed + 1
 
-    println("\n[9/14] xvm_sandbox --selftest")
+    println("\n[9/15] xvm_sandbox --selftest")
     if xvm_sandbox_main(["--selftest"]) != 0: failed = failed + 1
 
-    println("\n[10/14] raster_hunt --prove")
+    println("\n[10/15] raster_hunt --prove")
     if raster_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[11/14] jerk_track --prove")
+    println("\n[11/15] jerk_track --prove")
     if jerk_track_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[12/14] scint_pol --prove")
+    println("\n[12/15] scint_pol --prove")
     if scint_pol_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[13/14] unify --prove")
+    println("\n[13/15] unify --prove")
     if unify_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[14/14] stack --prove")
+    println("\n[14/15] stack --prove")
     if stack_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[15/15] h5_reader --prove")
+    if h5_reader_main(["--prove"]) != 0: failed = failed + 1
 
     println("\n================================================================================")
     if failed == 0:
-        println(" Core Battery Receipt: ALL 14 PROVE BATTERIES PASSED (receipt=PASS)")
+        println(" Core Battery Receipt: ALL 15 PROVE BATTERIES PASSED (receipt=PASS)")
         println("================================================================================")
         return EXIT_OK
     else:
@@ -296,12 +305,17 @@ fn run_prove_all() -> Int with Unsafe:
 
 fn run_sweep(sub: Array<String>) -> Int with Unsafe:
     if len(sub) == 0:
-        println("Usage: core sweep <file.f32> [--out-dir DIR] [--fs HZ]")
-        println("Runs full detector battery over a .f32 voltage series in a single pass.")
+        println("Usage: core sweep <file.f32|file.h5|file.fil|file.raw> [--out-dir DIR] [--chan C] [--pol P] [--fs HZ] [--target T] [--freq-mhz F]")
+        println("Runs full detector battery over a time series in a single pass.")
+        println("Stage 10 (unify) auto-writes REPORT.md + evidence.csv + verdicts.json.")
         return EXIT_HELP
-    let f32_path: String = sub[0]
+    var f32_path: String = sub[0]
     var out_dir: String = "reports/sweep"
     var fs_hz: String = "2929687.5"
+    var target: String = "UNKNOWN"
+    var freqmhz: String = "?"
+    var want_chan: String = "0"
+    var want_pol: String = "0"
     var i: Int = 1
     while i < len(sub):
         if sub[i] == "--out-dir" and i + 1 < len(sub):
@@ -310,7 +324,44 @@ fn run_sweep(sub: Array<String>) -> Int with Unsafe:
         elif sub[i] == "--fs" and i + 1 < len(sub):
             fs_hz = sub[i + 1]
             i = i + 1
+        elif sub[i] == "--chan" and i + 1 < len(sub):
+            want_chan = sub[i + 1]
+            i = i + 1
+        elif sub[i] == "--pol" and i + 1 < len(sub):
+            want_pol = sub[i + 1]
+            i = i + 1
+        elif sub[i] == "--target" and i + 1 < len(sub):
+            target = sub[i + 1]
+            i = i + 1
+        elif sub[i] == "--freq-mhz" and i + 1 < len(sub):
+            freqmhz = sub[i + 1]
+            i = i + 1
         i = i + 1
+
+    if str_ends_with(f32_path, ".h5") == 1 or str_ends_with(f32_path, ".hdf5") == 1:
+        println("\n[Ingest] h5_reader (BL HDF5 filterbank chan=" + want_chan + " pol=" + want_pol + ")")
+        let h5_out: String = out_dir + "/slice.f32"
+        let h5_rc: Int = h5_reader_main(["--in", f32_path, "--chan", want_chan, "--pol", want_pol, "--out", h5_out])
+        if h5_rc != 0:
+            println("core sweep: h5_reader failed on " + f32_path)
+            return EXIT_ERROR
+        f32_path = h5_out
+    elif str_ends_with(f32_path, ".fil") == 1:
+        println("\n[Ingest] fil_reader (Sigproc .fil chan=" + want_chan + ")")
+        let fil_out: String = out_dir + "/slice.f32"
+        let fil_rc: Int = fil_reader_main(["--in", f32_path, "--chan", want_chan, "--out", fil_out])
+        if fil_rc != 0:
+            println("core sweep: fil_reader failed on " + f32_path)
+            return EXIT_ERROR
+        f32_path = fil_out
+    elif str_ends_with(f32_path, ".raw") == 1:
+        println("\n[Ingest] slice (GUPPI raw chan=" + want_chan + " pol=" + want_pol + ")")
+        let raw_out: String = out_dir + "/slice.f32"
+        let raw_rc: Int = slice_main(["--in", f32_path, "--chan", want_chan, "--pol", want_pol, "--out", raw_out])
+        if raw_rc != 0:
+            println("core sweep: slice failed on " + f32_path)
+            return EXIT_ERROR
+        f32_path = raw_out
 
     println("================================================================================")
     println(" TurboKain Unified Sweep Battery -> " + f32_path)
@@ -343,6 +394,9 @@ fn run_sweep(sub: Array<String>) -> Int with Unsafe:
 
     println("\n[Stage 9/9] scint_pol (Interstellar scintillation & polarization coherence)")
     let _sp: Int = scint_pol_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/scint"])
+
+    println("\n[Stage 10/10] unify (campaign report pack: REPORT.md + evidence.csv + verdicts.json)")
+    let _un: Int = unify_main(["--dir", out_dir, "--target", target, "--freq-mhz", freqmhz, "--fs", fs_hz])
 
     println("\n================================================================================")
     println(" Sweep complete. Review tables under " + out_dir)

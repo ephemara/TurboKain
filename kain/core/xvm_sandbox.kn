@@ -354,8 +354,8 @@ fn stack_run(sym: ptr<Byte>, plen: Int, w: Int, out3: ptr<Int>, budget: Int) wit
 
 // Sweep widths 3..8, winner = most backward jumps, ties = most ops.
 fn stack_best(buf: ptr<Byte>, nbits: Int, out4: ptr<Int>, budget: Int) with Unsafe:
-    let mut bits: ptr<Byte> = alloc_zeroed(STK_MAXSYM * 8, "Byte")
-    let mut sym: ptr<Byte> = alloc_zeroed(STK_MAXSYM, "Byte")
+    let mut bits: ptr<Byte> = alloc_zeroed(STK_MAXSYM * 8 + 32, "Byte")
+    let mut sym: ptr<Byte> = alloc_zeroed(STK_MAXSYM + 32, "Byte")
     let mut o3: ptr<Int> = alloc_zeroed(3, "Int")
     var cap: Int = STK_MAXSYM * 8
     if nbits < cap:
@@ -409,8 +409,8 @@ fn stack_best(buf: ptr<Byte>, nbits: Int, out4: ptr<Int>, budget: Int) with Unsa
 
 // ── Rule-110 CA: density-trajectory variance, best of 4 windows ─────────────
 fn ca110_window(buf: ptr<Byte>, nbits: Int, off: Int) -> Int with Unsafe:
-    let mut cur: ptr<Byte> = alloc_zeroed(CA_W, "Byte")
-    let mut nxt: ptr<Byte> = alloc_zeroed(CA_W, "Byte")
+    let mut cur: ptr<Byte> = alloc_zeroed(CA_W + 32, "Byte")
+    let mut nxt: ptr<Byte> = alloc_zeroed(CA_W + 32, "Byte")
     var i: Int = 0
     while i < CA_W:
         bstore(cur, i, getbit(buf, (off + i) % nbits))
@@ -582,7 +582,7 @@ fn bm_region(buf: ptr<Byte>, off: Int, len: Int, lout: ptr<Int>) -> Int with Uns
     if n < BM_MIN_N:
         mem_store(lout, 0, "Int")
         return 0
-    let mut b: ptr<Byte> = alloc_zeroed(BM_N, "Byte")
+    let mut b: ptr<Byte> = alloc_zeroed(BM_N + 32, "Byte")
     var i: Int = 0
     while i < n:
         bstore(b, i, getbit(buf, off + i))
@@ -764,7 +764,7 @@ fn tag_run(buf: ptr<Byte>, nbits: Int, budget: Int, out2: ptr<Int>) with Unsafe:
     var seedn: Int = TAG_SEEDB
     if nbits < seedn:
         seedn = nbits
-    let mut q: ptr<Byte> = alloc_zeroed(TAG_CAP, "Byte")
+    let mut q: ptr<Byte> = alloc_zeroed(TAG_CAP + 32, "Byte")
     var head: Int = 0
     var tail: Int = 0
     var i: Int = 0
@@ -1037,7 +1037,7 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
             seed = 2863311530 % 2147483648
         elif s == 4:
             seed = 388790397
-        let mut rnd: ptr<Byte> = alloc_zeroed(NB, "Byte")
+        let mut rnd: ptr<Byte> = alloc_zeroed(NB + 32, "Byte")
         var bi: Int = 0
         while bi < NB:
             seed = xvm_lcg_next(seed)
@@ -1108,7 +1108,7 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
         decay tg
         s = s + 1
     // 2. dark: gate refuses
-    let mut zbuf: ptr<Byte> = alloc_zeroed(NB, "Byte")
+    let mut zbuf: ptr<Byte> = alloc_zeroed(NB + 32, "Byte")
     let mut ze: ptr<Int> = alloc_zeroed(2, "Int")
     entropy_gate(zbuf, NB, ze)
     let zfr: Int = mem_load(ptr_offset(ze, 0, "Int"), "Int")
@@ -1122,14 +1122,14 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
     decay zbuf
     decay ze
     // 3. engineered: STACK loop + LFSR-A/B + 23x73 bitmap
-    let mut eng: ptr<Byte> = alloc_zeroed(NB, "Byte")
+    let mut eng: ptr<Byte> = alloc_zeroed(NB + 32, "Byte")
     var esd: Int = 3267000509 % 2147483648
     var ei: Int = 0
     while ei < NB:
         esd = xvm_lcg_next(esd)
         bstore(eng, ei, (esd >> 16) & 255)
         ei = ei + 1
-    let mut prog5: ptr<Byte> = alloc_zeroed(5, "Byte")
+    let mut prog5: ptr<Byte> = alloc_zeroed(5 + 32, "Byte")
     bstore(prog5, 0, 21)
     bstore(prog5, 1, 11)
     bstore(prog5, 2, 32)
@@ -1281,7 +1281,7 @@ fn selftest_run(budget: Int) -> Int with Unsafe:
     decay etg
     // 4. raster natural width on small image window
     let IW: Int = 4096
-    let mut im: ptr<Byte> = alloc_zeroed(IW / 8, "Byte")
+    let mut im: ptr<Byte> = alloc_zeroed(IW / 8 + 32, "Byte")
     var isd: Int = 305419896
     var ii2: Int = 0
     while ii2 < IW:

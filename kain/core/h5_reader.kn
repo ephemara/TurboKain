@@ -1,0 +1,89 @@
+// ============================================================================
+// h5_reader.kn — TurboKain 15: BL HDF5 filterbank ingest at slice parity
+//
+// The 55 GB GC survey unlock: Breakthrough Listen Galactic Center survey
+// (blc00..35 C-band gpuspec) and Sgr B2 data exist as HDF5 filterbank (.h5).
+// Logically identical to .fil (time x freq power spectra + header metadata),
+// stored in HDF5 containers with bitshuffle compression.
+//
+// CLI/CSV contract mirrors fil_reader.kn and slice.kn:
+//   h5_reader <file.h5> [chan] [out.f32]   (positional shorthand)
+//   h5_reader --in <file.h5> --chan N --out x.f32 [--pol P] [--out-md m.md] [--csv c.csv]
+//   h5_reader --in <file.h5> --chan-lo A --chan-hi B --mean --out light.f32
+//   h5_reader --in <file.h5> --spec T --out spec.f32
+//   h5_reader --prove                  (synthetic H5 roundtrip)
+//   no --out -> probe-only (header, geometry, sample rate, compression).
+//
+// Exit codes: 0 ok, 1 help / prove FAIL, 2 error.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::text
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+
+fn resolve_h5_script() -> String:
+    if fs_exists("python/turbokain/h5_reader.py"):
+        return "python/turbokain/h5_reader.py"
+    if fs_exists("../python/turbokain/h5_reader.py"):
+        return "../python/turbokain/h5_reader.py"
+    if fs_exists("../../python/turbokain/h5_reader.py"):
+        return "../../python/turbokain/h5_reader.py"
+    if fs_exists("D:/TurboKain/python/turbokain/h5_reader.py"):
+        return "D:/TurboKain/python/turbokain/h5_reader.py"
+    return ""
+
+pub fn h5_reader_usage() -> String:
+    var t: String = "h5_reader 0.1.0 — TurboKain BL HDF5 filterbank ingest\n"
+    t = t + ".h5 in -> .f32 LE time-series out (slice contract for BL filterbank).\n"
+    t = t + "Supports bitshuffle/gzip compression, 8/16/32-bit spectra, feed selection.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  h5_reader <file.h5> [chan] [out.f32]   (positional shorthand)\n"
+    t = t + "  h5_reader --in <file.h5> --chan N --out x.f32 [--pol P] [--out-md m.md] [--csv c.csv]\n"
+    t = t + "  h5_reader --in <file.h5> --chan-lo A --chan-hi B --mean --out light.f32\n"
+    t = t + "  h5_reader --in <file.h5> --spec T --out spec.f32\n"
+    t = t + "  h5_reader --prove                  (synthetic roundtrip)\n"
+    t = t + "  no --out -> probe-only (header + geometry + compression).\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 ok, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+pub fn h5_reader_main(args: Array<String>) -> Int with Unsafe:
+    var show_help: Int = 0
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help" or a == "-h":
+            show_help = 1
+        i = i + 1
+
+    if show_help == 1:
+        print(h5_reader_usage())
+        return EXIT_HELP
+
+    let script: String = resolve_h5_script()
+    if script == "":
+        println("h5_reader: error: python/turbokain/h5_reader.py not found in search paths")
+        return EXIT_ERROR
+
+    let spec: Int = process_spec_create("python")
+    let _s0: Int = process_spec_add_arg(spec, script)
+    var j: Int = 0
+    while j < len(args):
+        let _a: Int = process_spec_add_arg(spec, args[j])
+        j = j + 1
+
+    let pid: Int = process_spawn(spec)
+    if pid < 0:
+        println("h5_reader: error: failed to spawn python process")
+        let _ds0: Int = process_spec_destroy(spec)
+        return EXIT_ERROR
+
+    let _w: Int = process_wait(pid, 3600000)
+    let code: Int = process_exit_code(pid)
+    let _cl: Int = process_close(pid)
+    let _ds: Int = process_spec_destroy(spec)
+    return code
