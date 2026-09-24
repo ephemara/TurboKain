@@ -20,6 +20,7 @@ from pathlib import Path
 from .registry import load_registry
 from .runner import repo_root, run_passthrough, run_selftest
 from .scan import F32_DETECTORS, ScanPlan, default_workdir, run_scan
+from . import db as dbmod
 
 
 # --- pretty ----------------------------------------------------------------
@@ -228,6 +229,234 @@ def cmd_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- db -------------------------------------------------------------------
+def _db_path(root, override):
+    from pathlib import Path as _P
+
+    return _P(override) if override else (root / dbmod.DB_NAME)
+
+
+def cmd_db_ingest(args) -> int:
+    import time as _t
+
+    root = repo_root()
+    con = dbmod.connect(_db_path(root, args.db))
+    dbmod.init_db(con)
+    t0 = _t.time()
+
+    def progress(done, total, secs):
+        print(f"  ... {done}/{total} files ({secs:.0f}s)", flush=True)
+
+    try:
+        stats = dbmod.ingest_reports(root, con, subpath=args.path,
+                                     full=args.full, progress=progress)
+    except FileNotFoundError as exc:
+        print(f"tk db: {exc}", file=sys.stderr)
+        return 2
+    dt = _t.time() - t0
+    tot_f = sum(f for f, _ in stats.values())
+    tot_r = sum(r for _, r in stats.values())
+    if args.json:
+        import json as _json
+        print(_json.dumps({"files": tot_f, "rows": tot_r, "seconds": round(dt, 1),
+                           "by_kind": {k: {"files": f, "rows": r}
+                                         for k, (f, r) in stats.items()}}))
+        return 0
+    print(f"ingested {tot_f} files -> {tot_r} rows in {dt:.1f}s")
+    for kind in sorted(stats):
+        f, r = stats[kind]
+        print(f"  {kind:16} files={f:<7} rows={r}")
+    print(f"db: {_db_path(root, args.db)}")
+    return 0
+
+
+def cmd_db_stats(args) -> int:
+    import json as _json
+
+    root = repo_root()
+    con = dbmod.connect(_db_path(root, args.db))
+    try:
+        s = dbmod.compute_stats(con)
+    except Exception as exc:  # empty / missing schema
+        print(f"tk db: {exc} (run `tk db ingest` first)", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps(s, indent=1, default=str))
+    else:
+        print(dbmod.format_stats(s))
+    return 0
+
+
+
+def cmd_db_query(args) -> int:
+    root = repo_root()
+    con = dbmod.connect(_db_path(root, args.db))
+    sql = args.sql.strip()
+    if not sql.lower().lstrip("(").startswith("select"):
+        print("tk db query: SELECT only (read-only warehouse)", file=sys.stderr)
+        return 2
+    try:
+        cols, rows = dbmod.run_query(con, sql, limit=args.limit)
+    except Exception as exc:
+        print(f"tk db query: {exc}", file=sys.stderr)
+        return 1
+    print("\t".join(cols))
+    for r in rows:
+        print("\t".join("" if v is None else str(v) for v in r))
+    if len(rows) == args.limit:
+        print(f"-- capped at {args.limit} rows (use --limit N) --")
+    return 0
+
+
+def cmd_db_hits(args) -> int:
+    root = repo_root()
+    con = dbmod.connect(_db_path(root, args.db))
+    try:
+        rows = dbmod.top_hits(con, min_sigma=args.min_sigma,
+                              verdict=args.verdict, limit=args.limit)
+    except Exception as exc:
+        print(f"tk db: {exc} (run `tk db ingest` first)", file=sys.stderr)
+        return 1
+    if not rows:
+        print("no hits above gate")
+        return 0
+    cols = list(rows[0].keys())
+    print("\t".join(cols))
+    for r in rows:
+        print("\t".join("" if r[c] is None else str(r[c]) for c in cols))
+    return 0
+
+
+def cmd_db_search(args) -> int:
+    import json as _json
+    root = repo_root()
+    con = dbmod.connect(_db_path(root, args.db))
+    tables = [t.strip() for t in args.tables.split(",") if t.strip()] if args.tables else None
+    filters = {
+        "verdict": args.verdict,
+        "min_score": args.min_score,
+        "max_score": args.max_score,
+        "tool": args.tool,
+        "star": args.star,
+        "leg": args.leg,
+        "chan": args.chan,
+        "freq_min": args.freq_min,
+        "freq_max": args.freq_max,
+        "scan_contains": args.scan,
+        "source_contains": args.source,
+        "text": args.text,
+    }
+    filters = {k: v for k, v in filters.items() if v is not None}
+    try:
+        res = dbmod.search_tables(con, filters, tables=tables,
+                                  limit=args.limit, offset=args.offset,
+                                  order=args.order)
+    except Exception as exc:
+        print(f"tk db search: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps(res, indent=1, default=str))
+        return 0
+    print(f"total={res['total']} searched=[{','.join(res['tables_searched'])}]"
+          + (f" skipped=[{','.join(res['tables_skipped'])}]" if res["tables_skipped"] else ""))
+    for r in res["rows"]:
+        print(f"{r['table']} scan={r['scan']} score={r['score']} {r['score_unit']}"
+              f" verdict={r['verdict']} freq_hz={r['freq_hz']} src={r['source']} row={r['row_id']}")
+    return 0
+
+
+def cmd_db_schema(args) -> int:
+    import json as _json
+    root = repo_root()
+    con = dbmod.connect(_db_path(root, args.db))
+    try:
+        print(_json.dumps(dbmod.describe_schema(con), indent=1, default=str))
+    except Exception as exc:
+        print(f"tk db schema: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_db_status(args) -> int:
+    import json as _json
+    root = repo_root()
+    con = dbmod.connect(_db_path(root, args.db))
+    try:
+        st = dbmod.db_status(con, root)
+    except Exception as exc:
+        print(f"tk db status: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps(st, indent=1, default=str))
+    else:
+        print(f"db: {st['db_path']} ({(st['db_bytes'] or 0) / 1e6:.1f} MB)")
+        print(f"scans={st['scans']} files={st['files_ledgered']} rows~{st['total_rows']} last={st['last_ingested']}")
+        print(f"fresh={st['fresh']} new={st['n_new']} changed={st['n_changed']}")
+        for f in st["new_files"][:20]:
+            print(f"  NEW {f}")
+        for f in st["changed_files"][:20]:
+            print(f"  CHANGED {f}")
+    return 0
+
+
+def cmd_db_scan(args) -> int:
+    import json as _json
+    root = repo_root()
+    con = dbmod.connect(_db_path(root, args.db))
+    try:
+        info = dbmod.scan_info(con, args.name)
+    except Exception as exc:
+        print(f"tk db scan: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(_json.dumps(info, indent=1, default=str))
+        return 0
+    if info.get("match") is None:
+        print(f"no exact match for {args.name!r}; candidates:")
+        for c in info.get("candidates", [])[:20]:
+            print(f"  {c}")
+        return 1
+    print(f"scan: {info['match']['report_dir']}")
+    for t, n in sorted(info["counts"].items()):
+        if n:
+            print(f"  {t:12} {n}")
+    print("top rows:")
+    for r in info["top_rows"]:
+        print(f"  {r['table']} score={r['score']} {r['score_unit']} verdict={r['verdict']} src={r['source']}")
+    if info.get("notes"):
+        print("notes:")
+        for n in info["notes"]:
+            print(f"  [{n['note_id']}] {n['note']}")
+    return 0
+
+
+def cmd_db_note(args) -> int:
+    import json as _json
+    root = repo_root()
+    con = dbmod.connect(_db_path(root, args.db))
+    cmd = args.note_cmd
+    if cmd == "add":
+        try:
+            nid = dbmod.add_note(con, args.target_type, args.target_ref,
+                                 args.note, author=args.author)
+        except Exception as exc:
+            print(f"tk db note add: {exc}", file=sys.stderr)
+            return 1
+        print(f"note {nid} added")
+        return 0
+    if cmd == "list":
+        rows = dbmod.list_notes(con, target_type=args.target_type,
+                                target_ref=args.target_ref, limit=args.limit)
+        print(_json.dumps(rows, indent=1, default=str))
+        return 0
+    if cmd == "remove":
+        n = dbmod.remove_note(con, args.note_id)
+        print(f"removed {n}")
+        return 0
+    print(f"tk db note: unknown subcommand {cmd!r}", file=sys.stderr)
+    return 2
+
+
 # --- entry -----------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -269,6 +498,86 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("catalog", help="show catalog.tsv")
     sp.set_defaults(func=cmd_catalog)
+
+    dbp = sub.add_parser("db", help="SQLite warehouse over reports/")
+    dbsub = dbp.add_subparsers(dest="db_cmd", required=True)
+
+    sp = dbsub.add_parser("ingest", help="parse reports/ into reports.db")
+    sp.add_argument("path", nargs="?", default="reports")
+    sp.add_argument("--db", default=None, help="db file (default: <root>/reports.db)")
+    sp.add_argument("--full", action="store_true", help="drop all tables and re-parse")
+    sp.add_argument("--json", action="store_true", help="machine-readable summary")
+    sp.set_defaults(func=cmd_db_ingest)
+
+    sp = dbsub.add_parser("stats", help="warehouse statistics")
+    sp.add_argument("--db", default=None)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_db_stats)
+
+    sp = dbsub.add_parser("query", help="run a SELECT and print TSV")
+    sp.add_argument("sql")
+    sp.add_argument("--db", default=None)
+    sp.add_argument("--limit", type=int, default=200)
+    sp.set_defaults(func=cmd_db_query)
+
+    sp = dbsub.add_parser("hits", help="top evidence hits by sigma")
+    sp.add_argument("--db", default=None)
+    sp.add_argument("--min-sigma", type=float, default=0.0)
+    sp.add_argument("--verdict", default=None)
+    sp.add_argument("--limit", type=int, default=50)
+    sp.set_defaults(func=cmd_db_hits)
+
+    sp = dbsub.add_parser("search", help="multi-table fan-out search")
+    sp.add_argument("--db", default=None)
+    sp.add_argument("--tables", default=None, help="comma list (default: all searchable)")
+    sp.add_argument("--verdict", default=None)
+    sp.add_argument("--min-score", type=float, default=None)
+    sp.add_argument("--max-score", type=float, default=None)
+    sp.add_argument("--tool", default=None, help="evidence tool name (e.g. fam)")
+    sp.add_argument("--star", default=None)
+    sp.add_argument("--leg", default=None)
+    sp.add_argument("--chan", type=int, default=None)
+    sp.add_argument("--freq-min", type=float, default=None, help="Hz")
+    sp.add_argument("--freq-max", type=float, default=None, help="Hz")
+    sp.add_argument("--scan", default=None, help="substring of report_dir")
+    sp.add_argument("--source", default=None, help="substring of source path")
+    sp.add_argument("--text", default=None, help="free text over text columns")
+    sp.add_argument("--order", default="score_desc", choices=["score_desc", "score_asc"])
+    sp.add_argument("--limit", type=int, default=25)
+    sp.add_argument("--offset", type=int, default=0)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_db_search)
+
+    sp = dbsub.add_parser("schema", help="tables + columns + views as JSON")
+    sp.add_argument("--db", default=None)
+    sp.set_defaults(func=cmd_db_schema)
+
+    sp = dbsub.add_parser("status", help="freshness: disk vs ledger + vitals")
+    sp.add_argument("--db", default=None)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_db_status)
+
+    sp = dbsub.add_parser("scan", help="one-scan dossier")
+    sp.add_argument("name", help="report_dir or substring")
+    sp.add_argument("--db", default=None)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_db_scan)
+
+    sp = dbsub.add_parser("note", help="analyst annotations (writable layer)")
+    sp.add_argument("--db", default=None)
+    nsub = sp.add_subparsers(dest="note_cmd", required=True)
+    np = nsub.add_parser("add", help="attach a note")
+    np.add_argument("target_type", choices=list(dbmod.NOTE_TARGETS))
+    np.add_argument("target_ref", help="row_id | report_dir | source | label")
+    np.add_argument("note")
+    np.add_argument("--author", default=None)
+    np = nsub.add_parser("list", help="list notes")
+    np.add_argument("--target-type", default=None)
+    np.add_argument("--target-ref", default=None)
+    np.add_argument("--limit", type=int, default=50)
+    np = nsub.add_parser("remove", help="delete a note by id")
+    np.add_argument("note_id", type=int)
+    sp.set_defaults(func=cmd_db_note)
     return p
 
 

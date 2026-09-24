@@ -83,6 +83,34 @@ print(res.ok, res.receipt, res.verdicts)
    the default bundle.
 4. Log it in `memory.tsv` and give it a `catalog.tsv` row, as always.
 
+## Querying reports (`tk db`)
+
+All of `reports/` lives in one SQLite warehouse (`reports.db`, gitignored,
+regenerable). One table per tool contract, every row carrying `scan_id` +
+`source` provenance; non-tabular files (PNG/MD/F32/BIN) are inventoried in
+`artifacts`; unknown-shape CSV/TSV lines are kept verbatim in `raw_csv` /
+`raw_tsv` so nothing is ever dropped. Views (`v_evidence_hits`,
+`v_fam_hits`, `v_scan_stats`, `v_tool_coverage`, ...) expose real units
+(scaled ints divided back down).
+
+```bash
+python python/tk.py db ingest              # incremental: only new/changed files
+python python/tk.py db ingest --full       # drop everything, re-parse (was ~3.5 min)
+python python/tk.py db ingest reports/2026-09-24_new_campaign  # one new campaign
+python python/tk.py db stats               # distributions, verdict census, top hits
+python python/tk.py db stats --json        # machine-readable stats payload
+python python/tk.py db hits --min-sigma 1000 --limit 20
+python python/tk.py db query "SELECT verdict, COUNT(*) FROM evidence GROUP BY verdict"
+```
+
+**Adding new data:** drop the new campaign's CSV/TSV/JSON outputs under
+`reports/<date>_<tag>/` (whatever the tools already write — no new format),
+then `tk db ingest`. The `files` ledger tracks mtime+size per file, so only
+the new rows are parsed. New CSV *shapes* need one entry in `db.py`'s
+`_CSV_MAP` + `_PARSERS`; anything unrecognized still lands in `raw_csv`.
+
+`tk db query` is SELECT-only by construction.
+
 ## Rules that did not change
 
 - Detector logic lives in Kain. Python must not grow a second implementation
