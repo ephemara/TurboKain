@@ -455,6 +455,28 @@ byte entropy / payload liveness *before* paying for 17 GB. Record new pulls in
 `D:/data/download_manifest.csv` and update SetiYeti's `catalog.tsv` — a
 download is not done until the ledger says so.
 
+### Downloader agent tools (`.pi/extensions/turbokain-downloader/`)
+
+Same archive, LLM-callable — prefer these over hand-rolled `curl`:
+
+- `turbokain_storage` (`status` / `clean`) — drive capacity, `D:/data` breakdown
+  (`raw/slices/gc/derived`), top files, HEALTHY/AMBER/CRITICAL (<100/<30 GB free).
+  `clean` prunes `aria2_partials` / `stale_slices` / `all_tmp`, dry-run by default.
+- `turbokain_archive_search` (`targets` / `files`) — 12k+ BL targets + per-target
+  file query (freq, file-type, size) with local-cache check. Backs the same
+  `list-targets` / `query-files` API as `bl_download.py`.
+- `turbokain_inspect_remote` — 64 KB Range GET: GUPPI cards (`TELESCOP/PROJID/
+  OBSFREQ/NBITS`), byte entropy, liveness verdict (`VALID_2BIT_BASEBAND` etc.).
+- `turbokain_download` (`urls=` or `target=`+`file_type`/`limit`) — aria2c
+  `-x16 -s16 -j3` (~90 MB/s), storage preflight (refuses if post-download free
+  <10 GB or total > `max_gb`, default 50), resume on, appends to
+  `download_manifest.csv`. `dry_run=true` previews first.
+- `/storage` slash command — one-line disk telemetry.
+
+Python mirror: `python python/bl_download.py {targets,query,get,from-manifest}`
+(same endpoints, same aria2c trick, urllib fallback if aria2c is missing).
+`size` from the API is BYTES despite upstream docs.
+
 ## Repo layout
 
 ```
@@ -464,12 +486,17 @@ kain/        source crates and unified core suite
   core.exe   portable 1.5 MB binary containing all 21 instruments
 markscript/  campaign notebooks (.md) + the markscript runtime
 reports/     receipts, hits, evidence — machine-checkable outputs only
+reports.db   SQLite warehouse over reports/ (gitignored, regenerable via `tk db ingest --full`)
+.pi/         pi agent layer: extensions/turbokain-db + extensions/turbokain-downloader,
+             agents/turbokain.md, skills/fast-mode, handoffs/
 _tmp/        scratch, gitignored, nothing load-bearing
 docs/        spec.md + the vendored Kain baseline under docs/kain/
   waterfall_examples/  gallery of 1920x1080 diagnostic PNG dashboards (drifting carrier, pulsar, RFI, FRB, sky)
 _objective/  the mission (objective_1.md)
 scripts/     Kain helpers (memlog.kn — append a memory.tsv row; release.py — automated GitHub releases)
-python/      Python orchestration layer (tk driver — wrap exes, unified scans)
+python/      Python orchestration layer (tk driver, reports.db warehouse, BL downloader)
+  bl_download.py   Breakthrough Listen archive CLI (targets/query/get/from-manifest)
+  turbokain/db.py  warehouse ingest + search + stats (backs `tk db`)
 memory.tsv   append-only change log — EVERY file change gets a row
 catalog.tsv  TurboKain tool/artifact ledger (see the Ledgers section above)
 sky_catalog.tsv  sky ledger — every target scanned, coverage FULL-or-not + disposition
@@ -563,6 +590,55 @@ python python/tk.py doctor          # env vars + registry drift
   Python records verdicts, it never decides dispositions.
 - If you reach for a third-party dependency, stop and ask whether the job
   belongs in Kain instead. Stdlib-only is the default for a reason.
+
+## Warehouse — `reports.db` (query, don't grep)
+
+Everything under `reports/` lives in one SQLite warehouse (default
+`<root>/reports.db`, ~189 MB, **gitignored — regenerable**). One table per tool
+contract (`fam`, `pulse`, `frame`, `fold`, `drift`, `lag`, `jerk`, `scint`, `xeno`,
+`sk`, `evidence`, `census`, `anomaly`, `lattice`, `stage_runs`, …), plus `scans`
+(one row per report dir), `files` (mtime+size ingest ledger), `artifacts`
+(PNG/MD/F32/BIN inventory), `raw_csv`/`raw_tsv` (unknown shapes, nothing dropped),
+`analyst_notes` (the only writable layer), and views `v_evidence_hits`,
+`v_fam_hits`, `v_pulse_top`, `v_frame_top`, `v_scan_stats`, `v_tool_coverage`
+(real-unit score helpers).
+
+```bash
+python python/tk.py db ingest [--full] [reports/<campaign>/]  # incremental via files ledger; --full rebuilds (~4 min)
+python python/tk.py db stats [--json]                          # verdict census, sigma quantiles, top hits, biggest scans
+python python/tk.py db query "SELECT ..." [--limit N]           # SELECT/WITH only, TSV out
+python python/tk.py db hits --min-sigma X --verdict HIT        # top evidence shortcut
+python python/tk.py db search --tables fam,pulse --tool fam --star h11048 --leg on --min-score 6 --scan trappist --json
+python python/tk.py db schema                                  # tables + columns + per-lane score units
+python python/tk.py db status [--json]                         # disk-vs-ledger freshness (run before trusting numbers)
+python python/tk.py db scan <report_dir|substring>             # one-campaign dossier + notes
+python python/tk.py db note add <evidence_row|scan|source|general> <ref> "text" [--author X]
+```
+
+`.pi/extensions/turbokain-db/` exposes the same engine to agents:
+`turbokain_search` (`search`/`sql`/`hits`/`stats`/`schema`/`scan` modes,
+normalized `score`+`score_unit` per row) and `turbokain_db_update`
+(`ingest`/`status`/`note_add`/`note_list`/`note_remove`), plus `/tkdb-status`.
+Both wrap `tk db` (binary-wrapping pattern); measurements are read-only by
+construction — notes are additive, never rewrites. New campaign? Drop CSVs in
+`reports/<date>_<tag>/`, run `tk db ingest`, then `tk db status` should read fresh.
+New CSV *shape*? Add one `_CSV_MAP`+`_PARSERS` entry in `python/turbokain/db.py`;
+unrecognized shapes still land in `raw_csv`.
+
+Gotchas (bled for, don't rediscover):
+
+- **Scaled ints keep their suffixes** (`alpha_hz_x100`, `sigma_x100`, `maxz_x10`,
+  `skdev_x1e3`). Views and `db search` divide to real units; raw tables don't.
+  `evidence.sigma` **mixes units** (fold rows are ×100) — compare across lanes with
+  `db search` scores, never raw evidence sigma.
+- **The 22.35 Hz comb is the floor.** Top fam alphas (44.70/178.81/134.11/715.25/…)
+  are `fs/131072` backend hum across targets/MJDs/bands — veto on sight, nominate
+  once to the RFI catalog, never per-target.
+- **`log10p=-9999` = numerics, not sky.** `bandmean/fam.csv` ratios in the
+  thousands are MAD-floor blowups (same family as boxcar G5). Sane fam is ratio
+  <~10 with real p-values.
+- **Worth-checking bar:** unique + sane stats + ON-only *in the same pair* +
+  2+ detectors. Global freq matching across stars lies (L-band is all shared RFI).
 
 ---
 

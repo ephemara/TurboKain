@@ -120,3 +120,12 @@ date	area	type	description	file
 2026-09-24	scan	update	added frft_hunt to native core sweep and Python tk scan F32_DETECTORS bundle	kain/core/dispatch.kn,python/turbokain/scan.py
 2026-09-24	tool	add	perm_entropy.kn fast permutation entropy, C_JS statistical complexity & LZ76 algorithmic complexity screener (Tool 23) implemented and proven 5/5	kain/core/perm_entropy.kn,kain/core/dispatch.kn,catalog.tsv,python/turbokain/registry.py,python/turbokain/scan.py,docs/toolresearch/perm_entropy_guide.md
 2026-09-24	tool	add	subspace_null.kn baseband spatial subspace projection & directional RFI nuller (Tool 24) implemented and proven 5/5	kain/core/subspace_null.kn,kain/core/dispatch.kn,catalog.tsv,python/turbokain/registry.py,docs/toolresearch/subspace_null_guide.md
+2026-09-24	catalog	add	Downloaded 27 HD 139139 Ku-band files (6.6 GB, 4 nodes x 6-cadence pointings + high-res 0000/0001)	D:/data/hd139139/
+2026-09-24	catalog	update	HD-139139 FULL-CADENCE Ku-band technosignature sweep complete with receipts in sky_catalog.tsv	sky_catalog.tsv,reports/2026-09-24_hd139139_ku_campaign/REPORT.md
+2026-09-24	scan	verify	deep hunt on SUS files (Tabby, Proxima BLC1, TRAPPIST-1 Ch36 dual-pol, FRB121102) with frft_hunt, perm_entropy, subspace_null	sky_catalog.tsv,reports/2026-09-24_alien_hunt_deep_sus/
+2026-09-24	tool	update	Wired fold_sum and subspace_null into core sweep pipeline (all 20 instruments integrated)	kain/core/dispatch.kn,kain/core.kn,core.exe,tkc.exe
+2026-09-24	scan	verify	TRAPPIST-1 Channel 36 ON (0017) vs OFF (0016) cadence verification complete: chaotic signal and 52.5sigma chirp vanished in OFF	reports/2026-09-24_alien_hunt_deep_sus/REPORT.md,sky_catalog.tsv
+2026-09-24	docs	update	AGENTS.md: warehouse reports.db section (tk db CLI + turbokain-db tools + scaled-int/comb/log10p gotchas) + downloader tools section + repo layout	AGENTS.md
+2026-09-24	tool	add	bispectrum.kn 3D Bispectrum & Normalized Bicoherence (b^2) QPC engine with IRPD domain reduction and 1D diagonal sweep	kain/core/bispectrum.kn,kain/core/dispatch.kn,kain/core/unify.kn,docs/toolresearch/bispectrum_guide.md
+2026-09-24	catalog	update	catalog.tsv Tool 25 bispectrum added with prove=5/5 and registry updated	catalog.tsv,python/turbokain/registry.py
+2026-09-24	repo	update	Complete README.md makeover with 22-instrument lattice and release.py upgrade to v0.3.0-alpha	README.md,scripts/release.py

@@ -198,6 +198,10 @@ fn uni_tool_of(name: String) -> Int:
         return 5
     if uni_tool_hit(st, "boxcar_bank") == 1:
         return 5
+    if uni_tool_hit(st, "bisp") == 1:
+        return 12
+    if uni_tool_hit(st, "bispectrum") == 1:
+        return 12
     return 0
 
 fn uni_star_of(name: String) -> String:
@@ -214,6 +218,8 @@ fn uni_star_of(name: String) -> String:
     push(toks, "pulse")
     push(toks, "boxcar")
     push(toks, "cad")
+    push(toks, "bisp")
+    push(toks, "bispectrum")
     var best: Int = -1
     var ti: Int = 0
     while ti < len(toks):
@@ -295,6 +301,8 @@ fn uni_tool_name(t: Int) -> String:
         return "scint"
     if t == 11:
         return "cad"
+    if t == 12:
+        return "bisp"
     return "unknown"
 
 fn uni_csv_cells(row: String) -> Array<String>:

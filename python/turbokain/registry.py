@@ -146,6 +146,17 @@ _TOOLS: list[Tool] = [
         note="Model-free Permutation Entropy & LZW Complexity screener (O(N)).",
     ),
     Tool(
+        "bispectrum",
+        "kain/core/bispectrum.exe",
+        "detector",
+        "f32",
+        selftest=("--prove",),
+        out_flag="--out",
+        csv_flag="--csv",
+        fs_flag="--fs",
+        note="3D Bispectrum & Normalized Bicoherence (b^2) QPC & intermodulation estimator.",
+    ),
+    Tool(
         "subspace_null",
         "kain/core/subspace_null.exe",
         "detector",
@@ -374,6 +385,7 @@ class Registry:
 CORE_TOOLS: set[str] = {
     "bitslice",
     "boxcar_bank",
+    "bispectrum",
     "cadence_pair",
     "config",
     "drift_hunt",

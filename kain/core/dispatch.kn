@@ -58,8 +58,9 @@ fn usage() -> String:
     t = t + "  perm_entropy -> perm, pe          subspace_null-> subspace, null, rbspe\n"
     t = t + "  scint_pol    -> scint, pol        sk_gate      -> sk\n"
     t = t + "  slice        -> slice             stack        -> stk\n"
-    t = t + "  xeno_scan    -> xeno              xvm_sandbox  -> xvm\n\n"
-    t = t + "INSTRUMENTS (21 total):\n"
+    t = t + "  xeno_scan    -> xeno              xvm_sandbox  -> xvm\n"
+    t = t + "  bispectrum   -> bisp\n\n"
+    t = t + "INSTRUMENTS (22 total):\n"
     t = t + "  [Ingest / Calibration]\n"
     t = t + "    slice         GUPPI .raw -> .f32 channel/pol voltage slice (2/8-bit)\n"
     t = t + "    fil_reader    Sigproc .fil -> .f32 voltage slice (8/16/32-bit)\n"
@@ -68,6 +69,7 @@ fn usage() -> String:
     t = t + "  [Anomaly & RFI Screening]\n"
     t = t + "    sk_gate       Spectral kurtosis excision gate (4096/2048 STFT)\n"
     t = t + "    subspace_null Baseband spatial subspace RFI nulling & phase preservation (M=2, RBSPE)\n"
+    t = t + "    bispectrum    3D Bispectrum & Normalized Bicoherence (b^2) QPC estimator (IRPD O(N^2) / diag O(N))\n"
     t = t + "    xeno_scan     Microscopic battery (SK, coherence, comb ladder, DM, tail)\n"
     t = t + "    perm_entropy  Model-free Permutation Entropy & LZW Complexity screener (O(N))\n"
     t = t + "    scint_pol     Interstellar scintillation decorrelation & pol coherence (I2->I3)\n\n"
@@ -151,6 +153,8 @@ fn tool_help(tool: String) -> Int:
         print(unify_usage())
     elif tool == "waterfall" or tool == "wf" or tool == "plot":
         print(waterfall_usage())
+    elif tool == "bispectrum" or tool == "bisp":
+        print(bispectrum_usage())
     else:
         println("core: unknown tool '" + tool + "'")
         print(usage())
@@ -257,6 +261,8 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return unify_main(sub)
     elif tool == "waterfall" or tool == "wf" or tool == "plot":
         return waterfall_main(sub)
+    elif tool == "bispectrum" or tool == "bisp":
+        return bispectrum_main(sub)
     else:
         return -999
 
@@ -271,7 +277,7 @@ fn is_suite_binary(stem: String) -> Int:
 
 fn run_prove_all() -> Int with Unsafe:
     println("================================================================================")
-    println(" TurboKain Core Suite — Unified Native Prove Battery (20 instruments)")
+    println(" TurboKain Core Suite — Unified Native Prove Battery (21 instruments)")
     println("================================================================================")
     var failed: Int = 0
 
@@ -335,9 +341,12 @@ fn run_prove_all() -> Int with Unsafe:
     println("\n[20/20] subspace_null --prove")
     if subspace_null_main(["--prove"]) != 0: failed = failed + 1
 
+    println("\n[21/21] bispectrum --prove")
+    if bispectrum_main(["--prove"]) != 0: failed = failed + 1
+
     println("\n================================================================================")
     if failed == 0:
-        println(" Core Battery Receipt: ALL 20 PROVE BATTERIES PASSED (receipt=PASS)")
+        println(" Core Battery Receipt: ALL 21 PROVE BATTERIES PASSED (receipt=PASS)")
         println("================================================================================")
         return EXIT_OK
     else:
@@ -347,17 +356,19 @@ fn run_prove_all() -> Int with Unsafe:
 
 fn run_sweep(sub: Array<String>) -> Int with Unsafe:
     if len(sub) == 0:
-        println("Usage: core sweep <file.f32|file.h5|file.fil|file.raw> [--out-dir DIR] [--chan C] [--pol P] [--fs HZ] [--target T] [--freq-mhz F]")
+        println("Usage: core sweep <file.f32|file.h5|file.fil|file.raw> [--out-dir DIR] [--chan C] [--pol P] [--fs HZ] [--target T] [--freq-mhz F] [--in1 F2] [--dual-pol]")
         println("Runs full detector battery over a time series in a single pass.")
-        println("Stage 10 (unify) auto-writes REPORT.md + evidence.csv + verdicts.json.")
+        println("Stage 17 (unify) auto-writes REPORT.md + evidence.csv + verdicts.json.")
         return EXIT_HELP
     var f32_path: String = sub[0]
+    var in1_path: String = ""
     var out_dir: String = "reports/sweep"
     var fs_hz: String = "2929687.5"
     var target: String = "UNKNOWN"
     var freqmhz: String = "?"
     var want_chan: String = "0"
     var want_pol: String = "0"
+    var dual_pol: Int = 0
     var i: Int = 1
     while i < len(sub):
         if sub[i] == "--out-dir" and i + 1 < len(sub):
@@ -372,6 +383,11 @@ fn run_sweep(sub: Array<String>) -> Int with Unsafe:
         elif sub[i] == "--pol" and i + 1 < len(sub):
             want_pol = sub[i + 1]
             i = i + 1
+        elif sub[i] == "--in1" and i + 1 < len(sub):
+            in1_path = sub[i + 1]
+            i = i + 1
+        elif sub[i] == "--dual-pol":
+            dual_pol = 1
         elif sub[i] == "--target" and i + 1 < len(sub):
             target = sub[i + 1]
             i = i + 1
@@ -388,6 +404,11 @@ fn run_sweep(sub: Array<String>) -> Int with Unsafe:
             println("core sweep: h5_reader failed on " + f32_path)
             return EXIT_ERROR
         f32_path = h5_out
+        if dual_pol == 1:
+            let h5_out1: String = out_dir + "/slice_pol1.f32"
+            let h5_rc1: Int = h5_reader_main(["--in", sub[0], "--chan", want_chan, "--pol", "1", "--out", h5_out1])
+            if h5_rc1 == 0:
+                in1_path = h5_out1
     elif str_ends_with(f32_path, ".fil") == 1:
         println("\n[Ingest] fil_reader (Sigproc .fil chan=" + want_chan + ")")
         let fil_out: String = out_dir + "/slice.f32"
@@ -404,58 +425,75 @@ fn run_sweep(sub: Array<String>) -> Int with Unsafe:
             println("core sweep: slice failed on " + f32_path)
             return EXIT_ERROR
         f32_path = raw_out
+        if dual_pol == 1:
+            let raw_out1: String = out_dir + "/slice_pol1.f32"
+            let raw_rc1: Int = slice_main(["--in", sub[0], "--chan", want_chan, "--pol", "1", "--out", raw_out1])
+            if raw_rc1 == 0:
+                in1_path = raw_out1
 
     println("================================================================================")
     println(" TurboKain Unified Sweep Battery -> " + f32_path)
     println(" Output Dir: " + out_dir + " | Sample Rate: " + fs_hz + " Hz")
     println("================================================================================")
 
-    println("\n[Stage 1/7] sk_gate (RFI screening)")
+    println("\n[Stage 1/17] sk_gate (RFI screening)")
     let _sk: Int = sk_gate_main(["--in", f32_path, "--out", out_dir + "/sk.md", "--csv", out_dir + "/sk.csv"])
 
-    println("\n[Stage 2/7] xeno_scan (microscopic battery)")
+    println("\n[Stage 2/17] xeno_scan (microscopic battery)")
     let _xs: Int = xeno_scan_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/xeno.md", "--csv", out_dir + "/xeno.csv"])
 
-    println("\n[Stage 3/11] perm_entropy (Permutation Entropy & LZW Complexity)")
+    if in1_path != "":
+        println("\n[Stage 3/17] subspace_null (dual-pol spatial covariance & RFI nuller)")
+        let _sn: Int = subspace_null_main(["--in0", f32_path, "--in1", in1_path, "--out0", out_dir + "/clean0.f32", "--out1", out_dir + "/clean1.f32", "--out", out_dir + "/subspace.md", "--csv", out_dir + "/subspace.csv", "--fs", fs_hz])
+    else:
+        println("\n[Stage 3/17] subspace_null (spatial RFI nuller: bypassed for single-pol stream)")
+
+    println("\n[Stage 4/17] perm_entropy (Permutation Entropy & LZW Complexity)")
     let _pe: Int = perm_entropy_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/perm.md", "--csv", out_dir + "/perm.csv"])
 
-    println("\n[Stage 3/7] boxcar_bank (dispersed pulse search)")
+    println("\n[Stage 5/17] boxcar_bank (dispersed pulse search)")
     let _bb: Int = boxcar_bank_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/pulse"])
 
-    println("\n[Stage 4/10] frft_hunt (Coherent Fractional Fourier Transform chirp matched filter)")
+    println("\n[Stage 6/17] fold_sum (Sub-band Hann harmonic folder)")
+    let _fd: Int = fold_sum_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/fold.md", "--csv", out_dir + "/fold.csv"])
+
+    println("\n[Stage 7/17] frft_hunt (Coherent Fractional Fourier Transform chirp matched filter)")
     let _frf: Int = frft_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/frft.md", "--csv", out_dir + "/frft.csv"])
 
-    println("\n[Stage 5/10] drift_hunt (Linear Doppler drifter search)")
+    println("\n[Stage 8/17] drift_hunt (Linear Doppler drifter search)")
     let _dh: Int = drift_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/drift.md", "--csv", out_dir + "/drift.csv"])
 
-    println("\n[Stage 5/9] jerk_track (Non-linear Viterbi acceleration / orbital jerk search)")
+    println("\n[Stage 9/17] jerk_track (Non-linear Viterbi acceleration / orbital jerk search)")
     let _jt: Int = jerk_track_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/jerk"])
 
-    println("\n[Stage 6/9] frame_hunt (harmonic comb & periodogram)")
+    println("\n[Stage 10/17] frame_hunt (harmonic comb & periodogram)")
     let _fh: Int = frame_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/frame.md", "--csv", out_dir + "/frame.csv"])
 
-    println("\n[Stage 7/9] lag_hunt (long-lag direct autocorrelation)")
+    println("\n[Stage 11/17] lag_hunt (long-lag direct autocorrelation)")
     let _lh: Int = lag_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/lag.md", "--csv", out_dir + "/lag.csv"])
 
-    println("\n[Stage 8/9] fam_god (cyclic spectral correlation)")
+    println("\n[Stage 12/17] fam_god (cyclic spectral correlation)")
     let _fg: Int = fam_god_main(["--in", f32_path, "--fs", fs_hz, "--segbank", "--out", out_dir + "/fam.md", "--csv", out_dir + "/fam.csv"])
 
-    println("\n[Stage 9/9] scint_pol (Interstellar scintillation & polarization coherence)")
+    println("\n[Stage 13/17] scint_pol (Interstellar scintillation & polarization coherence)")
     let _sp: Int = scint_pol_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/scint"])
 
-    println("\n[Stage 10/14] packet_hunt (telemetry & interstellar packet framing)")
+    println("\n[Stage 14/17] packet_hunt (telemetry & interstellar packet framing)")
     let _ph: Int = packet_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/packet"])
 
-    println("\n[Stage 11/14] bitslice (voltage -> alien-machine bitstreams)")
+    println("\n[Stage 15/17] bitslice (voltage -> alien-machine bitstreams)")
     let _bs: Int = bitslice_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/bits", "--nbits", "32768"])
 
-    println("\n[Stage 12/14] raster_hunt (2D prime-factor pictogram search)")
+    println("\n[Stage 16/17] raster_hunt (2D prime-factor pictogram search)")
     let _rh: Int = raster_hunt_main(["--in", out_dir + "/bits.head.mag.bin", "--out", out_dir + "/raster", "--render"])
 
-    println("\n[Stage 13/14] xvm_sandbox (Turing/subleq/cellular automata execution sandbox)")
+    println("\n[Stage 17/17] xvm_sandbox (Turing/subleq/cellular automata execution sandbox)")
     let _xv: Int = xvm_sandbox_main(["--in", out_dir + "/bits.head.mag.bin", "--out", out_dir + "/xvm.md", "--csv", out_dir + "/xvm.csv"])
 
-    println("\n[Stage 14/14] unify (campaign report pack: REPORT.md + evidence.csv + verdicts.json)")
+    println("\n[Stage 18/18] bispectrum (3D Bispectrum & Bicoherence QPC estimator)")
+    let _bp: Int = bispectrum_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/bispectrum.md", "--csv", out_dir + "/bispectrum.csv"])
+
+    println("\n[Consolidation] unify (campaign report pack: REPORT.md + evidence.csv + verdicts.json)")
     let _un: Int = unify_main(["--dir", out_dir, "--target", target, "--freq-mhz", freqmhz, "--fs", fs_hz])
 
     println("\n[Visual Dashboard] waterfall (high-density 1920x1080 diagnostic dashboard PNG)")
