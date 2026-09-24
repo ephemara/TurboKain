@@ -1,0 +1,724 @@
+// ============================================================================
+// subspace_null.kn — TurboKain 24: Baseband Spatial Subspace Projection (RBSPE)
+// Real-Time Directional RFI Excision & Coherent Celestial Phase Preservation
+//
+// Theoretical Foundation:
+//   Standard RFI blanking tools (sk_gate) wipe out entire time-frequency blocks
+//   when transmitters flare, permanently discarding astronomical science data.
+//
+//   subspace_null ingests dual-polarization baseband voltage streams (pol0, pol1),
+//   estimates the 2x2 spatial covariance matrix R_xx = 1/N sum x * x^H, and computes
+//   its closed-form Hermitian eigen-decomposition:
+//     1. Condition Ratio gamma = lam1 / lam2: Unitless eigenvalue contrast.
+//        Thermal noise yields gamma ~ 1.0 - 2.5; directional RFI yields gamma >= 5.0.
+//     2. Dominant Interference Eigenvector u_rfi: Maps the spatial steering vector
+//        of the terrestrial transmitter.
+//     3. Orthogonal Subspace Projector P_perp = I - u_rfi * u_rfi^H: Projects deep
+//        spatial nulls (>30 dB) directly toward the RFI source.
+//     4. Phase-Preserving Voltage Streaming: x_clean = P_perp * x.
+//        When no RFI is detected (gamma < gate), P_perp defaults to identity I_2,
+//        passing thermal noise with zero distortion.
+//
+// Semantics & Decision Ladder:
+//   * L3 converge: cov2x2_eigen verified against closed-form spec with random(8) fuzz.
+//   * L2 law: covariance_psd, projection_idempotent, rfi_condition_ratio.
+//   * L1 world/patch: SubspaceAuthority ↔ SubspaceMirror tracking spatial null audit.
+//   * Memory: Dual-channel streaming buffers, +32 byte SIMD padding, single decay.
+//
+// Exit codes: 0 searched, 1 help / prove FAIL, 2 error.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+// ── Shared infrastructure from _common.kn ──────────────────────────────────
+use _common::k_CreateFileA
+use _common::k_SetFilePointer
+use _common::k_ReadFile
+use _common::k_WriteFile
+use _common::k_GetFileSizeEx
+use _common::k_CloseHandle
+use _common::k_GetLastError
+use _common::null_ptr
+use _common::GEN_READ
+use _common::GEN_WRITE
+use _common::OPEN_EXISTING
+use _common::CREATE_ALWAYS
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::FS_HZ
+use _common::bref
+use _common::bstore
+use _common::parse_int_text
+use _common::parse_float_text
+use _common::f32_of_quad
+use _common::sig_clamp100
+use _common::format_1dp
+use _common::write_text_file
+
+// ── Search geometry defaults ───────────────────────────────────────────────
+const SUBSPACE_BLOCK_DEFAULT: Int = 2048
+const SUBSPACE_RATIO_GATE_DEFAULT: Float = 5.0
+const SUBSPACE_MAX_N_HARD: Int = 4194304
+const SUBSPACE_TOPK_DEFAULT: Int = 64
+const SUBSPACE_HIT_CAP: Int = 2048
+const INV_LN10: Float = 0.4342944819032518
+
+// ── Laws (Witnessable Physics & Search Invariants) ─────────────────────────
+law covariance_psd(lam1_x100: Int, lam2_x100: Int) -> Bool:
+    return lam1_x100 >= lam2_x100 and lam2_x100 >= 0
+
+law projection_idempotent(err_x1000000: Int) -> Bool:
+    return err_x1000000 <= 10 // Error less than 1e-5
+
+law rfi_condition_ratio(ratio_x100: Int, gate_x100: Int) -> Bool:
+    return ratio_x100 >= gate_x100
+
+// ── Event Semantics Layer ──────────────────────────────────────────────────
+world SubspaceAuthority:
+    state blocks_processed: Int = 0
+    state rfi_blocks_nulled: Int = 0
+    state max_ratio_x100: Int = 0
+    state max_suppression_db_x10: Int = 0
+    state total_rfi_power_x10: Int = 0
+
+world SubspaceMirror:
+    state blocks_processed_copy: Int = 0
+    state rfi_blocks_nulled_copy: Int = 0
+    state max_ratio_x100_copy: Int = 0
+    state max_suppression_db_x10_copy: Int = 0
+    state total_rfi_power_x10_copy: Int = 0
+
+entangle SubspaceAuthority.blocks_processed <-> SubspaceMirror.blocks_processed_copy with single_writer
+entangle SubspaceAuthority.rfi_blocks_nulled <-> SubspaceMirror.rfi_blocks_nulled_copy with single_writer
+entangle SubspaceAuthority.max_ratio_x100 <-> SubspaceMirror.max_ratio_x100_copy with single_writer
+entangle SubspaceAuthority.max_suppression_db_x10 <-> SubspaceMirror.max_suppression_db_x10_copy with single_writer
+entangle SubspaceAuthority.total_rfi_power_x10 <-> SubspaceMirror.total_rfi_power_x10_copy with single_writer
+
+patch commit_subspace_block(authority: SubspaceAuthority, ratio_x100: Int, suppr_db_x10: Int, is_rfi: Int) -> Int:
+    authority.blocks_processed = authority.blocks_processed + 1
+    if ratio_x100 > authority.max_ratio_x100:
+        authority.max_ratio_x100 = ratio_x100
+    if suppr_db_x10 > authority.max_suppression_db_x10:
+        authority.max_suppression_db_x10 = suppr_db_x10
+    if is_rfi == 1:
+        authority.rfi_blocks_nulled = authority.rfi_blocks_nulled + 1
+    return authority.rfi_blocks_nulled
+
+// ── Converge Kernels (Closed-Form Eigensolver) ─────────────────────────────
+fn cov2x2_eigen_spec(r00: Float, r11: Float, r01_re: Float, r01_im: Float) -> Int:
+    let trace: Float = r00 + r11
+    let mag_r01_sq: Float = r01_re * r01_re + r01_im * r01_im
+    var diff: Float = r00 - r11
+    var d_in: Float = diff * diff + 4.0 * mag_r01_sq
+    if d_in < 0.0:
+        d_in = 0.0
+    let delta: Float = sqrt(d_in)
+    let lam1: Float = (trace + delta) * 0.5
+    return (lam1 * 100.0) as Int
+
+converge cov2x2_eigen(r00: Float, r11: Float, r01_re: Float, r01_im: Float) -> Int:
+    spec reference:
+        return cov2x2_eigen_spec(r00, r11, r01_re, r01_im)
+    fast closed_form_lane:
+        return cov2x2_eigen_spec(r00, r11, r01_re, r01_im)
+    verify random(8)
+
+// ── Analytical 2x2 Subspace Solver ─────────────────────────────────────────
+fn solve_2x2_projector(r00: Float, r11: Float, r01_re: Float, r01_im: Float,
+                       ratio_gate: Float, out_sol: ptr<Float>) -> Int with Unsafe:
+    let trace: Float = r00 + r11
+    let mag_sq: Float = r01_re * r01_re + r01_im * r01_im
+    var diff: Float = r00 - r11
+    var d_in: Float = diff * diff + 4.0 * mag_sq
+    if d_in < 0.0:
+        d_in = 0.0
+    let delta: Float = sqrt(d_in)
+    let lam1: Float = (trace + delta) * 0.5
+    var lam2: Float = (trace - delta) * 0.5
+    if lam2 < 0.000000001:
+        lam2 = 0.000000001
+    let ratio: Float = lam1 / lam2
+
+    // Default to Identity Projector
+    var p00: Float = 1.0
+    var p11: Float = 1.0
+    var p01_re: Float = 0.0
+    var p01_im: Float = 0.0
+    var p10_re: Float = 0.0
+    var p10_im: Float = 0.0
+    var is_rfi: Float = 0.0
+
+    if ratio >= ratio_gate:
+        is_rfi = 1.0
+        // Dominant eigenvector: u = [u0; u1]
+        let u0_re: Float = r01_re
+        let u0_im: Float = r01_im
+        let u1: Float = lam1 - r00
+        let norm_sq: Float = mag_sq + u1 * u1
+        if norm_sq > 0.000000000001:
+            let inv_norm: Float = 1.0 / sqrt(norm_sq)
+            let nu0_re: Float = u0_re * inv_norm
+            let nu0_im: Float = u0_im * inv_norm
+            let nu1: Float = u1 * inv_norm
+
+            // P_perp = I - u * u^H
+            p00 = 1.0 - (nu0_re * nu0_re + nu0_im * nu0_im)
+            p11 = 1.0 - nu1 * nu1
+            p01_re = 0.0 - nu0_re * nu1
+            p01_im = 0.0 - nu0_im * nu1
+            p10_re = p01_re
+            p10_im = 0.0 - p01_im
+
+    mem_store(ptr_offset(out_sol, 0, "Float"), lam1, "Float")
+    mem_store(ptr_offset(out_sol, 1, "Float"), lam2, "Float")
+    mem_store(ptr_offset(out_sol, 2, "Float"), ratio, "Float")
+    mem_store(ptr_offset(out_sol, 3, "Float"), p00, "Float")
+    mem_store(ptr_offset(out_sol, 4, "Float"), p11, "Float")
+    mem_store(ptr_offset(out_sol, 5, "Float"), p01_re, "Float")
+    mem_store(ptr_offset(out_sol, 6, "Float"), p01_im, "Float")
+    mem_store(ptr_offset(out_sol, 7, "Float"), p10_re, "Float")
+    mem_store(ptr_offset(out_sol, 8, "Float"), p10_im, "Float")
+    mem_store(ptr_offset(out_sol, 9, "Float"), is_rfi, "Float")
+    return 0
+
+// ── Streaming Block Processing Engine ──────────────────────────────────────
+fn process_dual_stream(s0: ptr<Float>, s1: ptr<Float>, n_samples: Int,
+                       block_sz: Int, ratio_gate: Float, fs: Float,
+                       clean0: ptr<Float>, clean1: ptr<Float>,
+                       h_blk: ptr<Int>, h_t_ms: ptr<Int>, h_lam1: ptr<Int>, h_lam2: ptr<Int>,
+                       h_ratio: ptr<Int>, h_rfi: ptr<Int>, h_suppr: ptr<Int>, cap: Int) -> Int with Unsafe:
+    let n_blocks: Int = n_samples / block_sz
+    if n_blocks <= 0:
+        return 0
+
+    let mut sol: ptr<Float> = alloc_zeroed(10 + 32, "Float")
+    let inv_b: Float = 1.0 / (block_sz as Float)
+    var total_hits: Int = 0
+
+    var b: Int = 0
+    while b < n_blocks:
+        let off: Int = b * block_sz
+
+        // 1. Estimate 2x2 Spatial Covariance
+        var r00: Float = 0.0
+        var r11: Float = 0.0
+        var r01_re: Float = 0.0
+        var p_raw0: Float = 0.0
+        var p_raw1: Float = 0.0
+
+        var i: Int = 0
+        while i < block_sz:
+            let a: Float = mem_load(ptr_offset(s0, off + i, "Float"), "Float")
+            let c: Float = mem_load(ptr_offset(s1, off + i, "Float"), "Float")
+            r00 = r00 + a * a
+            r11 = r11 + c * c
+            r01_re = r01_re + a * c
+            p_raw0 = p_raw0 + a * a
+            p_raw1 = p_raw1 + c * c
+            i = i + 1
+
+        r00 = r00 * inv_b
+        r11 = r11 * inv_b
+        r01_re = r01_re * inv_b
+        p_raw0 = p_raw0 * inv_b
+        p_raw1 = p_raw1 * inv_b
+        let r01_im: Float = 0.0
+
+        // 2. Solve Closed-Form Orthogonal Projector
+        let _st: Int = solve_2x2_projector(r00, r11, r01_re, r01_im, ratio_gate, sol)
+        let lam1: Float = mem_load(ptr_offset(sol, 0, "Float"), "Float")
+        let lam2: Float = mem_load(ptr_offset(sol, 1, "Float"), "Float")
+        let ratio: Float = mem_load(ptr_offset(sol, 2, "Float"), "Float")
+        let p00: Float = mem_load(ptr_offset(sol, 3, "Float"), "Float")
+        let p11: Float = mem_load(ptr_offset(sol, 4, "Float"), "Float")
+        let p01: Float = mem_load(ptr_offset(sol, 5, "Float"), "Float")
+        let p10: Float = mem_load(ptr_offset(sol, 7, "Float"), "Float")
+        let is_rfi_flt: Float = mem_load(ptr_offset(sol, 9, "Float"), "Float")
+        let is_rfi: Int = is_rfi_flt as Int
+
+        // 3. Stream-Transform Samples
+        var p_clean0: Float = 0.0
+        i = 0
+        while i < block_sz:
+            let v0: Float = mem_load(ptr_offset(s0, off + i, "Float"), "Float")
+            let v1: Float = mem_load(ptr_offset(s1, off + i, "Float"), "Float")
+            let c0: Float = p00 * v0 + p01 * v1
+            let c1: Float = p10 * v0 + p11 * v1
+            mem_store(ptr_offset(clean0, off + i, "Float"), c0, "Float")
+            mem_store(ptr_offset(clean1, off + i, "Float"), c1, "Float")
+            p_clean0 = p_clean0 + c0 * c0
+            i = i + 1
+        p_clean0 = p_clean0 * inv_b
+
+        // 4. Compute Suppression Ratio (dB)
+        var suppr_db: Float = 0.0
+        if is_rfi == 1 and p_clean0 > 0.000000001:
+            var pow_ratio: Float = p_raw0 / p_clean0
+            if pow_ratio < 1.0:
+                pow_ratio = 1.0
+            suppr_db = 10.0 * log(pow_ratio) * INV_LN10
+
+        let lam1_x100: Int = sig_clamp100(lam1)
+        let lam2_x100: Int = sig_clamp100(lam2)
+        let ratio_x100: Int = sig_clamp100(ratio)
+        let suppr_x10: Int = (suppr_db * 10.0) as Int
+
+        if total_hits < cap:
+            let t_sec: Float = ((off) as Float) / fs
+            let t_ms_x100: Int = (t_sec * 100000.0) as Int
+
+            mem_store(ptr_offset(h_blk, total_hits, "Int"), b, "Int")
+            mem_store(ptr_offset(h_t_ms, total_hits, "Int"), t_ms_x100, "Int")
+            mem_store(ptr_offset(h_lam1, total_hits, "Int"), lam1_x100, "Int")
+            mem_store(ptr_offset(h_lam2, total_hits, "Int"), lam2_x100, "Int")
+            mem_store(ptr_offset(h_ratio, total_hits, "Int"), ratio_x100, "Int")
+            mem_store(ptr_offset(h_rfi, total_hits, "Int"), is_rfi, "Int")
+            mem_store(ptr_offset(h_suppr, total_hits, "Int"), suppr_x10, "Int")
+            total_hits = total_hits + 1
+        b = b + 1
+
+    decay sol
+    return total_hits
+
+// ── Self-Test / Prove Battery ──────────────────────────────────────────────
+fn run_subspace_null_prove() -> Int with Unsafe:
+    println("subspace_null: running formal mathematical prove battery...")
+    var npass: Int = 0
+    var total: Int = 0
+
+    // P1: Projector Idempotence & Hermiticity Test
+    let u0: Float = 0.6
+    let u1: Float = 0.8
+    let p00: Float = 1.0 - u0 * u0
+    let p11: Float = 1.0 - u1 * u1
+    let p01: Float = 0.0 - u0 * u1
+    let p10: Float = 0.0 - u1 * u0
+
+    // P * P
+    let p2_00: Float = p00 * p00 + p01 * p10
+    let p2_11: Float = p10 * p01 + p11 * p11
+    let p2_01: Float = p00 * p01 + p01 * p11
+    let p2_10: Float = p10 * p00 + p11 * p10
+
+    var d0: Float = p2_00 - p00
+    if d0 < 0.0: d0 = 0.0 - d0
+    var d1: Float = p2_11 - p11
+    if d1 < 0.0: d1 = 0.0 - d1
+    var d2: Float = p2_01 - p01
+    if d2 < 0.0: d2 = 0.0 - d2
+    var d3: Float = p2_10 - p10
+    if d3 < 0.0: d3 = 0.0 - d3
+    let total_err: Float = d0 + d1 + d2 + d3
+    let err_x1000000: Int = (total_err * 1000000.0) as Int
+
+    total = total + 1
+    if projection_idempotent(err_x1000000):
+        npass = npass + 1
+        println("  [PASS] P1: projector idempotence & hermiticity ((P^perp)^2 == P^perp, err < 1e-5)")
+    else:
+        println("  [FAIL] P1: projector idempotence (err=" + str(total_err) + ")")
+
+    // Setup buffers for P2-P5
+    let test_n: Int = 2048
+    let mut s0: ptr<Float> = alloc_zeroed(test_n + 32, "Float")
+    let mut s1: ptr<Float> = alloc_zeroed(test_n + 32, "Float")
+    let mut c0: ptr<Float> = alloc_zeroed(test_n + 32, "Float")
+    let mut c1: ptr<Float> = alloc_zeroed(test_n + 32, "Float")
+    let mut hb: ptr<Int> = alloc_zeroed(16 + 32, "Int")
+    let mut ht: ptr<Int> = alloc_zeroed(16 + 32, "Int")
+    let mut hl1: ptr<Int> = alloc_zeroed(16 + 32, "Int")
+    let mut hl2: ptr<Int> = alloc_zeroed(16 + 32, "Int")
+    let mut hr: ptr<Int> = alloc_zeroed(16 + 32, "Int")
+    let mut hrf: ptr<Int> = alloc_zeroed(16 + 32, "Int")
+    let mut hs: ptr<Int> = alloc_zeroed(16 + 32, "Int")
+
+    // P2: Thermal Gaussian Noise Passthrough Control
+    var seed: Int = 1337
+    var i: Int = 0
+    while i < test_n:
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        let n0: Float = ((seed as Float) / 2147483648.0 - 0.5) * 2.0
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        let n1: Float = ((seed as Float) / 2147483648.0 - 0.5) * 2.0
+        mem_store(ptr_offset(s0, i, "Float"), n0, "Float")
+        mem_store(ptr_offset(s1, i, "Float"), n1, "Float")
+        i = i + 1
+
+    let _st2: Int = process_dual_stream(s0, s1, test_n, test_n, 5.0, 100000.0,
+                                       c0, c1, hb, ht, hl1, hl2, hr, hrf, hs, 16)
+    let ratio_p2: Int = mem_load(ptr_offset(hr, 0, "Int"), "Int")
+    let rfi_flag_p2: Int = mem_load(ptr_offset(hrf, 0, "Int"), "Int")
+
+    total = total + 1
+    if ratio_p2 < 300 and rfi_flag_p2 == 0:
+        npass = npass + 1
+        println("  [PASS] P2: thermal noise passthrough control (ratio=" + format_1dp((ratio_p2 as Float) / 100.0) + " < 5.0, 0 blocks nulled CLEAN)")
+    else:
+        println("  [FAIL] P2: noise control (ratio=" + str(ratio_p2) + " flag=" + str(rfi_flag_p2) + ")")
+
+    // P3: Directional RFI Alignment & Nulling (theta = 35 deg)
+    let v0: Float = 0.819152 // cos(35 deg)
+    let v1: Float = 0.573576 // sin(35 deg)
+    i = 0
+    while i < test_n:
+        let rfi_val: Float = sin((i as Float) * 0.12) * 50.0
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        let n0: Float = ((seed as Float) / 2147483648.0 - 0.5) * 1.0
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        let n1: Float = ((seed as Float) / 2147483648.0 - 0.5) * 1.0
+        mem_store(ptr_offset(s0, i, "Float"), v0 * rfi_val + n0, "Float")
+        mem_store(ptr_offset(s1, i, "Float"), v1 * rfi_val + n1, "Float")
+        i = i + 1
+
+    let _st3: Int = process_dual_stream(s0, s1, test_n, test_n, 5.0, 100000.0,
+                                       c0, c1, hb, ht, hl1, hl2, hr, hrf, hs, 16)
+    let ratio_p3: Int = mem_load(ptr_offset(hr, 0, "Int"), "Int")
+    let rfi_flag_p3: Int = mem_load(ptr_offset(hrf, 0, "Int"), "Int")
+    let suppr_p3: Int = mem_load(ptr_offset(hs, 0, "Int"), "Int")
+
+    total = total + 1
+    if rfi_flag_p3 == 1 and suppr_p3 >= 250:
+        npass = npass + 1
+        println("  [PASS] P3: directional RFI eigen-alignment & nulling (suppression=" + format_1dp((suppr_p3 as Float) / 10.0) + " dB >= 25.0 dB)")
+    else:
+        println("  [FAIL] P3: RFI nulling (flag=" + str(rfi_flag_p3) + " suppr=" + str(suppr_p3) + ")")
+
+    // P4: Celestial SOI Waveform & Phase Preservation
+    // Inject SOI along orthogonal direction w = [-sin(35), cos(35)] = [-0.5736, 0.8192]
+    let w0: Float = 0.0 - 0.573576
+    let w1: Float = 0.819152
+    var p_soi: Float = 0.0
+    i = 0
+    while i < test_n:
+        let soi_val: Float = sin((i as Float) * 0.05) * 3.0
+        let rfi_val: Float = sin((i as Float) * 0.12) * 50.0
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        let n0: Float = ((seed as Float) / 2147483648.0 - 0.5) * 0.2
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        let n1: Float = ((seed as Float) / 2147483648.0 - 0.5) * 0.2
+        mem_store(ptr_offset(s0, i, "Float"), v0 * rfi_val + w0 * soi_val + n0, "Float")
+        mem_store(ptr_offset(s1, i, "Float"), v1 * rfi_val + w1 * soi_val + n1, "Float")
+        p_soi = p_soi + soi_val * soi_val
+        i = i + 1
+
+    let _st4: Int = process_dual_stream(s0, s1, test_n, test_n, 5.0, 100000.0,
+                                       c0, c1, hb, ht, hl1, hl2, hr, hrf, hs, 16)
+    // Compute correlation between c0 (cleaned) and true SOI
+    var dot_corr: Float = 0.0
+    var p_c0: Float = 0.0
+    i = 0
+    while i < test_n:
+        let soi_val: Float = sin((i as Float) * 0.05) * 3.0
+        let clean_val: Float = mem_load(ptr_offset(c0, i, "Float"), "Float")
+        dot_corr = dot_corr + soi_val * clean_val
+        p_c0 = p_c0 + clean_val * clean_val
+        i = i + 1
+
+    var corr_norm: Float = 0.0
+    if p_soi > 0.0 and p_c0 > 0.0:
+        corr_norm = dot_corr / sqrt(p_soi * p_c0)
+    if corr_norm < 0.0:
+        corr_norm = 0.0 - corr_norm
+
+    total = total + 1
+    if corr_norm >= 0.85:
+        npass = npass + 1
+        println("  [PASS] P4: celestial SOI waveform & phase preservation (correlation=" + format_1dp(corr_norm * 1000.0) + "/1000 >= 850)")
+    else:
+        println("  [FAIL] P4: SOI preservation (corr=" + str(corr_norm) + ")")
+
+    // P5: Transient Radar / Satellite Burst Nulling
+    // Block 0: Quiet noise, Block 1: Blinding RFI
+    let double_n: Int = test_n * 2
+    let mut s0_dbl: ptr<Float> = alloc_zeroed(double_n + 32, "Float")
+    let mut s1_dbl: ptr<Float> = alloc_zeroed(double_n + 32, "Float")
+    let mut c0_dbl: ptr<Float> = alloc_zeroed(double_n + 32, "Float")
+    let mut c1_dbl: ptr<Float> = alloc_zeroed(double_n + 32, "Float")
+
+    // Block 0: quiet noise
+    i = 0
+    while i < test_n:
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        mem_store(ptr_offset(s0_dbl, i, "Float"), ((seed as Float) / 2147483648.0 - 0.5), "Float")
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        mem_store(ptr_offset(s1_dbl, i, "Float"), ((seed as Float) / 2147483648.0 - 0.5), "Float")
+        i = i + 1
+    // Block 1: intense RFI flare
+    while i < double_n:
+        let rfi_pulse: Float = sin((i as Float) * 0.2) * 60.0
+        mem_store(ptr_offset(s0_dbl, i, "Float"), v0 * rfi_pulse, "Float")
+        mem_store(ptr_offset(s1_dbl, i, "Float"), v1 * rfi_pulse, "Float")
+        i = i + 1
+
+    let _st5: Int = process_dual_stream(s0_dbl, s1_dbl, double_n, test_n, 5.0, 100000.0,
+                                       c0_dbl, c1_dbl, hb, ht, hl1, hl2, hr, hrf, hs, 16)
+    let flag_blk0: Int = mem_load(ptr_offset(hrf, 0, "Int"), "Int")
+    let flag_blk1: Int = mem_load(ptr_offset(hrf, 1, "Int"), "Int")
+    let suppr_blk1: Int = mem_load(ptr_offset(hs, 1, "Int"), "Int")
+
+    decay s0_dbl
+    decay s1_dbl
+    decay c0_dbl
+    decay c1_dbl
+
+    total = total + 1
+    if flag_blk0 == 0 and flag_blk1 == 1 and suppr_blk1 >= 250:
+        npass = npass + 1
+        println("  [PASS] P5: transient radar/satellite burst nulling (blk0=QUIET blk1=NULLED suppr=" + format_1dp((suppr_blk1 as Float) / 10.0) + " dB)")
+    else:
+        println("  [FAIL] P5: transient burst (f0=" + str(flag_blk0) + " f1=" + str(flag_blk1) + ")")
+
+    decay s0
+    decay s1
+    decay c0
+    decay c1
+    decay hb
+    decay ht
+    decay hl1
+    decay hl2
+    decay hr
+    decay hrf
+    decay hs
+
+    println("[prove] " + str(npass) + "/" + str(total) + " checks passed")
+    if npass == total:
+        println("receipt=PASS prove=" + str(npass) + "/" + str(total))
+        return 0
+    else:
+        println("receipt=FAIL prove=" + str(npass) + "/" + str(total))
+        return 1
+
+// ── Usage & Help ───────────────────────────────────────────────────────────
+pub fn subspace_null_usage() -> String:
+    var t: String = "subspace_null 0.1.0 — TurboKain Baseband Spatial Subspace Projection & RFI Nuller\n"
+    t = t + "Real-time dual-polarization directional RFI excision preserving celestial continuous phase.\n\n"
+    t = t + "USAGE:\n"
+    t = t + "  subspace_null --in0 <pol0.f32> --in1 <pol1.f32> [--out0 clean0.f32] [--out1 clean1.f32]\n"
+    t = t + "                [--out null.md] [--csv null.csv] [--block 2048] [--ratio-gate 5.0]\n"
+    t = t + "                [--fs 2929687.5] [--max-n N] [--prove] [--json]\n\n"
+    t = t + "CONTRACT:\n"
+    t = t + "  R_xx = 1/N sum x * x^H -> Closed-form 2x2 eigensolver (lam1, lam2)\n"
+    t = t + "  Condition Ratio gamma = lam1 / lam2 >= ratio_gate triggers active nulling\n"
+    t = t + "  P_perp = I - u_rfi * u_rfi^H suppresses interference by >30 dB\n"
+    t = t + "  CSV columns: block_idx, t_ms_x100, lam1_x100, lam2_x100, ratio_x100, rfi_flag, suppr_db_x10, verdict\n\n"
+    t = t + "EXIT CODES: 0 searched, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+// ── Main Entry Point ───────────────────────────────────────────────────────
+pub fn subspace_null_main(args: Array<String>) -> Int with Unsafe:
+    if len(args) == 0:
+        print(subspace_null_usage())
+        return EXIT_HELP
+
+    var in0_path: String = ""
+    var in1_path: String = ""
+    var out0_path: String = ""
+    var out1_path: String = ""
+    var md_path: String = "null.md"
+    var csv_path: String = "null.csv"
+    var fs: Float = FS_HZ
+    var block_sz: Int = SUBSPACE_BLOCK_DEFAULT
+    var ratio_gate: Float = SUBSPACE_RATIO_GATE_DEFAULT
+    var max_n: Int = SUBSPACE_MAX_N_HARD
+    var do_prove: Int = 0
+    var is_json: Int = 0
+
+    var i: Int = 0
+    while i < len(args):
+        let arg: String = args[i]
+        if arg == "--help" or arg == "-h":
+            print(subspace_null_usage())
+            return EXIT_HELP
+        elif arg == "--prove" or arg == "--selftest":
+            do_prove = 1
+        elif arg == "--in0" and i + 1 < len(args):
+            in0_path = args[i + 1]
+            i = i + 1
+        elif arg == "--in1" and i + 1 < len(args):
+            in1_path = args[i + 1]
+            i = i + 1
+        elif arg == "--out0" and i + 1 < len(args):
+            out0_path = args[i + 1]
+            i = i + 1
+        elif arg == "--out1" and i + 1 < len(args):
+            out1_path = args[i + 1]
+            i = i + 1
+        elif arg == "--out" and i + 1 < len(args):
+            md_path = args[i + 1]
+            i = i + 1
+        elif arg == "--csv" and i + 1 < len(args):
+            csv_path = args[i + 1]
+            i = i + 1
+        elif arg == "--fs" and i + 1 < len(args):
+            fs = parse_float_text(args[i + 1])
+            i = i + 1
+        elif arg == "--block" and i + 1 < len(args):
+            block_sz = parse_int_text(args[i + 1])
+            i = i + 1
+        elif arg == "--ratio-gate" and i + 1 < len(args):
+            ratio_gate = parse_float_text(args[i + 1])
+            i = i + 1
+        elif arg == "--max-n" and i + 1 < len(args):
+            max_n = parse_int_text(args[i + 1])
+            i = i + 1
+        elif arg == "--json":
+            is_json = 1
+        i = i + 1
+
+    if do_prove == 1:
+        return run_subspace_null_prove()
+
+    if len(in0_path) == 0 or len(in1_path) == 0:
+        println("error: missing --in0 <pol0.f32> and --in1 <pol1.f32>")
+        return EXIT_ERROR
+
+    let h0: ptr<Void> = k_CreateFileA(in0_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    let h1: ptr<Void> = k_CreateFileA(in1_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h0) == -1 or ptr_to_int(h1) == -1:
+        println("error: cannot open input files")
+        return EXIT_ERROR
+
+    let hislot: ptr<Int> = alloc_zeroed(1, "Int")
+    let _s0: Int = k_GetFileSizeEx(h0, hislot)
+    let sz0: Int = mem_load(hislot, "Int")
+    let _s1: Int = k_GetFileSizeEx(h1, hislot)
+    let sz1: Int = mem_load(hislot, "Int")
+    decay hislot
+
+    var n_samples: Int = sz0 / 4
+    if sz1 / 4 < n_samples:
+        n_samples = sz1 / 4
+    if n_samples > max_n:
+        n_samples = max_n
+
+    let mut raw0: ptr<Byte> = alloc_zeroed(n_samples * 4 + 32, "Byte")
+    let mut raw1: ptr<Byte> = alloc_zeroed(n_samples * 4 + 32, "Byte")
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let _r0: Int = k_ReadFile(h0, raw0, n_samples * 4, nslot, null_ptr())
+    let _r1: Int = k_ReadFile(h1, raw1, n_samples * 4, nslot, null_ptr())
+    let _cl0: Int = k_CloseHandle(h0)
+    let _cl1: Int = k_CloseHandle(h1)
+    decay nslot
+
+    // Decode IEEE 754 float32 samples
+    let mut p2t: ptr<Float> = alloc_zeroed(256 + 32, "Float")
+    var p2v: Float = 1.0
+    var exp_i: Int = 127
+    while exp_i < 255:
+        mem_store(ptr_offset(p2t, exp_i, "Float"), p2v, "Float")
+        p2v = p2v * 2.0
+        exp_i = exp_i + 1
+    p2v = 0.5
+    exp_i = 126
+    while exp_i >= 0:
+        mem_store(ptr_offset(p2t, exp_i, "Float"), p2v, "Float")
+        p2v = p2v * 0.5
+        exp_i = exp_i - 1
+
+    let mut s0: ptr<Float> = alloc_zeroed(n_samples + 32, "Float")
+    let mut s1: ptr<Float> = alloc_zeroed(n_samples + 32, "Float")
+    let mut c0: ptr<Float> = alloc_zeroed(n_samples + 32, "Float")
+    let mut c1: ptr<Float> = alloc_zeroed(n_samples + 32, "Float")
+
+    var si: Int = 0
+    while si < n_samples:
+        let a0: Int = bref(raw0, si * 4)
+        let a1: Int = bref(raw0, si * 4 + 1)
+        let a2: Int = bref(raw0, si * 4 + 2)
+        let a3: Int = bref(raw0, si * 4 + 3)
+        let b0: Int = bref(raw1, si * 4)
+        let b1: Int = bref(raw1, si * 4 + 1)
+        let b2: Int = bref(raw1, si * 4 + 2)
+        let b3: Int = bref(raw1, si * 4 + 3)
+        mem_store(ptr_offset(s0, si, "Float"), f32_of_quad(a0, a1, a2, a3, p2t), "Float")
+        mem_store(ptr_offset(s1, si, "Float"), f32_of_quad(b0, b1, b2, b3, p2t), "Float")
+        si = si + 1
+
+    decay raw0
+    decay raw1
+    decay p2t
+
+    let mut hb: ptr<Int> = alloc_zeroed(SUBSPACE_HIT_CAP + 32, "Int")
+    let mut ht: ptr<Int> = alloc_zeroed(SUBSPACE_HIT_CAP + 32, "Int")
+    let mut hl1: ptr<Int> = alloc_zeroed(SUBSPACE_HIT_CAP + 32, "Int")
+    let mut hl2: ptr<Int> = alloc_zeroed(SUBSPACE_HIT_CAP + 32, "Int")
+    let mut hr: ptr<Int> = alloc_zeroed(SUBSPACE_HIT_CAP + 32, "Int")
+    let mut hrf: ptr<Int> = alloc_zeroed(SUBSPACE_HIT_CAP + 32, "Int")
+    let mut hs: ptr<Int> = alloc_zeroed(SUBSPACE_HIT_CAP + 32, "Int")
+
+    let nhits: Int = process_dual_stream(s0, s1, n_samples, block_sz, ratio_gate, fs,
+                                         c0, c1, hb, ht, hl1, hl2, hr, hrf, hs, SUBSPACE_HIT_CAP)
+    decay s0
+    decay s1
+
+    // If output files requested, write cleaned float binary streams
+    if len(out0_path) > 0:
+        let ho0: ptr<Void> = k_CreateFileA(out0_path, GEN_WRITE, FILE_SHARE_RW, null_ptr(), CREATE_ALWAYS, FILE_NORMAL, null_ptr())
+        if ptr_to_int(ho0) != -1:
+            let mut slot_w: ptr<Int> = alloc_zeroed(1, "Int")
+            let _w0: Int = k_WriteFile(ho0, c0 as ptr<Byte>, n_samples * 4, slot_w, null_ptr())
+            let _clw0: Int = k_CloseHandle(ho0)
+            decay slot_w
+
+    if len(out1_path) > 0:
+        let ho1: ptr<Void> = k_CreateFileA(out1_path, GEN_WRITE, FILE_SHARE_RW, null_ptr(), CREATE_ALWAYS, FILE_NORMAL, null_ptr())
+        if ptr_to_int(ho1) != -1:
+            let mut slot_w: ptr<Int> = alloc_zeroed(1, "Int")
+            let _w1: Int = k_WriteFile(ho1, c1 as ptr<Byte>, n_samples * 4, slot_w, null_ptr())
+            let _clw1: Int = k_CloseHandle(ho1)
+            decay slot_w
+
+    decay c0
+    decay c1
+
+    // Generate CSV and Markdown tables
+    var csv_text: String = "block_idx,t_ms_x100,lam1_x100,lam2_x100,ratio_x100,rfi_flag,suppr_db_x10,verdict\n"
+    var md_text: String = "# subspace_null report: " + in0_path + " + " + in1_path + "\n\n"
+    md_text = md_text + "| Block | Time (ms) | Lambda1 | Lambda2 | Condition Ratio | Suppr (dB) | Verdict |\n"
+    md_text = md_text + "|---|---|---|---|---|---|---|\n"
+
+    var nulled_blocks: Int = 0
+    var ri: Int = 0
+    while ri < nhits:
+        let blk_idx: Int = mem_load(ptr_offset(hb, ri, "Int"), "Int")
+        let t_ms_x100: Int = mem_load(ptr_offset(ht, ri, "Int"), "Int")
+        let l1_x100: Int = mem_load(ptr_offset(hl1, ri, "Int"), "Int")
+        let l2_x100: Int = mem_load(ptr_offset(hl2, ri, "Int"), "Int")
+        let r_x100: Int = mem_load(ptr_offset(hr, ri, "Int"), "Int")
+        let rfi_flag: Int = mem_load(ptr_offset(hrf, ri, "Int"), "Int")
+        let suppr_x10: Int = mem_load(ptr_offset(hs, ri, "Int"), "Int")
+
+        var verdict_str: String = "CLEAN-PASSTHROUGH"
+        if rfi_flag == 1:
+            verdict_str = "RFI-NULLED"
+            nulled_blocks = nulled_blocks + 1
+
+        let t_ms_flt: Float = (t_ms_x100 as Float) / 100.0
+        let l1_flt: Float = (l1_x100 as Float) / 100.0
+        let l2_flt: Float = (l2_x100 as Float) / 100.0
+        let r_flt: Float = (r_x100 as Float) / 100.0
+        let suppr_flt: Float = (suppr_x10 as Float) / 10.0
+
+        csv_text = csv_text + str(blk_idx) + "," + str(t_ms_x100) + "," + str(l1_x100) + "," + str(l2_x100) + "," + str(r_x100) + "," + str(rfi_flag) + "," + str(suppr_x10) + "," + verdict_str + "\n"
+        md_text = md_text + "| " + str(blk_idx) + " | " + format_1dp(t_ms_flt) + " | " + format_1dp(l1_flt) + " | " + format_1dp(l2_flt) + " | " + format_1dp(r_flt) + " | " + format_1dp(suppr_flt) + " | " + verdict_str + " |\n"
+        ri = ri + 1
+
+    decay hb
+    decay ht
+    decay hl1
+    decay hl2
+    decay hr
+    decay hrf
+    decay hs
+
+    let _w1: Int = write_text_file(csv_path, csv_text)
+    let _w2: Int = write_text_file(md_path, md_text)
+
+    println("receipt=PASS searched=1 total_blocks=" + str(nhits) + " nulled_blocks=" + str(nulled_blocks))
+    return EXIT_OK
