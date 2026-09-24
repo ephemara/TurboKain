@@ -3770,8 +3770,9 @@ fn usage() -> String:
     t = t + "  frame_hunt   -> frame             frft_hunt    -> frft\n"
     t = t + "  h5_reader    -> h5, h5reader      jerk_track   -> jerk\n"
     t = t + "  raster_hunt  -> raster            packet_hunt  -> packet, pkt\n"
-    t = t + "  perm_entropy -> perm, pe          scint_pol    -> scint, pol\n"
-    t = t + "  slice        -> slice             sk_gate      -> sk\n"
+    t = t + "  perm_entropy -> perm, pe          subspace_null-> subspace, null, rbspe\n"
+    t = t + "  scint_pol    -> scint, pol        sk_gate      -> sk\n"
+    t = t + "  slice        -> slice             stack        -> stk\n"
     t = t + "  xeno_scan    -> xeno              xvm_sandbox  -> xvm\n\n"
     t = t + "INSTRUMENTS (21 total):\n"
     t = t + "  [Ingest / Calibration]\n"
@@ -3781,6 +3782,7 @@ fn usage() -> String:
     t = t + "    config        Header/CLI/preset geometry resolver (40 parameters)\n\n"
     t = t + "  [Anomaly & RFI Screening]\n"
     t = t + "    sk_gate       Spectral kurtosis excision gate (4096/2048 STFT)\n"
+    t = t + "    subspace_null Baseband spatial subspace RFI nulling & phase preservation (M=2, RBSPE)\n"
     t = t + "    xeno_scan     Microscopic battery (SK, coherence, comb ladder, DM, tail)\n"
     t = t + "    perm_entropy  Model-free Permutation Entropy & LZW Complexity screener (O(N))\n"
     t = t + "    scint_pol     Interstellar scintillation decorrelation & pol coherence (I2->I3)\n\n"
@@ -3842,6 +3844,8 @@ fn tool_help(tool: String) -> Int:
         print(xeno_scan_usage())
     elif tool == "perm_entropy" or tool == "perm" or tool == "pe":
         print(perm_entropy_usage())
+    elif tool == "subspace_null" or tool == "subspace" or tool == "null" or tool == "rbspe":
+        print(subspace_null_usage())
     elif tool == "xvm_sandbox" or tool == "xvm":
         print(xvm_sandbox_usage())
     elif tool == "cadence_pair" or tool == "cadence" or tool == "cad":
@@ -3952,6 +3956,8 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return xeno_scan_main(sub)
     elif tool == "perm_entropy" or tool == "perm" or tool == "pe":
         return perm_entropy_main(sub)
+    elif tool == "subspace_null" or tool == "subspace" or tool == "null" or tool == "rbspe":
+        return subspace_null_main(sub)
     elif tool == "xvm_sandbox" or tool == "xvm":
         return xvm_sandbox_main(sub)
     elif tool == "jerk_track" or tool == "jerk":
@@ -3980,7 +3986,7 @@ fn is_suite_binary(stem: String) -> Int:
 
 fn run_prove_all() -> Int with Unsafe:
     println("================================================================================")
-    println(" TurboKain Core Suite — Unified Native Prove Battery (19 instruments)")
+    println(" TurboKain Core Suite — Unified Native Prove Battery (20 instruments)")
     println("================================================================================")
     var failed: Int = 0
 
@@ -4038,12 +4044,15 @@ fn run_prove_all() -> Int with Unsafe:
     println("\n[18/19] frft_hunt --prove")
     if frft_hunt_main(["--prove"]) != 0: failed = failed + 1
 
-    println("\n[19/19] perm_entropy --prove")
+    println("\n[19/20] perm_entropy --prove")
     if perm_entropy_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[20/20] subspace_null --prove")
+    if subspace_null_main(["--prove"]) != 0: failed = failed + 1
 
     println("\n================================================================================")
     if failed == 0:
-        println(" Core Battery Receipt: ALL 19 PROVE BATTERIES PASSED (receipt=PASS)")
+        println(" Core Battery Receipt: ALL 20 PROVE BATTERIES PASSED (receipt=PASS)")
         println("================================================================================")
         return EXIT_OK
     else:
