@@ -117,3 +117,6 @@ date	area	type	description	file
 2026-09-24	tool	add	restored bl_download.py at repo path per AGENTS.md contract	python/bl_download.py
 2026-09-24	docs	add	frft_hunt blueprint: FrFT chirp matched-filter math+arch+Kain prototype guide	docs/toolresearch/frft_hunt_guide.md
 2026-09-24	tool	add	frft_hunt.kn coherent FrFT chirp matched filter (Tool 22) implemented and proven 5/5	kain/core/frft_hunt.kn,kain/core/dispatch.kn,catalog.tsv,python/turbokain/registry.py
+2026-09-24	scan	update	added frft_hunt to native core sweep and Python tk scan F32_DETECTORS bundle	kain/core/dispatch.kn,python/turbokain/scan.py
+2026-09-24	tool	add	perm_entropy.kn fast permutation entropy, C_JS statistical complexity & LZ76 algorithmic complexity screener (Tool 23) implemented and proven 5/5	kain/core/perm_entropy.kn,kain/core/dispatch.kn,catalog.tsv,python/turbokain/registry.py,python/turbokain/scan.py,docs/toolresearch/perm_entropy_guide.md
+2026-09-24	tool	add	subspace_null.kn baseband spatial subspace projection & directional RFI nuller (Tool 24) implemented and proven 5/5	kain/core/subspace_null.kn,kain/core/dispatch.kn,catalog.tsv,python/turbokain/registry.py,docs/toolresearch/subspace_null_guide.md

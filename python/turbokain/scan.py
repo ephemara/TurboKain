@@ -30,9 +30,11 @@ F32_DETECTORS = [
     "boxcar_bank",
     "fold_sum",
     "fam_god",
+    "frft_hunt",
     "drift_hunt",
     "frame_hunt",
     "xeno_scan",
+    "perm_entropy",
     "lag_hunt",
     "waterfall",
 ]
