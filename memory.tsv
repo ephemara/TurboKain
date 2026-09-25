@@ -129,3 +129,4 @@ date	area	type	description	file
 2026-09-24	tool	add	bispectrum.kn 3D Bispectrum & Normalized Bicoherence (b^2) QPC engine with IRPD domain reduction and 1D diagonal sweep	kain/core/bispectrum.kn,kain/core/dispatch.kn,kain/core/unify.kn,docs/toolresearch/bispectrum_guide.md
 2026-09-24	catalog	update	catalog.tsv Tool 25 bispectrum added with prove=5/5 and registry updated	catalog.tsv,python/turbokain/registry.py
 2026-09-24	repo	update	Complete README.md makeover with 22-instrument lattice and release.py upgrade to v0.3.0-alpha	README.md,scripts/release.py
+2026-09-24	release	publish	Published v0.3.0-alpha GitHub release with 21 instruments, 16 prove batteries, and waterfall engine	tkc.exe,turbokain_core.exe,turbokain-v0.3.0-alpha-windows-x86_64.zip,SHA256SUMS.txt

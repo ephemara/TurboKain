@@ -20,6 +20,7 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+*.zip
 /reports/2026-09-22_fullsweep
 /.cache
 /.pi
