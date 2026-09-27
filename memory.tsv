@@ -146,3 +146,4 @@ date	area	type	description	file
 2026-09-27	docs	fix	README math: display blocks onto own fenced lines with blank-line isolation, fixed Omega middle-bar delimiter, normalized units, moved Fig1 caption out of HTML so inline math renders	README.md
 2026-09-27	tool	update	waterfall v0.3.0 science core: full-coverage lin-avg STFT, half-spec BW=fs/2, p5/p99 scale, M-derived SK gate, absolute-Hz 3-track drift overlays, live Card6/Card7 lane ingest, header/footer provenance; prove 6/6; tk scan passes --target	kain/core/waterfall.kn,kain/core.kn,python/turbokain/scan.py,catalog.tsv
 2026-09-27	docs	fix	Omega IRPD equation: blank-line isolated display block plus middle-bar delimiter fix in README and bispectrum guide	README.md,docs/toolresearch/bispectrum_guide.md
+2026-09-27	docs	fix	Omega IRPD equation rewritten with plain brace and mid commands after hosting renderer rejected the left-middle-right construct	README.md,docs/toolresearch/bispectrum_guide.md

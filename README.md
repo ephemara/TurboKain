@@ -117,7 +117,7 @@ $$
 - **Irreducible Principal Domain (IRPD):** Restricts 2D evaluation strictly to the non-redundant triangle:
 
 $$
-\Omega = \left\{ (f_1, f_2) \;\middle|\; 0 \le f_2 \le f_1, \; f_1 + f_2 \le \frac{f_s}{2} \right\}
+\Omega = \lbrace (f_1, f_2) \mid 0 \le f_2 \le f_1, \quad f_1 + f_2 \le \frac{f_s}{2} \rbrace
 $$
 
   slashing redundant evaluation space by **83.3%** across the full plane.

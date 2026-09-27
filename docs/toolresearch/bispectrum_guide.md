@@ -85,7 +85,7 @@ Evaluating the full $[-f_s/2, f_s/2] \times [-f_s/2, f_s/2]$ plane wastefully re
 `bispectrum` restricts matrix evaluation strictly to the **Irreducible Principal Domain (IRPD)**:
 
 $$
-\Omega = \left\{ (f_1, f_2) \;\middle|\; 0 \le f_2 \le f_1, \; f_1 + f_2 \le \frac{f_s}{2} \right\}
+\Omega = \lbrace (f_1, f_2) \mid 0 \le f_2 \le f_1, \quad f_1 + f_2 \le \frac{f_s}{2} \rbrace
 $$
 
 In terms of discrete bin indices $k_1, k_2$ up to Nyquist bin $K_{max} = N/2$:
