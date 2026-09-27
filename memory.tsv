@@ -130,3 +130,16 @@ date	area	type	description	file
 2026-09-24	catalog	update	catalog.tsv Tool 25 bispectrum added with prove=5/5 and registry updated	catalog.tsv,python/turbokain/registry.py
 2026-09-24	repo	update	Complete README.md makeover with 22-instrument lattice and release.py upgrade to v0.3.0-alpha	README.md,scripts/release.py
 2026-09-24	release	publish	Published v0.3.0-alpha GitHub release with 21 instruments, 16 prove batteries, and waterfall engine	tkc.exe,turbokain_core.exe,turbokain-v0.3.0-alpha-windows-x86_64.zip,SHA256SUMS.txt
+2026-09-25	catalog	add	Added LHS1140 (64 GB) and BLGC C01 (42.5 GB) entries to download manifest	D:/data/download_manifest.csv
+2026-09-25	catalog	add	Added TIC458478250 X-band (53.2 GB) entry to download manifest	D:/data/download_manifest.csv
+2026-09-25	catalog	update	Added LHS-1140, Baade-Window, and TIC-458478250 ingested rows to sky_catalog.tsv	sky_catalog.tsv
+2026-09-25	report	add	Baade Window C-band 54.6dB carrier triaged with bispectrum QPC (b2=0.523) and frft zero-drift	reports/2026-09-25_baade_bulge_campaign/REPORT.md
+2026-09-25	catalog	update	Updated Baade-Window disposition to ATTRIBUTED-INTERMOD in sky_catalog.tsv	sky_catalog.tsv
+2026-09-26	report	add	LHS 1140 64GB cadence campaign report: HI/OH recovered, GPS L1 isolated via perm_entropy, EIRP floor <= 420 GW	reports/2026-09-25_lhs1140_campaign/REPORT.md
+2026-09-26	catalog	update	Updated LHS-1140 disposition to HONEST-NEGATIVE in sky_catalog.tsv	sky_catalog.tsv
+2026-09-26	report	add	TIC 458478250 53GB X-band campaign report: 1.18B chans surveyed, DSN/H90 carriers triaged via bispectrum b2=0.999 intermod, EIRP floor <= 34 TW	reports/2026-09-25_tic458478250_campaign/REPORT.md
+2026-09-26	catalog	update	Updated TIC-458478250 disposition to HONEST-NEGATIVE in sky_catalog.tsv	sky_catalog.tsv
+2026-09-26	catalog	update	Corrected coverage to PARTIAL-SPOT for LHS-1140, TIC-458478250, and Baade-Window in sky_catalog.tsv per Rule 10	sky_catalog.tsv
+2026-09-26	research	add	Novel hunt: LHS 1384 MHz ON-only 72-line 55s transient triaged as GPS RFI + full-IRPD bispectrum thrust (trap_clean b2=0.912, GPS b2=0.994)	reports/2026-09-26_novel_hunt/REPORT.md,reports/2026-09-26_novel_hunt/lhs_node74_lines.csv,reports/2026-09-26_novel_hunt/lhs_node74_cube_on1.npy,reports/2026-09-26_novel_hunt/lhs_node74_cube_on2.npy
+2026-09-26	catalog	update	Completed full 128-channel comb sweeps on LHS-1140, TIC-458478250, and Baade-Window (384 nodes total); updated sky_catalog.tsv	sky_catalog.tsv
+2026-09-26	research	verify	Baade Node044 ANOMALY-MOD triaged: single-window perm STRUCTURED + full-IRPD QPC b2=0.536 common-mode + waterfall stationary carrier, two pipeline parse gaps filed	reports/2026-09-26_novel_hunt/baade_node044_ch4576.f32,reports/2026-09-26_novel_hunt/baade044_perm.csv,reports/2026-09-26_novel_hunt/baade044_waterfall.png
