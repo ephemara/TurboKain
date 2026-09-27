@@ -226,6 +226,10 @@ def run_scan(plan: ScanPlan, reg: Registry, root: Path) -> dict:
                 continue
             out_stem = _out_stem(plan.workdir, tool, chan, pol)
             args = _detector_args(tool, f32, out_stem, plan.fs)
+            if tool.name == "waterfall":
+                # Science headers need a target; the sweep tag is the best
+                # available name (unify gets it too). No hardcoded fallback.
+                args += ["--target", plan.tag]
             res = run_tool(
                 tool, args, root=root, cwd=plan.workdir,
                 data_dir=plan.data_dir, timeout=plan.timeout,

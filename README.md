@@ -23,9 +23,9 @@
 
 <p align="center">
   <img src="docs/waterfall_examples/01_proxima_b_drifting_carrier_turbo.png" alt="TurboKain Scientific Waterfall & Diagnostic HUD" width="100%">
-  <br>
-  <em><strong>Figure 1:</strong> High-density 1920×1080 Multi-Panel Scientific Diagnostic Dashboard generated natively through Kain (<code>waterfall.kn</code>). Unifies dynamic waterfall heatmap (NASA Turbo colormap), frequency-aligned integrated bandpass $P(f)$, time-domain total power envelope $P(t)$, spectral kurtosis $SK(f)$ RFI excision, live telemetry HUD, candidate tracking vectors, and multi-instrument verdict matrix.</em>
 </p>
+
+*Figure 1: High-density 1920×1080 Multi-Panel Scientific Diagnostic Dashboard generated natively through Kain (`waterfall.kn`). Unifies dynamic waterfall heatmap (NASA Turbo colormap), frequency-aligned integrated bandpass $P(f)$, time-domain total power envelope $P(t)$, spectral kurtosis $SK(f)$ RFI excision, live telemetry HUD, candidate tracking vectors, and multi-instrument verdict matrix.*
 
 ---
 
@@ -74,8 +74,8 @@ The TurboKain core engine comprises 22 specialized instruments spanning the comp
 | **`fil_reader`** | `fil_reader.kn` | Spectral Ingest | Sigproc `.fil` (8/16/32-bit) $\to$ calibrated `.f32` voltage | Header validation, band-mean extraction |
 | **`h5_reader`** | `h5_reader.kn` | Filterbank Ingest | Breakthrough Listen HDF5 (`.h5`) bitshuffle/gzip $\to$ `.f32` | Channel extraction, band-mean & spectrum |
 | **`config`** | `config.kn` | Configuration | Resolves 40 telemetry, RF geometry, and search bounds | CLI $\gt$ Header $\gt$ Preset arbitration |
-| **`sk_gate`** | `sk_gate.kn` | RFI Excision | Spectral Kurtosis ($SK$) estimator over 4096/2048 STFT | Excision threshold: $\vert SK - 1 \vert \ge 0.50$ |
-| **`subspace_null`** | `subspace_null.kn` | Spatial Filtering | Baseband spatial subspace projection & directional RFI nuller | $M=2$ Hermitian eigensolver, $>30\text{ dB}$ nulls |
+| **`sk_gate`** | `sk_gate.kn` | RFI Excision | Spectral Kurtosis ($SK$) estimator over 4096/2048 STFT | Excision threshold: $\lvert SK - 1 \rvert \ge 0.50$ |
+| **`subspace_null`** | `subspace_null.kn` | Spatial Filtering | Baseband spatial subspace projection & directional RFI nuller | $M=2$ Hermitian eigensolver, $> 30\,\text{dB}$ nulls |
 | **`xeno_scan`** | `xeno_scan.kn` | Anomaly Screening | 6-marker battery: SK, coherence, comb, dispersion, tail | $\ge 20.0$ ladder ratio, $6.0\sigma$ zero-crossing |
 | **`perm_entropy`** | `perm_entropy.kn` | Dynamic Complexity | 5D Permutation Entropy ($H_{PE}$) + $C_{JS}$ + LZW Complexity ($K_{LZ}$) | $O(N)$ Lehmer factoradic mapping, model-free |
 | **`bispectrum`** | `bispectrum.kn` | Higher-Order Statistics | 3D Bispectrum & Normalized Bicoherence ($b^2$) QPC estimator | IRPD $\Omega$ ($83.3\%$ search reduction), $O(N)$ diag |
@@ -87,7 +87,7 @@ The TurboKain core engine comprises 22 specialized instruments spanning the comp
 | **`frft_hunt`** | `frft_hunt.kn` | Coherent Matched Filter| Fast Fractional Fourier Transform chirp matched filter | $O(N_\alpha \cdot N \log N)$, $\sqrt{N}$ gain over dedoppler |
 | **`drift_hunt`** | `drift_hunt.kn` | Chirped Carriers | Taylor dedoppler shift-and-add over $(\dot{f}, f)$ space | Sidereal and topocentric chirp acceleration |
 | **`jerk_track`** | `jerk_track.kn` | Non-Linear Doppler | Viterbi trellis dynamic programming orbital jerk tracker | High-agility exoplanetary acceleration |
-| **`lag_hunt`** | `lag_hunt.kn` | Autocorrelation | Direct lag microscope ($0.01\text{ ms} - 10\text{ s}$) | 4-lens lattice (phase/power/cadence/event) |
+| **`lag_hunt`** | `lag_hunt.kn` | Autocorrelation | Direct lag microscope ($0.01\,\text{ms} - 10\,\text{s}$) | 4-lens lattice (phase/power/cadence/event) |
 | **`packet_hunt`**| `packet_hunt.kn` | Telemetry Framing | Autonomous packet synchronization (CCSDS/Barker/SGLS) | Barker-13 sync, bit-slip recovery |
 | **`bitslice`** | `bitslice.kn` | Stream Conversion | Floating-point voltage $\to$ packed bitstreams (sign/diff/mag) | Coherent integrate-and-dump at baud rate $\alpha$ |
 | **`raster_hunt`** | `raster_hunt.kn` | 2D Payload Framing | Prime-factor 2D rastering & spatial autocorrelation | Semi-prime frame detection (Arecibo-style) |
@@ -103,28 +103,53 @@ The TurboKain core engine comprises 22 specialized instruments spanning the comp
 
 ### 4.1 Higher-Order Spectral Analysis: Bispectrum & Bicoherence (`bispectrum.kn`)
 For baseband segments $X_m(f)$, the direct bispectrum and Kim & Powers (1979) normalized bicoherence are defined as:
-$$B(f_1, f_2) = \mathbb{E}\left[ X(f_1) X(f_2) X^*(f_1 + f_2) \right]$$
-$$b^2(f_1, f_2) = \frac{\left| \mathbb{E}\left[ X(f_1) X(f_2) X^*(f_1 + f_2) \right] \right|^2}{\mathbb{E}\left[ \left| X(f_1) X(f_2) \right|^2 \right] \cdot \mathbb{E}\left[ \left| X(f_1 + f_2) \right|^2 \right]}$$
+
+$$
+B(f_1, f_2) = \mathbb{E}\left[ X(f_1) X(f_2) X^{\ast}(f_1 + f_2) \right]
+$$
+
+$$
+b^2(f_1, f_2) = \frac{\left| \mathbb{E}\left[ X(f_1) X(f_2) X^{\ast}(f_1 + f_2) \right] \right|^{2}}{\mathbb{E}\left[ \left| X(f_1) X(f_2) \right|^{2} \right] \cdot \mathbb{E}\left[ \left| X(f_1 + f_2) \right|^{2} \right]}
+$$
 
 - **Gaussian Thermal Ceiling:** For all zero-mean Gaussian stationary processes, $B(f_1, f_2) \equiv 0 \implies b^2 \sim \frac{1}{M}$.
 - **Quadratic Phase Coupling (QPC):** When $f_3 = f_1 + f_2$ with phase lock $\theta_3 = \theta_1 + \theta_2 + \phi_0$, $b^2 \to 1.0$.
 - **Irreducible Principal Domain (IRPD):** Restricts 2D evaluation strictly to the non-redundant triangle:
-  $$\Omega = \left\{ (f_1, f_2) \;\middle\vert{}\; 0 \le f_2 \le f_1, \, f_1 + f_2 \le \frac{f_s}{2} \right\}$$
+
+  $$
+  \Omega = \left\{ (f_1, f_2) \;\middle|\; 0 \le f_2 \le f_1, \; f_1 + f_2 \le \frac{f_s}{2} \right\}
+  $$
+
   slashing redundant evaluation space by **83.3%** across the full plane.
 - **Harmonic 1D Diagonal Sweep:** Evaluates frequency-doubling phase locks ($f_2 = f_1$) in **$O(N)$ time** per block.
 
 ### 4.2 Spatial Subspace Projection & Coherent RFI Nulling (`subspace_null.kn`)
 Given dual-polarization baseband voltages $\mathbf{x}[n] = [x_0[n], x_1[n]]^T$, the $2 \times 2$ spatial covariance matrix is:
-$$R_{xx} = \frac{1}{N} \sum_{n=0}^{N-1} \mathbf{x}[n] \mathbf{x}^H[n] = \begin{bmatrix} r_{00} & r_{01} \\ r_{01}^* & r_{11} \end{bmatrix}$$
+
+$$
+R_{xx} = \frac{1}{N} \sum_{n=0}^{N-1} \mathbf{x}[n] \mathbf{x}^{H}[n] = \begin{bmatrix} r_{00} & r_{01} \\ r_{01}^{\ast} & r_{11} \end{bmatrix}
+$$
+
 The closed-form Hermitian eigensolver yields eigenvalues $\lambda_1 \ge \lambda_2$ and condition ratio $\gamma = \frac{\lambda_1}{\lambda_2}$.
-When directional RFI flares ($\gamma \ge \gamma_{\text{gate}}$), the orthogonal projector $P^\perp = I_2 - \mathbf{u}\mathbf{u}^H$ projects deep spatial nulls ($>30\text{ dB}$) toward the interference manifold while preserving the continuous phase and sub-nanosecond timing of celestial signals:
-$$\mathbf{x}_{\text{clean}}[n] = P^\perp \mathbf{x}[n]$$
+
+When directional RFI flares ($\gamma \ge \gamma_{\text{gate}}$), the orthogonal projector $P^{\perp} = I_2 - \mathbf{u}\mathbf{u}^{H}$ projects deep spatial nulls ($> 30\,\text{dB}$) toward the interference manifold while preserving the continuous phase and sub-nanosecond timing of celestial signals:
+
+$$
+\mathbf{x}_{\text{clean}}[n] = P^{\perp} \mathbf{x}[n]
+$$
 
 ### 4.3 Coherent Fast Fractional Fourier Transform (`frft_hunt.kn`)
 The continuous $\alpha$-angle Fractional Fourier Transform rotates the time-frequency plane:
-$$X_\alpha(u) = \int x(t) K_\alpha(t, u) dt, \quad \cot \alpha^* = -\mu \iff \mu = -\cot \alpha^* \cdot \frac{f_s^2}{N}$$
-At rotation angle $\alpha^*$, a linear frequency chirp collapses into a coherent Dirac-delta impulse tone with **$O(\sqrt{N})$ coherent amplitude gain** over incoherent dedoppler methods. Evaluated via the Ozaktas/Pei-Ding fast 3-stage decomposition in **$O(N_\alpha \cdot N \log N)$ time**:
-$$\text{Stage A: Pre-chirp multiply} \to \text{Stage B: Fast circular convolution} \to \text{Stage C: Post-chirp multiply}$$
+
+$$
+X_{\alpha}(u) = \int x(t) \, K_{\alpha}(t, u) \, dt, \quad \cot \alpha^{\ast} = -\mu \iff \mu = -\cot \alpha^{\ast} \cdot \frac{f_s^{2}}{N}
+$$
+
+At rotation angle $\alpha^{\ast}$, a linear frequency chirp collapses into a coherent Dirac-delta impulse tone with **$O(\sqrt{N})$ coherent amplitude gain** over incoherent dedoppler methods. Evaluated via the Ozaktas/Pei-Ding fast 3-stage decomposition in **$O(N_{\alpha} \cdot N \log N)$ time**:
+
+$$
+\text{Stage A: Pre-chirp multiply} \to \text{Stage B: Fast circular convolution} \to \text{Stage C: Post-chirp multiply}
+$$
 
 ### 4.4 Model-Free Non-Linear Dynamics & Permutation Entropy (`perm_entropy.kn`)
 Evaluates the ordinal topology of phase-space delay vectors without spectral assumptions:
@@ -134,7 +159,11 @@ Evaluates the ordinal topology of phase-space delay vectors without spectral ass
 
 ### 4.5 Cyclostationary Spectral Correlation (FAM Algorithm)
 Phase-modulated digital communications (BPSK, QPSK, FSK) exhibit non-zero spectral correlation at cyclic frequency $\alpha$:
-$$S_x^\alpha(f) = \lim_{T \to \infty} \frac{1}{T} \mathbb{E}\left[ X_T\left(f + \frac{\alpha}{2}\right) X_T^*\left(f - \frac{\alpha}{2}\right) \right]$$
+
+$$
+S_x^{\alpha}(f) = \lim_{T \to \infty} \frac{1}{T} \mathbb{E}\left[ X_T\left(f + \frac{\alpha}{2}\right) X_T^{\ast}\left(f - \frac{\alpha}{2}\right) \right]
+$$
+
 Evaluated via the FFT Accumulation Method across channel pairs $(f_k, f_l)$ where $f_k - f_l = \alpha$, with detection significances evaluated via regularized lower incomplete Gamma integrals.
 
 ---
@@ -300,10 +329,10 @@ TurboKain is rigorously benchmarked against archival data from the Green Bank Te
 
 | Target | Pointing / MJD | Band / Receiver | Coverage | Key Physical Findings | Final Disposition |
 |---|---|---|---|---|---|
-| **1I/'Oumuamua** | ON 0011 / OFF 0012 (MJD 58100) | S-band (`blc02`, 2.2 GHz) | FULL-64CH | Channels 7 & 11 $+19.3\text{ dB}$ carrier comb: $f_2 = 2861.0\text{ Hz}$ ($k=1$), $\phi_B = 178.0^\circ$ anti-phase biphase lock, zero Doppler drift. Identified as balanced mixer / ADC sub-band intermodulation. | `HONEST-NEGATIVE` (`RFI-INTERMOD`) |
-| **Sgr A\* Galactic Center** | GUPPI RAW (MJD 58100) | C-band (4–8 GHz) | DEEP-MICRO | Interstellar diffractive scintillation decorrelation ($m \approx 0.5$, $\tau_{\text{iss}} \approx 5.0\text{ frames}$, cross-polarization coherence $>0.90$). | `RESIDUE` (Microstructure) |
+| **1I/'Oumuamua** | ON 0011 / OFF 0012 (MJD 58100) | S-band (`blc02`, 2.2 GHz) | FULL-64CH | Channels 7 & 11 $+19.3\,\text{dB}$ carrier comb: $f_2 = 2861.0\,\text{Hz}$ ($k=1$), $\phi_B = 178.0^{\circ}$ anti-phase biphase lock, zero Doppler drift. Identified as balanced mixer / ADC sub-band intermodulation. | `HONEST-NEGATIVE` (`RFI-INTERMOD`) |
+| **Sgr A\* Galactic Center** | GUPPI RAW (MJD 58100) | C-band (4–8 GHz) | DEEP-MICRO | Interstellar diffractive scintillation decorrelation ($m \approx 0.5$, $\tau_{\text{iss}} \approx 5.0\,\text{frames}$, cross-polarization coherence $>0.90$). | `RESIDUE` (Microstructure) |
 | **TRAPPIST-1** | Cadence ON/OFF (MJD 57800) | L-band (1.4 GHz) | FULL-CADENCE | Channel 32/36 candidate screening; Stokes $V$ cross-feed analysis; common terrestrial carrier rejection. | `HONEST-NEGATIVE` (`CLEAN`) |
-| **FRB 121102** | Deep transient stare | C-band (4.5 GHz) | TIME-RESOLVED | Sub-millisecond dispersed single pulse sweeps ($DM \approx 557\text{ pc cm}^{-3}$); boxcar SNR $>35\sigma$. | `ASTROPHYSICAL-PULSAR` |
+| **FRB 121102** | Deep transient stare | C-band (4.5 GHz) | TIME-RESOLVED | Sub-millisecond dispersed single pulse sweeps ($DM \approx 557\,\text{pc cm}^{-3}$); boxcar SNR $>35\sigma$. | `ASTROPHYSICAL-PULSAR` |
 | **Proxima Centauri** | Archival cadence stare | L-band (1.4 GHz) | CADENCE-TRIAGE | Linear Doppler drift tracking ($\dot{f} \ne 0$); common-mode spatial screening across off-pointing baselines. | `RFI-ATTRIBUTED` |
 
 ---

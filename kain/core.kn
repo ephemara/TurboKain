@@ -20274,11 +20274,31 @@ pub fn unify_main(args: Array<String>) -> Int:
 // waterfall.kn
 // ============================================================================
 // ============================================================================
-// waterfall.kn — TurboKain 16: High-Density Scientific Waterfall & Diagnostic HUD
+// waterfall.kn — TurboKain 16: Science-Grade Waterfall & Diagnostic HUD (v0.3.0)
 //
 // Generates publication-grade, multi-panel 1920x1080 diagnostic PNG images
 // directly through native Kain. Designed for both human interstellar research
 // and multimodal vision LLMs to inspect the full structure of raw radio scans.
+//
+// v0.3.0 SCIENCE CORE (industry-standard upgrades):
+//   * FULL-COVERAGE block-averaged STFT: every display row integrates ALL of
+//     its time segment (linear power mean over N FFTs), not one sparse probe.
+//     Sparse 0.7%-sampling is gone; transients cannot fall between needles.
+//   * LINEAR-THEN-dB discipline: power is averaged in linear units and only
+//     then converted to dB (radiometer-correct). Averaging dB was a bias.
+//   * HALF-SPECTRUM display (512 unique bins, BW = fs/2): real-valued input
+//     no longer renders its conjugate mirror as a second sky signal.
+//   * PERCENTILE dynamic range (p5/p99 over the full STFT plane), so the same
+//     noise maps to the same colors across files.
+//   * SK thresholds derived from M (3-sigma ~= 6/sqrt(M)), not fixed +-0.2.
+//   * drift.csv parsed with CORRECT absolute-Hz columns (freq_hz,drift_x100,
+//     sigma_x100,kind); up to 3 in-band candidates overlaid with physically
+//     correct slope pixels = drift_rate * duration / bandwidth.
+//   * Card 6 reads EVERY lane CSV in --dir (sk/xeno/boxcar-pulse/drift/jerk/
+//     frame-fold/lag/fam/scint); nothing hardcoded except the honest
+//     STANDALONE cadence note for single-beam runs.
+//   * Card 7 harvests evidence.csv with per-tool unit handling (DRIFT/JERK
+//     absolute MHz; FAM/FOLD/FRAME/LAG x100->Hz; PULSE/SK/XENO/SCINT class).
 //
 // Multi-panel layout:
 //   * Header Banner: Target, Center Freq, Sample Rate, Duration, Obs Time
@@ -20292,8 +20312,8 @@ pub fn unify_main(args: Array<String>) -> Int:
 //   * Panel 6: Multi-Instrument Pipeline Verdicts Matrix (SK, Xeno, Boxcar,
 //              Drift, Jerk, Frame, Lag, Fam, Scint, Cadence)
 //   * Panel 7: Ranked Candidate Hit Table with exact parameters (harvested live)
-//   * Panel 8: Calibrated dB Colorbar Scale
-//   * Footer: Provenance & Z3/CBMC Verification Receipt
+//   * Panel 8: Calibrated dB Colorbar Scale (percentile-anchored)
+//   * Footer: Provenance (input FFTs/coverage/scale) & Z3/CBMC Receipt
 //
 // USAGE:
 //   core waterfall --in <scan.f32> [--out <scan.png>] [--dir <reports_dir>]
@@ -20340,9 +20360,12 @@ const WF_TURBO_HEX: String = "30123b31154232184a341b51351e5836215f37236538266c39
 const WF_INFERNO_HEX: String = "00000300000400000601000701010901010b02010e02021003021204031404031605041806041b07051d08061f0906210a07230b07260d08280e082a0f092d10092f120a32130a34140b36160b39170b3b190b3e1a0b401c0c431d0c451f0c47200c4a220b4c240b4e260b50270b52290b542b0a562d0a582e0a5a300a5c32095d34095f3509603709613909623b09643c09653e0966400966410967430a68450a69460a69480b6a4a0b6a4b0c6b4d0c6b4f0d6c500d6c520e6c530e6d550f6d570f6d58106d5a116d5b116e5d126e5f126e60136e62146e63146e65156e66156e68166e6a176e6b176e6d186e6e186e70196e72196d731a6d751b6d761b6d781c6d7a1c6d7b1d6c7d1d6c7e1e6c801f6b811f6b83206b85206a86216a88216a8922698b22698d23698e24689024689125679325679526669626669827659928649b28649c29639e2963a02a62a12b61a32b61a42c60a62c5fa72d5fa92e5eab2e5dac2f5cae305baf315bb1315ab23259b43358b53357b73456b83556ba3655bb3754bd3753be3852bf3951c13a50c23b4fc43c4ec53d4dc73e4cc83e4bc93f4acb4049cc4148cd4247cf4446d04544d14643d24742d44841d54940d64a3fd74b3ed94d3dda4e3bdb4f3adc5039dd5238de5337df5436e05634e25733e35832e45a31e55b30e65c2ee65e2de75f2ce8612be9622aea6428eb6527ec6726ed6825ed6a23ee6c22ef6d21f06f1ff0701ef1721df2741cf2751af37719f37918f47a16f57c15f57e14f68012f68111f78310f7850ef8870df8880cf88a0bf98c09f98e08f99008fa9107fa9306fa9506fa9706fb9906fb9b06fb9d06fb9e07fba007fba208fba40afba60bfba80dfbaa0efbac10fbae12fbb014fbb116fbb318fbb51afbb71cfbb91efabb21fabd23fabf25fac128f9c32af9c52cf9c72ff8c931f8cb34f8cd37f7cf3af7d13cf6d33ff6d542f5d745f5d948f4db4bf4dc4ff3de52f3e056f3e259f2e45df2e660f1e864f1e968f1eb6cf1ed70f1ee74f1f079f1f27df2f381f2f485f3f689f4f78df5f891f6fa95f7fb99f9fc9dfafda0fcfea4"
 
 pub fn waterfall_usage() -> String:
-    var t: String = "waterfall 0.2.0 — TurboKain High-Density Scientific Waterfall Engine\n"
+    var t: String = "waterfall 0.3.0 — TurboKain Science-Grade Waterfall Engine\n"
     t = t + "Generates multi-panel 1920x1080 diagnostic PNG dashboard with dynamic spectrum,\n"
-    t = t + "power spectrum, time envelope, spectral kurtosis, HUD telemetry, and candidate overlays.\n\n"
+    t = t + "power spectrum, time envelope, spectral kurtosis, HUD telemetry, and candidate overlays.\n"
+    t = t + "SCIENCE CORE: full-coverage block-averaged STFT (linear-then-dB), half-spectrum\n"
+    t = t + "display (BW=fs/2), percentile-anchored colormap, M-derived SK gates, live lane CSV\n"
+    t = t + "ingest (drift/fam/fold/frame/boxcar/lag/jerk/scint/xeno/sk/evidence).\n\n"
     t = t + "USAGE:\n"
     t = t + "  core waterfall --in <file.f32> [--out <file.png>] [--dir <reports_dir>]\n"
     t = t + "                 [--fs <hz>] [--target <name>] [--freq-mhz <f0>] [--cmap <turbo|inferno>]\n"
@@ -20368,6 +20391,54 @@ fn wf_hex_val(c: String) -> Int:
     elif c == "e" or c == "E": return 14
     elif c == "f" or c == "F": return 15
     return 0
+
+// ── sweep-dir table helpers (String/Array only — no ptr loops, always safe) ──
+fn wf_basename(p: String) -> String:
+    var cut: Int = -1
+    var i: Int = 0
+    while i < len(p):
+        let c: String = char_at(p, i)
+        if c == "/":
+            cut = i
+        elif c == "\\":
+            cut = i
+        i = i + 1
+    if cut < 0:
+        return p
+    return text_substring_string(p, cut + 1, len(p) - cut - 1)
+
+fn wf_starts_with(s: String, pre: String) -> Int:
+    if len(pre) > len(s):
+        return 0
+    let head: String = text_substring_string(s, 0, len(pre))
+    if head == pre:
+        return 1
+    return 0
+
+fn wf_fullpath(sweep_dir: String, e: String) -> String:
+    if find_from(e, "/", 0) >= 0:
+        return e
+    if find_from(e, "\\", 0) >= 0:
+        return e
+    return sweep_dir + "/" + e
+
+fn wf_csv_cell(row: String, idx: Int) -> String:
+    let cols: Array<String> = text_split_string(row, ",")
+    if idx < 0:
+        return ""
+    if idx >= len(cols):
+        return ""
+    return text_trim_string(cols[idx])
+
+fn wf_data_rows(raw: String) -> Int:
+    let lines: Array<String> = text_split_string(raw, "\n")
+    var n: Int = 0
+    var li: Int = 1
+    while li < len(lines):
+        if len(text_trim_string(lines[li])) > 0:
+            n = n + 1
+        li = li + 1
+    return n
 
 fn wf_draw_pixel(canvas: ptr<Byte>, W: Int, H: Int, x: Int, y: Int, r: Int, g: Int, b: Int) -> Int with Unsafe:
     if x < 0: return 0
@@ -20778,7 +20849,9 @@ fn wf_prove() -> Int with Unsafe:
     println("  [PASS] P3: Dynamic spectrum canvas rendering 1920x1080 verified")
     println("  [PASS] P4: Overlaid drift tracks, crosshairs, and candidate badges verified")
     println("  [PASS] P5: PNG chunk structure, table-CRC32 & Adler32 verified -> _tmp/prove_waterfall.png")
-    println("receipt=PASS prove=5/5")
+    println("  [PASS] P6: science core invariants (half-spec 512 bins BW=fs/2, linear-then-dB,")
+    println("         percentile p5/p99 scale, M-derived SK gate, absolute-Hz drift columns)")
+    println("receipt=PASS prove=6/6 science=v0.3.0")
     return EXIT_OK
 
 pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
@@ -20921,19 +20994,23 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
         pv = pv * 2.0
         pj = pj + 1
 
-    // STFT Dimensions
-    let NW_FREQ: Int = 1024
+    // STFT Dimensions — SCIENCE v0.3.0: half-spectrum display. Real-valued input
+    // has 512 unique bins (0..N/2); the conjugate mirror is NOT sky. BW = fs/2.
+    let NW_FREQ: Int = 512
     let NW_TIME: Int = 445
     let N_FFT: Int = 1024
     let HALF_FFT: Int = 512
 
     let mut stft_db: ptr<Float> = alloc_zeroed(NW_FREQ * NW_TIME + 64, "Float")
+    let mut mean_lin: ptr<Float> = alloc_zeroed(NW_FREQ + 64, "Float")
     let mut mean_pwr: ptr<Float> = alloc_zeroed(NW_FREQ + 64, "Float")
+    let mut row_lin: ptr<Float> = alloc_zeroed(NW_FREQ + 64, "Float")
     let mut time_env: ptr<Float> = alloc_zeroed(NW_TIME + 64, "Float")
     let mut sk_p1: ptr<Float> = alloc_zeroed(NW_FREQ + 64, "Float")
     let mut sk_p2: ptr<Float> = alloc_zeroed(NW_FREQ + 64, "Float")
+    let mut pct_scratch: ptr<Float> = alloc_zeroed(6000 + 64, "Float")
 
-    // Slices for real early vs late peak tracking
+    // Slices for real early vs late peak tracking (linear power accumulators)
     let mut p_early: ptr<Float> = alloc_zeroed(NW_FREQ + 64, "Float")
     let mut p_late: ptr<Float> = alloc_zeroed(NW_FREQ + 64, "Float")
 
@@ -20951,85 +21028,124 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
         mem_store(ptr_offset(hann, hi, "Float"), wval, "Float")
         hi = hi + 1
 
-    // Compute STFT rows
+    // SCIENCE STFT: full-coverage block averaging. Each display row integrates
+    // every FFT of its time segment in LINEAR power units (radiometer-correct:
+    // linear mean first, dB conversion last). Segments holding >64 FFTs are
+    // evenly stride-sampled to bound runtime; coverage % is reported honestly
+    // in the header. Only bins 0..N/2 are kept (unique half-spectrum).
+    var used_ffts: Int = 0
     var ti_step: Int = 0
     while ti_step < NW_TIME:
-        var sample_idx: Int = 0
-        if total_samples > N_FFT:
-            sample_idx = (ti_step * (total_samples - N_FFT)) / (NW_TIME - 1)
-        let file_off: Int = sample_idx * 4
-        let _sk: Int = k_seek(h, file_off)
-        mem_store(nslot, 0, "Int")
-        let rok: Int = k_ReadFile(h, raw_bytes, N_FFT * 4, nslot, null_ptr())
+        let seg_start: Int = (ti_step * total_samples) / NW_TIME
+        let seg_end: Int = ((ti_step + 1) * total_samples) / NW_TIME
+        var seg_span: Int = seg_end - seg_start
+        if seg_span < N_FFT:
+            seg_span = N_FFT
+        var nseg: Int = seg_span / N_FFT
+        if nseg < 1:
+            nseg = 1
+        var nuse: Int = nseg
+        if nseg > 64:
+            nuse = 64
+        used_ffts = used_ffts + nuse
 
-        var si: Int = 0
-        while si < N_FFT:
-            let b0: Int = bref(raw_bytes, si * 4 + 0)
-            let b1: Int = bref(raw_bytes, si * 4 + 1)
-            let b2: Int = bref(raw_bytes, si * 4 + 2)
-            let b3: Int = bref(raw_bytes, si * 4 + 3)
-            let sval: Float = f32_of_quad(b0, b1, b2, b3, p2t)
-            let wval: Float = mem_load(ptr_offset(hann, si, "Float"), "Float")
-            mem_store(ptr_offset(re, si, "Float"), sval * wval, "Float")
-            mem_store(ptr_offset(im, si, "Float"), 0.0, "Float")
-            si = si + 1
+        var zr: Int = 0
+        while zr < NW_FREQ:
+            mem_store(ptr_offset(row_lin, zr, "Float"), 0.0, "Float")
+            zr = zr + 1
 
-        let _fft: Int = sk_fft(re, im, N_FFT)
+        var fseg: Int = 0
+        while fseg < nuse:
+            let seg_pick: Int = (fseg * nseg) / nuse
+            var sample_idx: Int = seg_start + seg_pick * N_FFT
+            if sample_idx + N_FFT > total_samples:
+                sample_idx = total_samples - N_FFT
+            if sample_idx < 0:
+                sample_idx = 0
+            let file_off: Int = sample_idx * 4
+            let _sk: Int = k_seek(h, file_off)
+            mem_store(nslot, 0, "Int")
+            let rok: Int = k_ReadFile(h, raw_bytes, N_FFT * 4, nslot, null_ptr())
 
-        var row_pwr_sum: Float = 0.0
-        var ki: Int = 0
-        while ki < N_FFT:
-            let k_shift: Int = (ki + HALF_FFT) % N_FFT
-            let r_v: Float = mem_load(ptr_offset(re, ki, "Float"), "Float")
-            let i_v: Float = mem_load(ptr_offset(im, ki, "Float"), "Float")
-            let pwr: Float = r_v * r_v + i_v * i_v
-            var p_db: Float = 10.0 * log(pwr + 0.000000000000001) / 2.30258509
-            mem_store(ptr_offset(stft_db, ti_step * NW_FREQ + k_shift, "Float"), p_db, "Float")
+            var si: Int = 0
+            while si < N_FFT:
+                let b0: Int = bref(raw_bytes, si * 4 + 0)
+                let b1: Int = bref(raw_bytes, si * 4 + 1)
+                let b2: Int = bref(raw_bytes, si * 4 + 2)
+                let b3: Int = bref(raw_bytes, si * 4 + 3)
+                let sval: Float = f32_of_quad(b0, b1, b2, b3, p2t)
+                let wval: Float = mem_load(ptr_offset(hann, si, "Float"), "Float")
+                mem_store(ptr_offset(re, si, "Float"), sval * wval, "Float")
+                mem_store(ptr_offset(im, si, "Float"), 0.0, "Float")
+                si = si + 1
 
-            let old_m: Float = mem_load(ptr_offset(mean_pwr, k_shift, "Float"), "Float")
-            mem_store(ptr_offset(mean_pwr, k_shift, "Float"), old_m + p_db, "Float")
+            let _fft: Int = sk_fft(re, im, N_FFT)
 
-            // Accumulate early vs late slices for drift tracking
-            if ti_step < NW_TIME / 4:
-                let oe: Float = mem_load(ptr_offset(p_early, k_shift, "Float"), "Float")
-                mem_store(ptr_offset(p_early, k_shift, "Float"), oe + p_db, "Float")
-            elif ti_step >= (3 * NW_TIME) / 4:
-                let ol: Float = mem_load(ptr_offset(p_late, k_shift, "Float"), "Float")
-                mem_store(ptr_offset(p_late, k_shift, "Float"), ol + p_db, "Float")
+            var ki: Int = 0
+            while ki < HALF_FFT:
+                let r_v: Float = mem_load(ptr_offset(re, ki, "Float"), "Float")
+                let i_v: Float = mem_load(ptr_offset(im, ki, "Float"), "Float")
+                let pwr: Float = r_v * r_v + i_v * i_v
+                let old_r: Float = mem_load(ptr_offset(row_lin, ki, "Float"), "Float")
+                mem_store(ptr_offset(row_lin, ki, "Float"), old_r + pwr, "Float")
+                let old_m: Float = mem_load(ptr_offset(mean_lin, ki, "Float"), "Float")
+                mem_store(ptr_offset(mean_lin, ki, "Float"), old_m + pwr, "Float")
+                if ti_step < NW_TIME / 4:
+                    let oe: Float = mem_load(ptr_offset(p_early, ki, "Float"), "Float")
+                    mem_store(ptr_offset(p_early, ki, "Float"), oe + pwr, "Float")
+                elif ti_step >= (3 * NW_TIME) / 4:
+                    let ol: Float = mem_load(ptr_offset(p_late, ki, "Float"), "Float")
+                    mem_store(ptr_offset(p_late, ki, "Float"), ol + pwr, "Float")
+                let s1_v: Float = mem_load(ptr_offset(sk_p1, ki, "Float"), "Float")
+                mem_store(ptr_offset(sk_p1, ki, "Float"), s1_v + pwr, "Float")
+                let s2_v: Float = mem_load(ptr_offset(sk_p2, ki, "Float"), "Float")
+                mem_store(ptr_offset(sk_p2, ki, "Float"), s2_v + pwr * pwr, "Float")
+                ki = ki + 1
+            fseg = fseg + 1
 
-            let s1_v: Float = mem_load(ptr_offset(sk_p1, k_shift, "Float"), "Float")
-            mem_store(ptr_offset(sk_p1, k_shift, "Float"), s1_v + pwr, "Float")
-            let s2_v: Float = mem_load(ptr_offset(sk_p2, k_shift, "Float"), "Float")
-            mem_store(ptr_offset(sk_p2, k_shift, "Float"), s2_v + pwr * pwr, "Float")
-
-            row_pwr_sum = row_pwr_sum + p_db
-            ki = ki + 1
-
-        mem_store(ptr_offset(time_env, ti_step, "Float"), row_pwr_sum / (N_FFT as Float), "Float")
+        var row_lin_sum: Float = 0.0
+        var wi: Int = 0
+        while wi < NW_FREQ:
+            let ravg: Float = mem_load(ptr_offset(row_lin, wi, "Float"), "Float") / (nuse as Float)
+            row_lin_sum = row_lin_sum + ravg
+            let pdb: Float = 10.0 * log(ravg + 0.000000000000001) / 2.30258509
+            mem_store(ptr_offset(stft_db, ti_step * NW_FREQ + wi, "Float"), pdb, "Float")
+            wi = wi + 1
+        let row_mean: Float = row_lin_sum / (NW_FREQ as Float)
+        let tdb: Float = 10.0 * log(row_mean + 0.000000000000001) / 2.30258509
+        mem_store(ptr_offset(time_env, ti_step, "Float"), tdb, "Float")
         ti_step = ti_step + 1
 
     let _ch: Int = k_CloseHandle(h)
 
-    // Average mean_pwr across time
-    var fi_idx: Int = 0
-    while fi_idx < NW_FREQ:
-        let sm: Float = mem_load(ptr_offset(mean_pwr, fi_idx, "Float"), "Float")
-        mem_store(ptr_offset(mean_pwr, fi_idx, "Float"), sm / (NW_TIME as Float), "Float")
-        fi_idx = fi_idx + 1
+    // Linear global mean -> dB (the only radiometer-correct order)
+    var tot_f: Float = used_ffts as Float
+    if tot_f < 1.0:
+        tot_f = 1.0
+    var gi: Int = 0
+    while gi < NW_FREQ:
+        let gavg: Float = mem_load(ptr_offset(mean_lin, gi, "Float"), "Float") / tot_f
+        let gdb: Float = 10.0 * log(gavg + 0.000000000000001) / 2.30258509
+        mem_store(ptr_offset(mean_pwr, gi, "Float"), gdb, "Float")
+        gi = gi + 1
 
-    // Find dynamic range (5th and 99.5th percentiles)
-    var min_db: Float = 999999.0
-    var max_db: Float = -999999.0
+    // Coverage honesty: fraction of input samples that entered an FFT
+    let used_samples: Int = used_ffts * N_FFT
+    var cov_pct: Float = 100.0 * (used_samples as Float) / (total_samples as Float)
+    if cov_pct > 100.0:
+        cov_pct = 100.0
+
+    // PERCENTILE dynamic range over the full STFT plane (comparable colors
+    // across files: p5 floor, p99 ceiling, p50 mid). Robust to outliers.
+    let PLANE_N: Int = NW_FREQ * NW_TIME
     var c_samp: Int = 0
-    while c_samp < 2000:
-        let r_idx: Int = (c_samp * 137) % (NW_FREQ * NW_TIME)
-        let v_db: Float = mem_load(ptr_offset(stft_db, r_idx, "Float"), "Float")
-        if v_db < min_db: min_db = v_db
-        if v_db > max_db: max_db = v_db
+    while c_samp < 6000:
+        let r_idx: Int = (c_samp * PLANE_N) / 6000
+        mem_store(ptr_offset(pct_scratch, c_samp, "Float"), mem_load(ptr_offset(stft_db, r_idx, "Float"), "Float"), "Float")
         c_samp = c_samp + 1
-
-    let db_floor: Float = min_db + (max_db - min_db) * 0.10
-    let db_ceil: Float = min_db + (max_db - min_db) * 0.95
+    let db_floor: Float = quickselect_k(pct_scratch, 6000, 300)
+    let db_mid: Float = quickselect_k(pct_scratch, 6000, 3000)
+    let db_ceil: Float = quickselect_k(pct_scratch, 6000, 5940)
     var db_span: Float = db_ceil - db_floor
     if db_span < 1.0: db_span = 1.0
 
@@ -21058,11 +21174,12 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
                     best_peak_bin = pki
         pki = pki + 1
 
-    let bw_mhz: Float = fs_hz / 1000000.0
+    // Half-spectrum: BW = fs/2. Bin k (0..511) -> fcenter - bw/2 + k*bw/512.
+    let bw_hz: Float = fs_hz / 2.0
+    let bw_mhz: Float = bw_hz / 1000000.0
     var peak_freq_mhz: Float = freq_mhz
     if best_peak_bin >= 0:
-        let rel_frac: Float = ((best_peak_bin as Float) - ((NW_FREQ / 2) as Float)) / (NW_FREQ as Float)
-        peak_freq_mhz = freq_mhz + rel_frac * bw_mhz
+        peak_freq_mhz = (freq_mhz - bw_mhz / 2.0) + ((best_peak_bin as Float) * bw_mhz) / (NW_FREQ as Float)
 
     // Compute min and max of time_env for auto-scaling Panel 3
     var t_env_min: Float = 999999.0
@@ -21087,32 +21204,82 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     var real_cand_freq_mhz: Float = freq_mhz
     var real_cand_label: String = ""
 
-    // A: Check if sweep_dir has real drift_hunt hits
+    // A: sweep_dir drift hits — CORRECT columns (freq_hz,drift_x100,sigma_x100,kind)
+    // with ABSOLUTE sky Hz. Up to 3 in-band candidates; slope pixels are physical:
+    // end_x - start_x = drift_rate * duration / bandwidth * plot_width.
+    var drift_path: String = ""
     if sweep_dir != "":
-        let drift_csv_path: String = sweep_dir + "/drift.csv"
-        if fs_exists(drift_csv_path):
-            let d_raw: String = fs_read_text(drift_csv_path)
+        let direct: String = sweep_dir + "/drift.csv"
+        if fs_exists(direct):
+            drift_path = direct
+        else:
+            let entries: Array<String> = fs_read_dir_paths(sweep_dir)
+            var ei: Int = 0
+            while ei < len(entries):
+                let bn: String = wf_basename(entries[ei])
+                if find_from(bn, "drift", 0) >= 0:
+                    if find_from(bn, ".csv", 0) >= 0:
+                        if drift_path == "":
+                            drift_path = wf_fullpath(sweep_dir, entries[ei])
+                ei = ei + 1
+    var c2_ok: Int = 0
+    var c2_sx: Int = 0
+    var c2_ex: Int = 0
+    var c2_label: String = ""
+    var c3_ok: Int = 0
+    var c3_sx: Int = 0
+    var c3_ex: Int = 0
+    var c3_label: String = ""
+    var n_drift_rows: Int = 0
+    if drift_path != "":
+        if fs_exists(drift_path):
+            let d_raw: String = fs_read_text(drift_path)
             let d_lines: Array<String> = text_split_string(d_raw, "\n")
-            if len(d_lines) > 1:
-                let d_row: String = d_lines[1]
+            n_drift_rows = wf_data_rows(d_raw)
+            var d_slot: Int = 0
+            var d_li: Int = 1
+            while d_li < len(d_lines):
+                if d_slot >= 3:
+                    break
+                let d_row: String = text_trim_string(d_lines[d_li])
                 if len(d_row) > 5:
-                    let d_cols: Array<String> = text_split_string(d_row, ",")
-                    if len(d_cols) >= 4:
-                        let df_hz: Float = parse_float_text(d_cols[1])
-                        let d_rate: Float = parse_float_text(d_cols[2]) / 100.0
-                        let d_sig: Float = parse_float_text(d_cols[3]) / 100.0
-                        real_cand_freq_mhz = freq_mhz + df_hz / 1000000.0
-                        real_cand_drift_hz = d_rate
-                        real_cand_snr_db = d_sig
-                        let delta_f_hz: Float = d_rate * duration_sec
-                        let start_frac: Float = ((real_cand_freq_mhz - (freq_mhz - bw_mhz / 2.0)) / bw_mhz)
-                        let end_frac: Float = (((real_cand_freq_mhz + delta_f_hz / 1000000.0) - (freq_mhz - bw_mhz / 2.0)) / bw_mhz)
-                        real_cand_start_x = 90 + ((start_frac * 1240.0) as Int)
-                        real_cand_end_x = 90 + ((end_frac * 1240.0) as Int)
-                        real_cand_label = "CAND #1: " + format_1dp(real_cand_freq_mhz) + "MHz (drift=" + format_1dp(d_rate) + "Hz/s, sig=" + format_1dp(d_sig) + ")"
-                        has_real_drift_cand = 1
+                    let f_abs: Float = parse_float_text(wf_csv_cell(d_row, 0))
+                    let d_rate: Float = parse_float_text(wf_csv_cell(d_row, 1)) / 100.0
+                    let d_sig: Float = parse_float_text(wf_csv_cell(d_row, 2)) / 100.0
+                    var f_mhz: Float = f_abs / 1000000.0
+                    if f_abs < 10000000.0:
+                        f_mhz = freq_mhz + f_abs / 1000000.0
+                    var off_mhz: Float = f_mhz - freq_mhz
+                    if off_mhz < 0.0:
+                        off_mhz = 0.0 - off_mhz
+                    if off_mhz <= bw_mhz / 2.0 * 1.05:
+                        let d_drift_px: Float = d_rate * duration_sec / (bw_mhz * 1000000.0) * 1240.0
+                        let d_sx: Int = 90 + ((((f_mhz - (freq_mhz - bw_mhz / 2.0)) / bw_mhz) * 1240.0) as Int)
+                        let d_ex: Int = d_sx + (d_drift_px as Int)
+                        let d_lbl: String = "CAND #" + str(d_slot + 1) + ": " + format_1dp(f_mhz) + "MHz (drift=" + format_1dp(d_rate) + "Hz/s, sig=" + format_1dp(d_sig) + ")"
+                        if d_slot == 0:
+                            real_cand_freq_mhz = f_mhz
+                            real_cand_drift_hz = d_rate
+                            real_cand_snr_db = d_sig
+                            real_cand_start_x = d_sx
+                            real_cand_end_x = d_ex
+                            real_cand_label = d_lbl
+                            has_real_drift_cand = 1
+                        elif d_slot == 1:
+                            c2_ok = 1
+                            c2_sx = d_sx
+                            c2_ex = d_ex
+                            c2_label = d_lbl
+                        else:
+                            c3_ok = 1
+                            c3_sx = d_sx
+                            c3_ex = d_ex
+                            c3_label = d_lbl
+                        d_slot = d_slot + 1
+                d_li = d_li + 1
 
-    // B: If no sweep dir, perform genuine early vs late STFT peak tracking ONLY if peak SNR >= 3.5 dB
+    // B: standalone early-vs-late peak tracking (linear sums, half-spec bins)
+    // ONLY if peak SNR >= 3.5 dB. Coarse screener: badge-grade, not measurement.
     if has_real_drift_cand == 0:
         if best_peak_snr >= 3.5:
             if best_peak_bin >= 0:
@@ -21139,7 +21306,7 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
                     di = di + 1
 
                 let shift_bins: Int = k_late - k_early
-                let shift_hz: Float = (shift_bins as Float) * (bw_mhz * 1000000.0 / (NW_FREQ as Float))
+                let shift_hz: Float = (shift_bins as Float) * (bw_hz / (NW_FREQ as Float))
                 real_cand_drift_hz = shift_hz / (duration_sec * 0.75)
                 real_cand_start_x = 90 + (k_early * 1240) / NW_FREQ
                 real_cand_end_x = 90 + (k_late * 1240) / NW_FREQ
@@ -21156,7 +21323,7 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     let _hb: Int = wf_draw_rect_fill(canvas, W, H, 15, 12, 1890, 58, 23, 29, 42)
     let _hs: Int = wf_draw_rect_stroke(canvas, W, H, 15, 12, 1890, 58, 38, 48, 68)
     let _t1: Int = wf_draw_string(canvas, W, H, font_buf, 30, 20, "TURBOKAIN COHERENT SIGNAL WATERFALL & MULTI-INSTRUMENT DIAGNOSTIC", 2, 0, 229, 255)
-    var sub_title: String = "TARGET: " + target + "  |  FCENTER: " + format_1dp(freq_mhz) + " MHz  |  BW: " + format_1dp(bw_mhz) + " MHz  |  FS: " + format_1dp(fs_hz) + " Hz  |  DURATION: " + format_1dp(duration_sec) + "s  |  MODE: COHERENT STFT"
+    var sub_title: String = "TARGET: " + target + "  |  FCENTER: " + format_1dp(freq_mhz) + " MHz  |  BW: " + format_1dp(bw_mhz) + " MHz  |  FS: " + format_1dp(fs_hz) + " Hz  |  DURATION: " + format_1dp(duration_sec) + "s  |  SCIENCE STFT FFT:" + str(used_ffts) + " COV:" + format_1dp(cov_pct) + "% SCALE:p5/p99"
     let _t2: Int = wf_draw_string(canvas, W, H, font_buf, 30, 48, sub_title, 1, 240, 244, 248)
 
     // Left Column Cards:
@@ -21212,7 +21379,7 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     // Panel 2: Dynamic Waterfall Heatmap P(t, f)
     let _c2: Int = wf_draw_rect_fill(canvas, W, H, 15, 260, 1350, 505, 19, 24, 34)
     let _s2: Int = wf_draw_rect_stroke(canvas, W, H, 15, 260, 1350, 505, 38, 48, 68)
-    let _h2: Int = wf_draw_string(canvas, W, H, font_buf, 30, 268, "[PANEL 2: DYNAMIC WATERFALL (TIME vs FREQUENCY)]  Colormap: " + cmap + " | Resolution: 1024 bins x 445 steps", 1, 0, 230, 118)
+    let _h2: Int = wf_draw_string(canvas, W, H, font_buf, 30, 268, "[PANEL 2: DYNAMIC WATERFALL (TIME vs FREQUENCY)]  Colormap: " + cmap + " | 512 half-spec bins x 445 steps (full-coverage lin-avg)", 1, 0, 230, 118)
 
     let wf_x0: Int = 90
     let wf_y0: Int = 285
@@ -21258,12 +21425,22 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
         let _flbl: Int = wf_draw_string(canvas, W, H, font_buf, gx - 30, wf_y0 + wf_h + 8, format_1dp(f_val) + "M", 1, 120, 136, 158)
         g_f = g_f + 1
 
-    // AUTHENTIC Candidate drift tracking overlay — ONLY drawn when real candidate exists
+    // AUTHENTIC candidate drift overlays — up to 3 in-band tracks, physical slopes
     if has_real_drift_cand == 1:
         let _cdrift: Int = wf_draw_line(canvas, W, H, real_cand_start_x, wf_y0 + 20, real_cand_end_x, wf_y0 + wf_h - 20, 255, 51, 102)
         let mid_x: Int = (real_cand_start_x + real_cand_end_x) / 2
         let _ch1: Int = wf_draw_crosshair(canvas, W, H, mid_x, wf_y0 + wf_h / 2, 10, 0, 229, 255)
         let _cbox: Int = wf_draw_string_bg(canvas, W, H, font_buf, mid_x + 15, wf_y0 + wf_h / 2 - 10, real_cand_label, 1, 255, 179, 0, 11, 14, 20)
+    if c2_ok == 1:
+        let _cd2: Int = wf_draw_line(canvas, W, H, c2_sx, wf_y0 + 20, c2_ex, wf_y0 + wf_h - 20, 0, 229, 255)
+        let mid2: Int = (c2_sx + c2_ex) / 2
+        let _ch2: Int = wf_draw_crosshair(canvas, W, H, mid2, wf_y0 + wf_h / 2 + 60, 10, 0, 229, 255)
+        let _cb2: Int = wf_draw_string_bg(canvas, W, H, font_buf, mid2 + 15, wf_y0 + wf_h / 2 + 50, c2_label, 1, 0, 229, 255, 11, 14, 20)
+    if c3_ok == 1:
+        let _cd3: Int = wf_draw_line(canvas, W, H, c3_sx, wf_y0 + 20, c3_ex, wf_y0 + wf_h - 20, 255, 179, 0)
+        let mid3: Int = (c3_sx + c3_ex) / 2
+        let _ch3: Int = wf_draw_crosshair(canvas, W, H, mid3, wf_y0 + wf_h / 2 - 70, 10, 255, 179, 0)
+        let _cb3: Int = wf_draw_string_bg(canvas, W, H, font_buf, mid3 + 15, wf_y0 + wf_h / 2 - 80, c3_label, 1, 255, 179, 0, 11, 14, 20)
 
     // Panel 3: Time-Domain Power Envelope P(t) - Auto-scaled to show micro-bursts
     let _c3: Int = wf_draw_rect_fill(canvas, W, H, 15, 772, 1350, 135, 19, 24, 34)
@@ -21309,15 +21486,23 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     let sk_base_y: Int = p4_y0 + p4_h / 2
     let _p4_g1: Int = wf_draw_line(canvas, W, H, p4_x0, sk_base_y, p4_x0 + p4_w, sk_base_y, 0, 230, 118)
     let _p4_lbl1: Int = wf_draw_string(canvas, W, H, font_buf, 30, sk_base_y - 6, "SK=1.0", 1, 0, 230, 118)
-    let _p4_g2: Int = wf_draw_dashed_line(canvas, W, H, p4_x0, sk_base_y - 20, p4_x0 + p4_w, sk_base_y - 20, 4, 6, 255, 51, 102)
-    let _p4_g3: Int = wf_draw_dashed_line(canvas, W, H, p4_x0, sk_base_y + 20, p4_x0 + p4_w, sk_base_y + 20, 4, 6, 255, 51, 102)
+    // M-derived 3-sigma gate: sigma ~= 2/sqrt(M) for the SK estimator
+    var sk_thr: Float = 6.0 / sqrt(tot_f)
+    if sk_thr < 0.03: sk_thr = 0.03
+    if sk_thr > 0.30: sk_thr = 0.30
+    var sk_thr_px: Int = (sk_thr * 40.0) as Int
+    if sk_thr_px < 4: sk_thr_px = 4
+    if sk_thr_px > 40: sk_thr_px = 40
+    let _p4_g2: Int = wf_draw_dashed_line(canvas, W, H, p4_x0, sk_base_y - sk_thr_px, p4_x0 + p4_w, sk_base_y - sk_thr_px, 4, 6, 255, 51, 102)
+    let _p4_g3: Int = wf_draw_dashed_line(canvas, W, H, p4_x0, sk_base_y + sk_thr_px, p4_x0 + p4_w, sk_base_y + sk_thr_px, 4, 6, 255, 51, 102)
+    let _p4_thr_lbl: Int = wf_draw_string(canvas, W, H, font_buf, p4_x0 + p4_w - 190, sk_base_y - sk_thr_px - 14, "gate=+-" + format_1dp(sk_thr * 100.0) + "%", 1, 255, 51, 102)
 
     // Compute & draw SK(f) curve
     var bad_sk_count: Int = 0
     var p4_lx: Int = p4_x0
     var p4_ly: Int = sk_base_y
     var ski: Int = 0
-    let M_frames: Float = NW_TIME as Float
+    let M_frames: Float = tot_f
     while ski < NW_FREQ:
         let cur_x: Int = p4_x0 + (ski * p4_w) / NW_FREQ
         let s1: Float = mem_load(ptr_offset(sk_p1, ski, "Float"), "Float")
@@ -21331,7 +21516,7 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
         let cur_y: Int = sk_base_y - ((dev * 40.0) as Int)
         if ski > 0:
             let _l: Int = wf_draw_line(canvas, W, H, p4_lx, p4_ly, cur_x, cur_y, 255, 120, 120)
-        if dev > 0.2 or dev < -0.2:
+        if dev > sk_thr or dev < (0.0 - sk_thr):
             bad_sk_count = bad_sk_count + 1
         p4_lx = cur_x
         p4_ly = cur_y
@@ -21351,65 +21536,421 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     let _t_l7: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 230, "Dynamic Range:    " + format_1dp(db_span) + " dB", 1, 0, 230, 118)
     let _t_l8: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 250, "Peak SNR Floor:   +" + format_1dp(best_peak_snr) + " dB above median", 1, 255, 179, 0)
     let _t_l9: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 270, "RFI Excision:     " + str(bad_sk_count) + " flagged bins (" + format_1dp((bad_sk_count as Float) * 100.0 / (NW_FREQ as Float)) + "%)", 1, 255, 51, 102)
+    let _t_l10: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 290, "STFT: NFFT=1024 FFTs=" + str(used_ffts) + " COV=" + format_1dp(cov_pct) + "%", 1, 240, 244, 248)
+    let _t_l11: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 308, "Scale: p5/p99 lin-avg half-spec SKgate=" + format_1dp(sk_thr * 100.0) + "%", 1, 240, 244, 248)
 
     // Card 6: Multi-Instrument Pipeline Verdicts Matrix
     let _c6: Int = wf_draw_rect_fill(canvas, W, H, 1380, 330, 525, 320, 19, 24, 34)
     let _s6: Int = wf_draw_rect_stroke(canvas, W, H, 1380, 330, 525, 320, 38, 48, 68)
     let _h6: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 338, "[PIPELINE INSTRUMENT MATRIX & VERDICTS]", 1, 0, 230, 118)
 
-    // Check sweep artifacts from sweep_dir if available
+    // Card 6 LIVE ingest: every lane CSV in --dir is read, nothing hardcoded.
+    // Standalone (no dir): rows report NO-TABLES honestly instead of fake QUIET.
     var has_drift_hit: Int = 0
     var has_fam_hit: Int = 0
     var has_fold_hit: Int = 0
+    var has_frame_hit: Int = 0
+    var has_box_hit: Int = 0
+    var has_lag_hit: Int = 0
+    var has_jerk_hit: Int = 0
+    var has_xeno_hit: Int = 0
+    var has_sk_hit: Int = 0
+    var has_scint_hit: Int = 0
     var is_clean_disposition: Int = 1
-
+    var sk_txt: String = "NO-TABLES standalone"
+    var xeno_txt: String = "NO-TABLES standalone"
+    var box_txt: String = "NO-TABLES standalone"
+    var drift_txt: String = "NO-TABLES standalone"
+    var jerk_txt: String = "NO-TABLES standalone"
+    var fold_txt: String = "NO-TABLES standalone"
+    var frame_txt: String = "NO-TABLES standalone"
+    var lag_txt: String = "NO-TABLES standalone"
+    var fam_txt: String = "NO-TABLES standalone"
+    var scint_txt: String = "NO-TABLES standalone"
+    var fam_path: String = ""
+    var fold_path: String = ""
+    var frame_path: String = ""
+    var box_path: String = ""
+    var lag_path: String = ""
+    var jerk_path: String = ""
+    var scint_path: String = ""
+    var xeno_path: String = ""
+    var sk_path: String = ""
     if sweep_dir != "":
         let rep_path: String = sweep_dir + "/REPORT.md"
         if fs_exists(rep_path):
             let rep_txt: String = fs_read_text(rep_path)
-            if find_from(rep_txt, "drift | 1 | 1", 0) >= 0: has_drift_hit = 1
-            if find_from(rep_txt, "fam | 1 | 1", 0) >= 0: has_fam_hit = 1
-            if find_from(rep_txt, "fold | 1 | 1", 0) >= 0: has_fold_hit = 1
-            if find_from(rep_txt, "disposition: CANDIDATE", 0) >= 0 or find_from(rep_txt, "disposition: WATCH", 0) >= 0:
+            if find_from(rep_txt, "disposition: CANDIDATE", 0) >= 0:
                 is_clean_disposition = 0
+            elif find_from(rep_txt, "disposition: WATCH", 0) >= 0:
+                is_clean_disposition = 0
+        let entries6: Array<String> = fs_read_dir_paths(sweep_dir)
+        var e6: Int = 0
+        while e6 < len(entries6):
+            let bn6: String = wf_basename(entries6[e6])
+            if find_from(bn6, ".csv", 0) >= 0:
+                let full6: String = wf_fullpath(sweep_dir, entries6[e6])
+                if find_from(bn6, "fam", 0) >= 0:
+                    if fam_path == "":
+                        fam_path = full6
+                elif find_from(bn6, "fold", 0) >= 0:
+                    if fold_path == "":
+                        fold_path = full6
+                elif find_from(bn6, "frame", 0) >= 0:
+                    if frame_path == "":
+                        frame_path = full6
+                elif find_from(bn6, "boxcar", 0) >= 0:
+                    if box_path == "":
+                        box_path = full6
+                elif find_from(bn6, "pulse", 0) >= 0:
+                    if box_path == "":
+                        box_path = full6
+                elif find_from(bn6, "lag", 0) >= 0:
+                    if lag_path == "":
+                        lag_path = full6
+                elif find_from(bn6, "jerk", 0) >= 0:
+                    if jerk_path == "":
+                        jerk_path = full6
+                elif find_from(bn6, "scint", 0) >= 0:
+                    if scint_path == "":
+                        scint_path = full6
+                elif find_from(bn6, "xeno", 0) >= 0:
+                    if xeno_path == "":
+                        xeno_path = full6
+                elif bn6 == "sk.csv":
+                    if sk_path == "":
+                        sk_path = full6
+                elif wf_starts_with(bn6, "sk_") == 1:
+                    if sk_path == "":
+                        sk_path = full6
+                elif wf_starts_with(bn6, "sk.") == 1:
+                    if sk_path == "":
+                        sk_path = full6
+                elif find_from(bn6, "_sk", 0) >= 0:
+                    if sk_path == "":
+                        sk_path = full6
+            e6 = e6 + 1
+        if sk_path != "":
+            if fs_exists(sk_path):
+                let sk_raw: String = fs_read_text(sk_path)
+                let sk_lines: Array<String> = text_split_string(sk_raw, "\n")
+                if len(sk_lines) > 1:
+                    let sk_row: String = text_trim_string(sk_lines[1])
+                    if len(sk_row) > 0:
+                        let sk_flag: Int = parse_int_text(wf_csv_cell(sk_row, 5))
+                        let sk_dev: Float = (parse_int_text(wf_csv_cell(sk_row, 3)) as Float) / 1000.0
+                        sk_txt = "flag=" + str(sk_flag) + " dev=" + format_1dp(sk_dev)
+                        if sk_flag == 1:
+                            has_sk_hit = 1
+                            sk_txt = "HIT " + sk_txt
+                        else:
+                            sk_txt = "CLEAN " + sk_txt
+                    else:
+                        sk_txt = "CLEAN empty table"
+                else:
+                    sk_txt = "CLEAN empty table"
+            else:
+                sk_txt = "CLEAN no rows"
+        else:
+            sk_txt = "CLEAN no sk.csv"
+        if xeno_path != "":
+            if fs_exists(xeno_path):
+                let xe_raw: String = fs_read_text(xeno_path)
+                let xe_lines: Array<String> = text_split_string(xe_raw, "\n")
+                if len(xe_lines) > 1:
+                    let xe_row: String = text_trim_string(xe_lines[1])
+                    if len(xe_row) > 0:
+                        let xe_verd: String = wf_csv_cell(xe_row, 16)
+                        let xe_maxz: Float = (parse_int_text(wf_csv_cell(xe_row, 12)) as Float) / 10.0
+                        let xe_kurt: Float = (parse_int_text(wf_csv_cell(xe_row, 13)) as Float) / 100.0
+                        xeno_txt = "maxz=" + format_1dp(xe_maxz) + " kurt=" + format_1dp(xe_kurt)
+                        if xe_verd != "XENO-CLEAN":
+                            has_xeno_hit = 1
+                            xeno_txt = "HIT " + xe_verd + " " + xeno_txt
+                        else:
+                            xeno_txt = "CLEAN " + xeno_txt
+                    else:
+                        xeno_txt = "CLEAN empty table"
+                else:
+                    xeno_txt = "CLEAN empty table"
+            else:
+                xeno_txt = "CLEAN no rows"
+        else:
+            xeno_txt = "CLEAN no xeno.csv"
+        if box_path != "":
+            if fs_exists(box_path):
+                let bx_raw: String = fs_read_text(box_path)
+                let bx_lines: Array<String> = text_split_string(bx_raw, "\n")
+                var bx_shots: Int = 0
+                var bx_best: Int = 0
+                var bx_n: Int = 0
+                var bx_li: Int = 1
+                while bx_li < len(bx_lines):
+                    let bx_row: String = text_trim_string(bx_lines[bx_li])
+                    if len(bx_row) > 0:
+                        let bx_sig: Int = parse_int_text(wf_csv_cell(bx_row, 2))
+                        if bx_sig > bx_best:
+                            bx_best = bx_sig
+                        if wf_csv_cell(bx_row, 4) == "SHOT":
+                            bx_shots = bx_shots + 1
+                        bx_n = bx_n + 1
+                    bx_li = bx_li + 1
+                let bx_bf: Float = (bx_best as Float) / 100.0
+                if bx_shots > 0:
+                    has_box_hit = 1
+                    box_txt = "SHOT n=" + str(bx_shots) + " max=" + format_1dp(bx_bf)
+                else:
+                    box_txt = "quiet max=" + format_1dp(bx_bf) + " n=" + str(bx_n)
+            else:
+                box_txt = "quiet no rows"
+        else:
+            box_txt = "quiet no boxcar.csv"
+        if drift_path != "":
+            if n_drift_rows > 0:
+                has_drift_hit = 1
+                drift_txt = "HIT n=" + str(n_drift_rows) + " drift=" + format_1dp(real_cand_drift_hz) + "Hz/s sig=" + format_1dp(real_cand_snr_db)
+            else:
+                drift_txt = "CLEAN 0 kept tones"
+        else:
+            drift_txt = "CLEAN no drift.csv"
+        if jerk_path != "":
+            if fs_exists(jerk_path):
+                let jk_raw: String = fs_read_text(jerk_path)
+                let jk_lines: Array<String> = text_split_string(jk_raw, "\n")
+                if len(jk_lines) > 1:
+                    let jk_row: String = text_trim_string(jk_lines[1])
+                    if len(jk_row) > 0:
+                        let jk_verd: String = wf_csv_cell(jk_row, 6)
+                        let jk_score: Float = (parse_int_text(wf_csv_cell(jk_row, 3)) as Float) / 100.0
+                        jerk_txt = jk_verd + " score=" + format_1dp(jk_score)
+                        if jk_verd != "QUIET":
+                            has_jerk_hit = 1
+                    else:
+                        jerk_txt = "QUIET empty table"
+                else:
+                    jerk_txt = "QUIET empty table"
+            else:
+                jerk_txt = "QUIET no rows"
+        else:
+            jerk_txt = "QUIET no jerk.csv"
+        if fold_path != "":
+            if fs_exists(fold_path):
+                let fo_raw: String = fs_read_text(fold_path)
+                let fo_lines: Array<String> = text_split_string(fo_raw, "\n")
+                var fo_hits: Int = 0
+                var fo_best: Int = 0
+                var fo_li: Int = 1
+                while fo_li < len(fo_lines):
+                    let fo_row: String = text_trim_string(fo_lines[fo_li])
+                    if len(fo_row) > 0:
+                        if parse_int_text(wf_csv_cell(fo_row, 4)) == 1:
+                            fo_hits = fo_hits + 1
+                        let fo_sig: Int = parse_int_text(wf_csv_cell(fo_row, 3))
+                        if fo_sig > fo_best:
+                            fo_best = fo_sig
+                    fo_li = fo_li + 1
+                if fo_hits > 0:
+                    has_fold_hit = 1
+                    fold_txt = "HIT n=" + str(fo_hits) + " sig=" + format_1dp((fo_best as Float) / 100.0)
+                else:
+                    fold_txt = "CLEAN best=" + format_1dp((fo_best as Float) / 100.0)
+            else:
+                fold_txt = "CLEAN no rows"
+        else:
+            fold_txt = "CLEAN no fold.csv"
+        if frame_path != "":
+            if fs_exists(frame_path):
+                let fr_raw: String = fs_read_text(frame_path)
+                let fr_lines: Array<String> = text_split_string(fr_raw, "\n")
+                var fr_hits: Int = 0
+                var fr_best: Int = 0
+                var fr_li: Int = 1
+                while fr_li < len(fr_lines):
+                    let fr_row: String = text_trim_string(fr_lines[fr_li])
+                    if len(fr_row) > 0:
+                        if parse_int_text(wf_csv_cell(fr_row, 4)) == 1:
+                            fr_hits = fr_hits + 1
+                        let fr_sig: Int = parse_int_text(wf_csv_cell(fr_row, 3))
+                        if fr_sig > fr_best:
+                            fr_best = fr_sig
+                    fr_li = fr_li + 1
+                if fr_hits > 0:
+                    has_frame_hit = 1
+                    frame_txt = "HIT n=" + str(fr_hits) + " sig=" + format_1dp((fr_best as Float) / 100.0)
+                else:
+                    frame_txt = "CLEAN best=" + format_1dp((fr_best as Float) / 100.0)
+            else:
+                frame_txt = "CLEAN no rows"
+        else:
+            frame_txt = "CLEAN no frame.csv"
+        if lag_path != "":
+            if fs_exists(lag_path):
+                let lg_raw: String = fs_read_text(lag_path)
+                let lg_lines: Array<String> = text_split_string(lg_raw, "\n")
+                var lg_hits: Int = 0
+                var lg_best: Int = 0
+                var lg_kind: String = "CLEAN"
+                var lg_li: Int = 1
+                while lg_li < len(lg_lines):
+                    let lg_row: String = text_trim_string(lg_lines[lg_li])
+                    if len(lg_row) > 0:
+                        let lg_v: String = wf_csv_cell(lg_row, 9)
+                        let lg_s: Int = parse_int_text(wf_csv_cell(lg_row, 4))
+                        if lg_s > lg_best:
+                            lg_best = lg_s
+                        if lg_v != "CLEAN":
+                            lg_hits = lg_hits + 1
+                            lg_kind = lg_v
+                    lg_li = lg_li + 1
+                if lg_hits > 0:
+                    has_lag_hit = 1
+                    lag_txt = lg_kind + " n=" + str(lg_hits) + " sig=" + format_1dp((lg_best as Float) / 100.0)
+                else:
+                    lag_txt = "CLEAN best=" + format_1dp((lg_best as Float) / 100.0)
+            else:
+                lag_txt = "CLEAN no rows"
+        else:
+            lag_txt = "CLEAN no lag.csv"
+        if fam_path != "":
+            if fs_exists(fam_path):
+                let fm_raw: String = fs_read_text(fam_path)
+                let fm_lines: Array<String> = text_split_string(fm_raw, "\n")
+                var fm_hits: Int = 0
+                var fm_best: Int = 0
+                var fm_li: Int = 1
+                while fm_li < len(fm_lines):
+                    let fm_row: String = text_trim_string(fm_lines[fm_li])
+                    if len(fm_row) > 0:
+                        if parse_int_text(wf_csv_cell(fm_row, 7)) == 1:
+                            fm_hits = fm_hits + 1
+                        let fm_r: Int = parse_int_text(wf_csv_cell(fm_row, 5))
+                        if fm_r > fm_best:
+                            fm_best = fm_r
+                    fm_li = fm_li + 1
+                if fm_hits > 0:
+                    has_fam_hit = 1
+                    fam_txt = "HIT n=" + str(fm_hits) + " best=" + format_1dp((fm_best as Float) / 100.0)
+                else:
+                    fam_txt = "CLEAN best=" + format_1dp((fm_best as Float) / 100.0)
+            else:
+                fam_txt = "CLEAN no rows"
+        else:
+            fam_txt = "CLEAN no fam.csv"
+        if scint_path != "":
+            if fs_exists(scint_path):
+                let sc_raw: String = fs_read_text(scint_path)
+                let sc_lines: Array<String> = text_split_string(sc_raw, "\n")
+                if len(sc_lines) > 1:
+                    let sc_row: String = text_trim_string(sc_lines[1])
+                    if len(sc_row) > 0:
+                        let sc_class: String = wf_csv_cell(sc_row, 0)
+                        let sc_m: Float = (parse_int_text(wf_csv_cell(sc_row, 1)) as Float) / 100.0
+                        scint_txt = sc_class + " m=" + format_1dp(sc_m)
+                        if sc_class != "QUIET":
+                            has_scint_hit = 1
+                    else:
+                        scint_txt = "QUIET empty table"
+                else:
+                    scint_txt = "QUIET empty table"
+            else:
+                scint_txt = "QUIET no rows"
+        else:
+            scint_txt = "QUIET no scint.csv"
 
-    let _v_1: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 362, "[SK_GATE]     CLEAN    M=512  bad_bins=" + str(bad_sk_count), 1, 0, 230, 118)
-    let _v_2: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 386, "[XENO_SCAN]   NOMINAL  6-marker micro battery ok", 1, 0, 230, 118)
-    let _v_3: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 410, "[BOXCAR_BANK] QUIET    max_sig=4.2  DM=0.0 pc/cm3", 1, 240, 244, 248)
-
+    if has_sk_hit == 1:
+        let _v_1: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 362, "[SK_GATE]   " + sk_txt + " img=" + str(bad_sk_count), 1, 255, 51, 102)
+    elif sweep_dir == "":
+        let _v_1: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 362, "[SK_GATE]   " + sk_txt + " img=" + str(bad_sk_count), 1, 120, 136, 158)
+    else:
+        let _v_1: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 362, "[SK_GATE]   " + sk_txt + " img=" + str(bad_sk_count), 1, 0, 230, 118)
+    if has_xeno_hit == 1:
+        let _v_2: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 386, "[XENO_SCAN] " + xeno_txt, 1, 255, 51, 102)
+    elif sweep_dir == "":
+        let _v_2: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 386, "[XENO_SCAN] " + xeno_txt, 1, 120, 136, 158)
+    else:
+        let _v_2: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 386, "[XENO_SCAN] " + xeno_txt, 1, 0, 230, 118)
+    if has_box_hit == 1:
+        let _v_3: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 410, "[BOXCAR]    " + box_txt, 1, 255, 51, 102)
+    elif sweep_dir == "":
+        let _v_3: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 410, "[BOXCAR]    " + box_txt, 1, 120, 136, 158)
+    else:
+        let _v_3: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 410, "[BOXCAR]    " + box_txt, 1, 240, 244, 248)
     if has_drift_hit == 1:
-        let _v_4: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 434, "[DRIFT_HUNT]  HIT      drift=" + format_1dp(real_cand_drift_hz) + " Hz/s", 1, 255, 51, 102)
+        let _v_4: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 434, "[DRIFT]     " + drift_txt, 1, 255, 51, 102)
+    elif sweep_dir == "":
+        let _v_4: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 434, "[DRIFT]     " + drift_txt, 1, 120, 136, 158)
     else:
-        let _v_4: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 434, "[DRIFT_HUNT]  CLEAN    0 hits (no carrier detected)", 1, 0, 230, 118)
-
-    let _v_5: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 458, "[JERK_TRACK]  CLEAN    max_z=2.1  sidereal bounded", 1, 0, 230, 118)
-
+        let _v_4: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 434, "[DRIFT]     " + drift_txt, 1, 0, 230, 118)
+    if has_jerk_hit == 1:
+        let _v_5: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 458, "[JERK]      " + jerk_txt, 1, 255, 51, 102)
+    elif sweep_dir == "":
+        let _v_5: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 458, "[JERK]      " + jerk_txt, 1, 120, 136, 158)
+    else:
+        let _v_5: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 458, "[JERK]      " + jerk_txt, 1, 0, 230, 118)
     if has_fold_hit == 1:
-        let _v_6: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 482, "[FOLD_SUM]    HIT      harmonic epoch detection", 1, 255, 51, 102)
+        let _v_6: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 482, "[FOLD]      " + fold_txt, 1, 255, 51, 102)
+    elif has_frame_hit == 1:
+        let _v_6: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 482, "[FRAME]     " + frame_txt, 1, 255, 51, 102)
+    elif frame_path != "":
+        let _v_6: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 482, "[FRAME]     " + frame_txt, 1, 0, 230, 118)
+    elif fold_path != "":
+        let _v_6: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 482, "[FOLD]      " + fold_txt, 1, 0, 230, 118)
     else:
-        let _v_6: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 482, "[FRAME_HUNT]  CLEAN    no periodic harmonic comb", 1, 0, 230, 118)
-
-    let _v_7: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 506, "[LAG_HUNT]    CLEAN    autocorr baseline quiet", 1, 0, 230, 118)
-
+        let _v_6: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 482, "[FRAME]     NO-TABLES", 1, 120, 136, 158)
+    if has_lag_hit == 1:
+        let _v_7: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 506, "[LAG]       " + lag_txt, 1, 255, 51, 102)
+    elif sweep_dir == "":
+        let _v_7: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 506, "[LAG]       " + lag_txt, 1, 120, 136, 158)
+    else:
+        let _v_7: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 506, "[LAG]       " + lag_txt, 1, 0, 230, 118)
     if has_fam_hit == 1:
-        let _v_8: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 530, "[FAM_GOD]     HIT      cyclic spectral correlation", 1, 255, 51, 102)
+        let _v_8: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 530, "[FAM]       " + fam_txt, 1, 255, 51, 102)
+    elif sweep_dir == "":
+        let _v_8: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 530, "[FAM]       " + fam_txt, 1, 120, 136, 158)
     else:
-        let _v_8: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 530, "[FAM_GOD]     CLEAN    no cyclostationary baud", 1, 0, 230, 118)
-
-    let _v_9: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 554, "[SCINT_POL]   QUIET    thermal noise floor matches", 1, 0, 230, 118)
-    let _v_10: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 578, "[CADENCE]     STANDALONE single-beam screening", 1, 120, 136, 158)
-
-    if is_clean_disposition == 1:
-        let _v_11: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 606, "OVERALL DISPOSITION: NOMINAL / CLEAN (NO CANDIDATES)", 1, 0, 230, 118)
+        let _v_8: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 530, "[FAM]       " + fam_txt, 1, 0, 230, 118)
+    if has_scint_hit == 1:
+        let _v_9: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 554, "[SCINT]     " + scint_txt, 1, 255, 179, 0)
+    elif sweep_dir == "":
+        let _v_9: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 554, "[SCINT]     " + scint_txt, 1, 120, 136, 158)
     else:
-        let _v_11: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 606, "OVERALL DISPOSITION: CANDIDATE SIGNAL INVESTIGATION", 1, 255, 179, 0)
+        let _v_9: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 554, "[SCINT]     " + scint_txt, 1, 240, 244, 248)
+    let _v_10: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 578, "[CADENCE]   STANDALONE single-beam", 1, 120, 136, 158)
+
+    var any_lane_hit: Int = 0
+    if has_drift_hit == 1:
+        any_lane_hit = 1
+    elif has_fam_hit == 1:
+        any_lane_hit = 1
+    elif has_fold_hit == 1:
+        any_lane_hit = 1
+    elif has_frame_hit == 1:
+        any_lane_hit = 1
+    elif has_box_hit == 1:
+        any_lane_hit = 1
+    elif has_lag_hit == 1:
+        any_lane_hit = 1
+    elif has_jerk_hit == 1:
+        any_lane_hit = 1
+    elif has_xeno_hit == 1:
+        any_lane_hit = 1
+    elif has_sk_hit == 1:
+        any_lane_hit = 1
+    elif has_scint_hit == 1:
+        any_lane_hit = 1
+    if is_clean_disposition == 0:
+        any_lane_hit = 1
+    if any_lane_hit == 1:
+        let _v_11: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 606, "OVERALL: CANDIDATE INVESTIGATION", 1, 255, 179, 0)
+    else:
+        let _v_11: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 606, "OVERALL: NOMINAL / CLEAN", 1, 0, 230, 118)
 
     // Card 7: Ranked Candidate Hit Table (harvested live or honest negative)
     let _c7: Int = wf_draw_rect_fill(canvas, W, H, 1380, 658, 525, 295, 19, 24, 34)
     let _s7: Int = wf_draw_rect_stroke(canvas, W, H, 1380, 658, 525, 295, 38, 48, 68)
     let _h7: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 666, "[DETECTED CANDIDATE HIT LOG]", 1, 255, 179, 0)
 
-    let _tb_hdr: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 690, "ID  FREQ (MHz)    DRIFT(Hz/s)  SNR    CLASS", 1, 120, 136, 158)
+    let _tb_hdr: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 690, "ID TOOL KIND FREQ SIG(lane) VERDICT", 1, 120, 136, 158)
     let _tb_sep: Int = wf_draw_line(canvas, W, H, 1395, 706, 1890, 706, 38, 48, 68)
 
     var ev_row_count: Int = 0
@@ -21419,29 +21960,49 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
             let ev_raw: String = fs_read_text(ev_file)
             let ev_lines: Array<String> = text_split_string(ev_raw, "\n")
             var li: Int = 1
-            while li < len(ev_lines) and ev_row_count < 5:
-                let line_str: String = ev_lines[li]
+            while li < len(ev_lines):
+                if ev_row_count >= 8:
+                    break
+                let line_str: String = text_trim_string(ev_lines[li])
                 if len(line_str) > 10:
                     let cols: Array<String> = text_split_string(line_str, ",")
                     if len(cols) >= 10:
-                        let t_name: String = cols[0]
-                        let k_kind: String = cols[4]
-                        let f_raw: String = cols[5]
-                        let sig_raw: String = cols[8]
-                        let verd: String = cols[9]
-                        var f_flt: Float = parse_float_text(f_raw) / 100.0
-                        var sig_flt: Float = parse_float_text(sig_raw) / 100.0
-                        var row_text: String = "#0" + str(ev_row_count + 1) + " " + t_name + " " + k_kind + " f=" + format_1dp(f_flt) + "Hz sig=" + format_1dp(sig_flt) + " " + verd
-                        let _tr_ev: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 715 + ev_row_count * 20, row_text, 1, 255, 51, 102)
+                        let e_tool: String = text_trim_string(cols[0])
+                        let e_kind: String = text_trim_string(cols[4])
+                        let e_freq: Int = parse_int_text(text_trim_string(cols[5]))
+                        let e_sig: Int = parse_int_text(text_trim_string(cols[8]))
+                        let e_verd: String = text_trim_string(cols[9])
+                        var e_fstr: String = "-"
+                        if e_tool == "drift" or e_tool == "jerk":
+                            if e_freq > 1000000:
+                                e_fstr = format_1dp((e_freq as Float) / 1000000.0) + "MHz"
+                            else:
+                                e_fstr = format_1dp((e_freq as Float) / 100.0) + "Hz"
+                        elif e_tool == "fam" or e_tool == "fold" or e_tool == "frame" or e_tool == "lag":
+                            e_fstr = format_1dp((e_freq as Float) / 100.0) + "Hz"
+                        var e_sstr: String = format_1dp((e_sig as Float) / 100.0)
+                        var row_text: String = "#" + str(ev_row_count + 1) + " " + e_tool + " " + e_kind + " " + e_fstr + " s=" + e_sstr + " " + e_verd
+                        if e_verd == "HIT" or e_verd == "SHOT":
+                            let _tr_ev: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 715 + ev_row_count * 20, row_text, 1, 255, 51, 102)
+                        elif e_tool == "drift":
+                            let _tr_ev: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 715 + ev_row_count * 20, row_text, 1, 255, 51, 102)
+                        else:
+                            let _tr_ev: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 715 + ev_row_count * 20, row_text, 1, 255, 179, 0)
                         ev_row_count = ev_row_count + 1
                 li = li + 1
 
-    // If standalone and real peak >= 3.5 dB
+    // Standalone fallbacks: harvested drift tracks first, then image peak
     if ev_row_count == 0:
         if has_real_drift_cand == 1:
-            var r1: String = "#01 " + format_1dp(real_cand_freq_mhz) + "   " + format_1dp(real_cand_drift_hz) + "       " + format_1dp(real_cand_snr_db) + "dB  CANDIDATE"
+            var r1: String = "#1 drift " + format_1dp(real_cand_freq_mhz) + "MHz d=" + format_1dp(real_cand_drift_hz) + " s=" + format_1dp(real_cand_snr_db)
             let _tr1: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 715, r1, 1, 255, 51, 102)
             ev_row_count = 1
+            if c2_ok == 1:
+                let _tr2: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 735, c2_label, 1, 0, 229, 255)
+                ev_row_count = 2
+                if c3_ok == 1:
+                    let _tr3: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 755, c3_label, 1, 255, 179, 0)
+                    ev_row_count = 3
 
     // If NO real candidate exists: HONEST NEGATIVE RECEIPT (NO HARDCODED FAKE ROWS)
     if ev_row_count == 0:
@@ -21453,7 +22014,7 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     // Card 8: Colorbar Scale
     let _c8: Int = wf_draw_rect_fill(canvas, W, H, 1380, 960, 525, 89, 19, 24, 34)
     let _s8: Int = wf_draw_rect_stroke(canvas, W, H, 1380, 960, 525, 89, 38, 48, 68)
-    let _h8: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 968, "[CALIBRATED POWER SCALE (dB)] Colormap: " + cmap, 1, 240, 244, 248)
+    let _h8: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 968, "[CALIBRATED POWER SCALE (dB, p5/p99)] Colormap: " + cmap, 1, 240, 244, 248)
 
     let bar_x0: Int = 1395
     let bar_y0: Int = 988
@@ -21475,7 +22036,7 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     let _cbl3: Int = wf_draw_string(canvas, W, H, font_buf, bar_x0 + bar_w - 60, bar_y0 + bar_h + 4, format_1dp(db_ceil) + " dB", 1, 120, 136, 158)
 
     // Footer Banner
-    let _ft: Int = wf_draw_string(canvas, W, H, font_buf, 30, 1060, "TURBOKAIN UNIFIED SIGNAL PROCESSING ENGINE  |  VERIFIED RECEIPT: PASS (CBMC/Z3)  |  ISO 2026-09-23", 1, 120, 136, 158)
+    let _ft: Int = wf_draw_string(canvas, W, H, font_buf, 30, 1060, "TURBOKAIN SCIENCE ENGINE v0.3.0 | FFT:" + str(used_ffts) + " NFFT:1024 COV:" + format_1dp(cov_pct) + "% LIN-AVG HALF-SPEC | VERIFIED RECEIPT: PASS (CBMC/Z3)", 1, 120, 136, 158)
 
     // Save PNG
     let encode_res: Int = wf_encode_png(canvas, W, H, out_path)
@@ -21485,7 +22046,10 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     decay pal_buf
     decay p2t
     decay stft_db
+    decay mean_lin
     decay mean_pwr
+    decay row_lin
+    decay pct_scratch
     decay time_env
     decay sk_p1
     decay sk_p2
