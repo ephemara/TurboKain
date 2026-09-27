@@ -83,7 +83,11 @@ By the Cauchy-Schwarz inequality, $0.0 \le b^2(k_1, k_2) \le 1.0$:
 Due to the symmetries of the Fourier transform and bispectrum ($B(f_1, f_2) = B(f_2, f_1) = B^*(-f_1, -f_2) = B(-f_1-f_2, f_2)$), the 2D plane possesses 12-fold symmetry (or 6-fold for real signals).
 Evaluating the full $[-f_s/2, f_s/2] \times [-f_s/2, f_s/2]$ plane wastefully re-computes redundant octants.
 `bispectrum` restricts matrix evaluation strictly to the **Irreducible Principal Domain (IRPD)**:
-$$\Omega = \left\{ (f_1, f_2) \;\middle\vert{}\; 0 \le f_2 \le f_1, \, f_1 + f_2 \le \frac{f_s}{2} \right\}$$
+
+$$
+\Omega = \left\{ (f_1, f_2) \;\middle|\; 0 \le f_2 \le f_1, \; f_1 + f_2 \le \frac{f_s}{2} \right\}
+$$
+
 In terms of discrete bin indices $k_1, k_2$ up to Nyquist bin $K_{max} = N/2$:
 - $1 \le k_1 < K_{max}$
 - $1 \le k_2 \le \min(k_1, K_{max} - k_1)$

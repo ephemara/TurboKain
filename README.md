@@ -116,9 +116,9 @@ $$
 - **Quadratic Phase Coupling (QPC):** When $f_3 = f_1 + f_2$ with phase lock $\theta_3 = \theta_1 + \theta_2 + \phi_0$, $b^2 \to 1.0$.
 - **Irreducible Principal Domain (IRPD):** Restricts 2D evaluation strictly to the non-redundant triangle:
 
-  $$
-  \Omega = \left\{ (f_1, f_2) \;\middle|\; 0 \le f_2 \le f_1, \; f_1 + f_2 \le \frac{f_s}{2} \right\}
-  $$
+$$
+\Omega = \left\{ (f_1, f_2) \;\middle|\; 0 \le f_2 \le f_1, \; f_1 + f_2 \le \frac{f_s}{2} \right\}
+$$
 
   slashing redundant evaluation space by **83.3%** across the full plane.
 - **Harmonic 1D Diagonal Sweep:** Evaluates frequency-doubling phase locks ($f_2 = f_1$) in **$O(N)$ time** per block.
