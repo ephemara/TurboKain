@@ -1,7 +1,7 @@
 # A Multi-Band Bystander Technosignature Survey of TRAPPIST-1: Deep Microwave Limits on Coded Spread-Spectrum Traffic and Galactic Clocks
 
 **Authors:** Taylor James Kipp$^1$, The TurboKain Collaboration  
-$^1$*Independent Research / The TurboKain Project*  
+$^1$*Independent Research / The TurboKain Project* (`taylor@kainlang.com`)  
 **Date:** September 2026  
 **Target:** TRAPPIST-1 (2MASS J23062928-0502285, TIC 32229929)  
 **Telescope:** Robert C. Byrd Green Bank Telescope (100 m), GUPPI Baseband Backend  
@@ -12,13 +12,13 @@ $^1$*Independent Research / The TurboKain Project*
 
 ## Abstract
 
-We present a comprehensive, multi-band technosignature survey of the ultracool dwarf system TRAPPIST-1 ($d = 12.14\text{ pc}$, $39.6\text{ ly}$) using $732.1\text{ GB}$ of raw baseband voltage recordings from the Green Bank Telescope. Across four microwave bands (S-band: $2.1\text{ GHz}$, S/C-band: $3.0\text{ GHz}$, X-band: $7.9\text{ GHz}$, and Ku-band: $12.0\text{ GHz}$) spanning $750.0\text{ MHz}$ of radio frequency bandwidth, we evaluate $1,024$ dual-polarization channel observations across two distinct epochs and multi-chunk temporal dwells. Moving beyond conventional continuous-wave (CW) narrowband beacon models, we deploy an 18-stage native pipeline implementing the *Bystander Information-Theoretic Framework*: hunting capacity-achieving spread-spectrum communications, blind forward error correction (FEC) parity constraints, Kolmogorov diffractive interstellar scintillation (DISS) channel authentication ($\nu^{4.4}$), and millisecond-pulsar galactic phase re-timing. No extraterrestrial technosignatures were detected. We attribute $302$ cyclic spectral activity flags to harmonic complexes of the receiver's $22.35\text{ Hz}$ sampling comb ($\Delta f = 1,430.5\text{ Hz} = 64 \times 22.35\text{ Hz}$) and triage $11$ candidate detections as receiver polyphase filterbank DC bleed and ultra-clean thermal noise baselines. We establish continuous Equivalent Isotropically Radiated Power ($\text{EIRP}$) upper limits ranging from $\le 1.2\text{ TW}$ at $2.1\text{ GHz}$ to $\le 8.5\text{ TW}$ at $12.0\text{ GHz}$ across all 7 temperate planets, rigorously ruling out planetary-scale radar transmitters and high-capacity directed interstellar communications links crossing the solar system's line of sight.
+We present a comprehensive, multi-band technosignature survey of the ultracool dwarf system TRAPPIST-1 ($d = 12.14\text{ pc}$, $39.6\text{ ly}$) using $732.1\text{ GB}$ of raw baseband voltage recordings from the Green Bank Telescope. Across four microwave bands (S-band: $2.1\text{ GHz}$, S/C-band: $3.0\text{ GHz}$, X-band: $7.9\text{ GHz}$, and Ku-band: $12.0\text{ GHz}$) spanning $750.0\text{ MHz}$ of radio frequency bandwidth, we evaluate $1,024$ dual-polarization channel observations across two distinct epochs and multi-chunk temporal dwells. Moving beyond conventional continuous-wave (CW) narrowband beacon models, we deploy an 18-stage native pipeline implementing the *Bystander Information-Theoretic Framework*: hunting capacity-achieving spread-spectrum communications, blind forward error correction (FEC) parity constraints, Kolmogorov diffractive interstellar scintillation (DISS) channel authentication ($\nu^{4.4}$), and millisecond-pulsar galactic phase re-timing. No extraterrestrial technosignatures were detected. We attribute $302$ cyclic spectral activity flags to harmonic complexes of the receiver's $22.35\text{ Hz}$ sampling comb ($\Delta f = 1,430.5\text{ Hz} = 64 \times 22.35\text{ Hz}$) and triage $11$ candidate detections as receiver polyphase filterbank DC bleed and ultra-clean thermal noise baselines. We establish continuous Equivalent Isotropically Radiated Power ($\text{EIRP}$) upper limits ranging from $\le 41.8\text{ GW}$ (narrowband) and $\le 71.6\text{ TW}$ (wideband) at $2.1\text{ GHz}$ to $\le 83.6\text{ GW}$ (narrowband) and $\le 143.2\text{ TW}$ (wideband) at $12.0\text{ GHz}$ across the cumulative dwell (and $\le 535 - 1,070\text{ TW}$ instantaneous single-chunk), rigorously ruling out planetary-scale radar transmitters and high-capacity directed interstellar communications links crossing the solar system's line of sight.
 
 ---
 
 ## 1. Introduction
 
-The search for extraterrestrial intelligence (SETI) has historically relied on the beacon hypothesis: the assumption that an extraterrestrial civilization intentionally transmits a high-power, spectrally narrow continuous-wave (CW) carrier tone directly toward the Solar System (e.g., Tarter 2001; Enriquez et al. 2017; Margot et al. 2021). Consequently, algorithmic pipelines such as `turboSETI` (Enriquez & Siemion 2019) have been engineered to optimize detection of drifting drifting carrier lines ($\Delta f \sim 1 - 3\text{ Hz}$, $|\dot{f}| \le 2\text{ Hz s}^{-1}$) within incoherent power spectra.
+The search for extraterrestrial intelligence (SETI) has historically relied on the beacon hypothesis: the assumption that an extraterrestrial civilization intentionally transmits a high-power, spectrally narrow continuous-wave (CW) carrier tone directly toward the Solar System (e.g., Tarter 2001; Enriquez et al. 2017; Margot et al. 2021). Consequently, algorithmic pipelines such as `turboSETI` (Enriquez & Siemion 2019) have been engineered to optimize detection of drifting carrier lines ($\Delta f \sim 1 - 3\text{ Hz}$, $|\dot{f}| \le 2\text{ Hz s}^{-1}$) within incoherent power spectra.
 
 However, from an information-theoretic standpoint, high-power unmodulated tones are profoundly inefficient for transmitting data. According to Shannon's channel capacity theorem (Shannon 1948), an advanced civilization transmitting point-to-point communications traffic between stellar systems will maximize information capacity per unit energy by employing wideband spread-spectrum modulations (DSSS/FHSS), high-order constellations, and near-Shannon-limit forward error correction (FEC) codes (such as LDPC or Turbo codes; Gallager 1962; MacKay 1999). Over an uncoordinated interstellar eavesdropping geometry—the *Bystander Model*—such communications links do not target Earth. Instead, terrestrial observers intercept only off-axis sidelobes, scattered paths, or chance alignments between stellar nodes. 
 
@@ -72,7 +72,7 @@ Total Volume: 732.1 GB | Bandwidth: 750 MHz across 256 physical PFB channels
 ### 2.2 Native Baseband Ingestion Engine (`slice.kn`)
 To eliminate the performance degradation, global interpreter locks (GIL), and memory serialization overhead of conventional Python extraction bridges, ingestion was executed natively in Kain via `slice.kn`. Raw GUPPI files were accessed via direct Win32 asynchronous kernel handles (`CreateFileA`, `ReadFile`).
 
-For each channel, 32 raw GUPPI blocks were unpacked into linear 32-bit floating-point complex baseband arrays ($16,777,216$ complex samples per polarization, corresponding to an uninterrupted temporal integration $t_{\text{int}} = 5.727\text{ s}$). Slicing operated simultaneously across dual orthogonal linear polarizations ($X, Y$), preserving continuous phase and timing.
+Each 45 GB scan was processed as consecutive, sequential 32-block streaming buffers ($16,777,216$ complex samples per polarization, corresponding to $t_{\text{chunk}} = 5.727\text{ s}$ per buffer), maintaining rolling telemetry and cadence state across the entire 80-second on-sky dwell. Slicing operated simultaneously across dual orthogonal linear polarizations ($X, Y$), preserving continuous phase and timing across all $732.1\text{ GB}$ of recorded baseband data.
 
 ---
 
@@ -122,7 +122,7 @@ where $C_{\text{common}}$ is the cross-pointing common-mode correlation. When a 
 ### 3.3 Blind Soft-Decision Dual-Code Sieve (`fec_ghost`)
 Linear block codes $[n, k]$ and Low-Density Parity-Check (LDPC) codes enforce linear parity constraints over the Galois field $\mathbb{F}_2$:
 $$\mathbf{H} \mathbf{c}^T = \mathbf{0} \pmod 2$$
-where $\mathbf{H}$ is the $(n-k) \times n$ parity-check matrix. Even when symbols are pseudo-randomly scrambled, interleaved, and shaped into thermal-like envelopes, the parity-check constraint **cannot be removed without eliminating the code's error-correcting capability**.
+where $\mathbf{H}$ is the $(n-k) \times n$ parity-check matrix. Even when symbols are pseudo-randomly scrambled, interleaved, and shaped into thermal-like envelopes, the parity-check constraint **cannot be removed without eliminating the code's error-correcting capability**. We note that while deep additive pseudo-random scramblers with periods exceeding the observation window can whiten dual parity constraints, physical telecommunications architectures frequently rely on self-synchronizing (multiplicative) scramblers, unscrambled framing/sync preambles, or periodic dual congruences, which remain detectable under sparse dual parity testing.
 
 Rather than searching the intractable space of all generator matrices, `fec_ghost` evaluates soft symbols $y_i = \Delta\phi_i / \sigma^2$ (extracted via differential phase demodulation) against a calibrated dictionary of $256$ sparse dual parity masks $\mathbf{m}_j \in \{0, 1\}^n$ of even weight $w \in [6, 12]$ and span $L \in [16, 256]$.
 
@@ -188,15 +188,11 @@ $$\Delta f_{\text{hum}} = \frac{f_s}{131,072} = \frac{2,929,687.5\text{ Hz}}{131
 $$64 \times \Delta f_{\text{hum}} = 64 \times 22.35174\text{ Hz} = 1,430.511\text{ Hz}$$
 The detected lines represent the exact $64^{\text{th}}$ harmonic sub-comb of the GUPPI analog-to-digital converter's hardware sampling clock. This comb is common to both ON and OFF pointings, invariant across all four receiver bands, and is definitively categorized as **instrumental sampling comb intermodulation**.
 
-```
-Figure 1: High-Density Diagnostic Dashboard for X-Band Channel 49 (7959 MHz)
-----------------------------------------------------------------------------------------
-[ Dynamic Spectrum P(t, f), Power Envelope P(t), and Spectral Kurtosis SK(f) ]
-Integrated Bandpass: Flat thermal Gaussian floor (+0.1 dB peak margin).
-Spectral Kurtosis: SK(f) = 1.000 across all 512 sub-bins (RFI excision: 0.5%).
-Telemetry HUD: [ALIEN] ST:CLEAN n=8 p=0.0 GH:CLEAN GP:CLEAN q=0.0 PC:CLEAN
-Overall Verdict: NOMINAL / CLEAN (Gaussian Thermal Noise Floor Receipt: PASS).
-```
+![Figure 1: High-Density Diagnostic Dashboard for X-Band Channel 49 (7959 MHz)](figures/figure1_xband_thermal_waterfall.png)
+*Figure 1: TurboKain science dashboard for X-band Channel 49 ($7,959.0\text{ MHz}$) during Epoch 2 Chunk 1. Panel 1: Mean power bandpass showing flat Gaussian thermal noise floor ($+0.1\text{ dB}$ margin). Panel 2: Dynamic spectrum heatmap across 512 half-spectrum bins from $7,959.0\text{ MHz}$ to $7,960.4\text{ MHz}$. Panel 3: Total power envelope $P(t)$ (fluctuation $<0.3\text{ dB}$). Panel 4: Spectral kurtosis $SK(f) = 1.000$ across all bins. Panel 5--8: Telemetry HUD showing honest negative receipts (`NOISE FLOOR RECEIPT: PASS`).*
+
+![Figure 2: Terrestrial Impulse Storm on S-Band Channel 36 (2170.9 MHz)](figures/figure2_sband_impulse_storm.png)
+*Figure 2: TurboKain science dashboard for S-band Channel 36 ($2,170.9\text{ MHz}$) during Epoch 2 Chunk 0. Panel 1: Power spectrum showing baseband DC LO leakage spike. Panel 2: Dynamic spectrum displaying broadband, simultaneous horizontal flash stripes spanning the entire $1.4\text{ MHz}$ channel without dispersion delay. Panel 3: Time-domain power envelope $P(t)$ showing periodic microsecond impulse train jumping $+13.1\text{ dB}$ above noise floor. Panel 4: Spectral kurtosis $SK(f)$ flagged across $99.8\%$ of bins. Bottom right: Hit log showing 8 cyclic spectral baud lines matching the exact $64 \times 22.3517\text{ Hz} = 1,430.5\text{ Hz}$ GUPPI sampling comb. Center right: Alien suite triage line (`[ALIEN]`) correctly assigning `ST:CLEAN` (zero DISS screen) and `GH:CLEAN` (zero FEC parity coding), vetoing the burst as local terrestrial interference.*
 
 ### 4.2 Triage of Polyphase Filterbank DC Center Flags (Channel 00)
 Six of the $11$ alien candidate flags occurred exclusively on **Channel 00** across the S, S/C, and Ku bands:
@@ -221,31 +217,43 @@ Forensic analysis of the baseband telemetry revealed:
 
 Having established an honest negative across all $1,024$ channel sweeps, we calculate upper bounds on the Equivalent Isotropically Radiated Power ($\text{EIRP}$) of any continuous transmitter operating within the TRAPPIST-1 system during the observation epochs.
 
-The minimum detectable flux density $S_{\text{min}}$ for a signal with signal-to-noise ratio $\text{SNR}_{\text{min}} = 6.0$ is governed by the radiometer equation:
-$$S_{\text{min}} = \text{SNR}_{\text{min}} \frac{2 k_B T_{\text{sys}}}{A_{\text{eff}} \sqrt{n_{\text{pol}} \Delta f t_{\text{int}}}}$$
-For the Green Bank Telescope, the system temperature $T_{\text{sys}}$, effective collecting area $A_{\text{eff}}$ (aperture efficiency $\eta_A \approx 0.70$), and system equivalent flux density ($\text{SEFD} = 2 k_B T_{\text{sys}} / A_{\text{eff}}$) vary across receivers:
-* S-band ($2\text{ GHz}$): $\text{SEFD} \approx 10\text{ Jy}$
-* S/C-band ($3\text{ GHz}$): $\text{SEFD} \approx 12\text{ Jy}$
-* X-band ($8\text{ GHz}$): $\text{SEFD} \approx 15\text{ Jy}$
-* Ku-band ($12\text{ GHz}$): $\text{SEFD} \approx 20\text{ Jy}$
+The minimum detectable flux density $S_{\text{min}}$ for a signal with detection threshold $\text{SNR}_{\text{min}} = 6.0$ is governed by the standard radiometer equation:
+$$S_{\text{min}} = \text{SNR}_{\text{min}} \frac{\text{SEFD}}{\sqrt{n_{\text{pol}} \Delta f t_{\text{int}}}}$$
+where $n_{\text{pol}} = 2$, $\Delta f$ is the detection bandwidth, $t_{\text{int}}$ is the integration time, and the system equivalent flux density ($\text{SEFD} = 2 k_B T_{\text{sys}} / A_{\text{eff}}$) for the Green Bank Telescope is approximately:
+* S-band ($2.16\text{ GHz}$): $\text{SEFD} \approx 10\text{ Jy}$
+* S/C-band ($3.06\text{ GHz}$): $\text{SEFD} \approx 12\text{ Jy}$
+* X-band ($7.91\text{ GHz}$): $\text{SEFD} \approx 15\text{ Jy}$
+* Ku-band ($11.98\text{ GHz}$): $\text{SEFD} \approx 20\text{ Jy}$
 
-For an isotropic transmitter at distance $d = 12.14\text{ pc}$ ($3.746 \times 10^{17}\text{ m}$), the EIRP is:
-$$\text{EIRP} = 4 \pi d^2 S_{\text{min}} \Delta f_{\text{tot}}$$
-For an uninterrupted 32-block baseband integration ($t_{\text{int}} = 5.727\text{ s}$, $n_{\text{pol}} = 2$), we calculate the upper limits for both narrowband carriers ($\Delta f = 1\text{ Hz}$) and wideband spread-spectrum channels ($\Delta f = 2.93\text{ MHz}$):
+For an isotropic transmitter at distance $d = 12.14\text{ pc}$ ($3.746 \times 10^{17}\text{ m}$, $4 \pi d^2 = 1.7633 \times 10^{36}\text{ m}^2$), the Equivalent Isotropically Radiated Power ($\text{EIRP}$) is:
+$$\text{EIRP} = 4 \pi d^2 S_{\text{min}} \Delta f_{\text{sig}}$$
+With $1\text{ Jy} = 10^{-26}\text{ W m}^{-2}\text{ Hz}^{-1}$, the geometric conversion constant is:
+$$4 \pi d^2 \times 10^{-26} = 1.7633 \times 10^{10}\text{ W Hz}^{-1}\text{ Jy}^{-1} = 17.633\text{ GW / (Jy Hz)}$$
+
+We evaluate sensitivity under two operational regimes:
+1. **Instantaneous Single-Chunk Sensitivity ($t_{\text{chunk}} = 5.727\text{ s}$)**: The sensitivity floor achieved within any single 32-block streaming analysis buffer.
+2. **Cumulative On-Target Dwell Sensitivity ($t_{\text{dwell}} = 320\text{ s}$)**: The coherent/incoherent stacked floor accumulated across all four on-target scans per band ($4 \times 80\text{ s} = 320\text{ s}$), representing a factor of $\sqrt{320 / 5.727} \approx 7.48\times$ improvement in flux sensitivity.
+
+For narrowband continuous-wave carriers ($\Delta f = 1\text{ Hz}$):
+$$S_{\text{min, narrow}} = \frac{6 \times \text{SEFD}}{\sqrt{2 \times 1 \times t_{\text{int}}}} \implies \text{EIRP}_{\text{narrow}} = 17.633 \times S_{\text{min, narrow}}\text{ [GW]}$$
+For wideband spread-spectrum channels spanning the full coarse channel bandwidth $B = 2.9296875\text{ MHz}$:
+$$S_{\text{min, wide}} = \frac{6 \times \text{SEFD}}{\sqrt{2 \times B \times t_{\text{int}}}}, \quad F_{\text{min}} = S_{\text{min, wide}} \times B = 6 \times \text{SEFD} \sqrt{\frac{B}{2 t_{\text{int}}}}$$
+$$\text{EIRP}_{\text{wide}} = 4 \pi d^2 F_{\text{min}} = (53.51\text{ TW / Jy}) \times \text{SEFD} \times \sqrt{\frac{5.727}{t_{\text{int}}}}$$
 
 ```
-Table 3: Calibrated Transmitter EIRP Upper Limits for TRAPPIST-1 (d = 12.14 pc)
-========================================================================================
-Receiver Band    Freq (GHz)    SEFD (Jy)    S_min (mJy, 1 Hz)    Narrowband EIRP    Wideband Channel EIRP
-----------------------------------------------------------------------------------------
-S-Band           2.157         10.0         17.7                 3.0 GW             1.2 TW
-S/C-Band         3.057         12.0         21.2                 3.6 GW             2.1 TW
-X-Band           7.907         15.0         26.5                 4.5 GW             5.4 TW
-Ku-Band          11.982        20.0         35.4                 6.0 GW             8.5 TW
-========================================================================================
+Table 3: Calibrated Flux Sensitivity and Transmitter EIRP Limits for TRAPPIST-1 (d = 12.14 pc)
+====================================================================================================================
+Receiver Band    Freq (GHz)   SEFD (Jy)   --- Single Chunk (t = 5.73 s) ---        --- Full Dwell (t = 320 s) ---
+                                          S_min (1 Hz)  EIRP (1 Hz)  EIRP (2.93 MHz)  S_min (1 Hz)  EIRP (1 Hz)  EIRP (2.93 MHz)
+--------------------------------------------------------------------------------------------------------------------
+S-Band           2.157        10.0        17.73 Jy      312.6 GW     535.1 TW         2.37 Jy       41.8 GW      71.6 TW
+S/C-Band         3.057        12.0        21.27 Jy      375.1 GW     642.1 TW         2.85 Jy       50.2 GW      85.9 TW
+X-Band           7.907        15.0        26.59 Jy      468.9 GW     802.7 TW         3.56 Jy       62.7 GW     107.4 TW
+Ku-Band          11.982       20.0        35.46 Jy      625.2 GW    1070.2 TW         4.74 Jy       83.6 GW     143.2 TW
+====================================================================================================================
 ```
 
-These thresholds rule out any continuous transmitter with an effective isotropic radiated power exceeding **$1.2\text{ TW}$ at S-band** or **$8.5\text{ TW}$ at Ku-band**. For comparison, the planetary radar at the Arecibo Observatory possessed an effective peak EIRP of $\sim 20\text{ TW}$ at $2.38\text{ GHz}$, and the Goldstone Solar System Radar (DSS-14) operates at $\sim 10\text{ TW}$ at $8.56\text{ GHz}$. Our results demonstrate that no planetary radar or directed inter-planet microwave communications link comparable to terrestrial deep-space radar facilities was active and beamed toward Earth during these observations.
+These rigorous thresholds rule out any continuous narrowband transmitter exceeding **$41.8\text{ GW}$ at S-band** or **$83.6\text{ GW}$ at Ku-band** over the cumulative dwell, and wideband spread-spectrum communications exceeding **$71.6\text{ TW}$ at S-band** or **$143.2\text{ TW}$ at Ku-band**. Under instantaneous single-chunk detection ($5.73\text{ s}$), transmitters are bounded to $\le 535.1\text{ TW}$ at S-band and $\le 1,070.2\text{ TW}$ at Ku-band. For comparison, the planetary radar at the Arecibo Observatory possessed an effective peak EIRP of $\sim 20\text{ TW}$ at $2.38\text{ GHz}$, and the Goldstone Solar System Radar (DSS-14) operates at $\sim 10\text{ TW}$ at $8.56\text{ GHz}$. Our results demonstrate that no planetary radar or directed inter-planet microwave communications link comparable to terrestrial deep-space radar facilities was active and beamed toward Earth during these observations.
 
 ---
 

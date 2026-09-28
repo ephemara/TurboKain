@@ -2,6 +2,7 @@
 
 **Folder:** `papers/trappist1_bystander_survey/`  
 **Target:** TRAPPIST-1 (2MASS J23062928-0502285)  
+**Lead Author:** Taylor James Kipp (`taylor@kainlang.com`)  
 **Telescope:** Robert C. Byrd Green Bank Telescope (100 m)  
 **Survey Volume:** 732.1 GB raw GUPPI baseband voltages across 4 microwave bands (2.1 to 12.0 GHz)  
 **Total Channels Swept:** 1,024 dual-polarization observations  

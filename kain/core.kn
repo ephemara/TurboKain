@@ -26240,7 +26240,7 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     let bw_mhz: Float = bw_hz / 1000000.0
     var peak_freq_mhz: Float = freq_mhz
     if best_peak_bin >= 0:
-        peak_freq_mhz = (freq_mhz - bw_mhz / 2.0) + ((best_peak_bin as Float) * bw_mhz) / (NW_FREQ as Float)
+        peak_freq_mhz = freq_mhz + ((best_peak_bin as Float) * bw_mhz) / (NW_FREQ as Float)
 
     // Compute min and max of time_env for auto-scaling Panel 3
     var t_env_min: Float = 999999.0
@@ -26481,7 +26481,7 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     while g_f <= 4:
         let gx: Int = wf_x0 + (g_f * wf_w) / 4
         let _fline: Int = wf_draw_dashed_line(canvas, W, H, gx, wf_y0, gx, wf_y0 + wf_h, 4, 8, 50, 65, 90)
-        let f_frac: Float = ((g_f as Float) - 2.0) / 4.0
+        let f_frac: Float = (g_f as Float) / 4.0
         let f_val: Float = freq_mhz + f_frac * bw_mhz
         let _flbl: Int = wf_draw_string(canvas, W, H, font_buf, gx - 30, wf_y0 + wf_h + 8, format_1dp(f_val) + "M", 1, 120, 136, 158)
         g_f = g_f + 1
