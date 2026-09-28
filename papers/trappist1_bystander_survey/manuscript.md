@@ -1,7 +1,7 @@
 # A Multi-Band Bystander Technosignature Survey of TRAPPIST-1: Deep Microwave Limits on Coded Spread-Spectrum Traffic and Galactic Clocks
 
 **Authors:** Taylor James Kipp$^1$, The TurboKain Collaboration  
-$^1$*Independent Research / The TurboKain Project* (`taylor@kainlang.com`)  
+$^1$*The TurboKain Project, Independent Research* (`taylor@kainlang.com`)  
 **Date:** September 2026  
 **Target:** TRAPPIST-1 (2MASS J23062928-0502285, TIC 32229929)  
 **Telescope:** Robert C. Byrd Green Bank Telescope (100 m), GUPPI Baseband Backend  
@@ -12,23 +12,25 @@ $^1$*Independent Research / The TurboKain Project* (`taylor@kainlang.com`)
 
 ## Abstract
 
-We present a comprehensive, multi-band technosignature survey of the ultracool dwarf system TRAPPIST-1 ($d = 12.14\text{ pc}$, $39.6\text{ ly}$) using $732.1\text{ GB}$ of raw baseband voltage recordings from the Green Bank Telescope. Across four microwave bands (S-band: $2.1\text{ GHz}$, S/C-band: $3.0\text{ GHz}$, X-band: $7.9\text{ GHz}$, and Ku-band: $12.0\text{ GHz}$) spanning $750.0\text{ MHz}$ of radio frequency bandwidth, we evaluate $1,024$ dual-polarization channel observations across two distinct epochs and multi-chunk temporal dwells. Moving beyond conventional continuous-wave (CW) narrowband beacon models, we deploy an 18-stage native pipeline implementing the *Bystander Information-Theoretic Framework*: hunting capacity-achieving spread-spectrum communications, blind forward error correction (FEC) parity constraints, Kolmogorov diffractive interstellar scintillation (DISS) channel authentication ($\nu^{4.4}$), and millisecond-pulsar galactic phase re-timing. No extraterrestrial technosignatures were detected. We attribute $302$ cyclic spectral activity flags to harmonic complexes of the receiver's $22.35\text{ Hz}$ sampling comb ($\Delta f = 1,430.5\text{ Hz} = 64 \times 22.35\text{ Hz}$) and triage $11$ candidate detections as receiver polyphase filterbank DC bleed and ultra-clean thermal noise baselines. We establish continuous Equivalent Isotropically Radiated Power ($\text{EIRP}$) upper limits ranging from $\le 41.8\text{ GW}$ (narrowband) and $\le 71.6\text{ TW}$ (wideband) at $2.1\text{ GHz}$ to $\le 83.6\text{ GW}$ (narrowband) and $\le 143.2\text{ TW}$ (wideband) at $12.0\text{ GHz}$ across the cumulative dwell (and $\le 535 - 1,070\text{ TW}$ instantaneous single-chunk), rigorously ruling out planetary-scale radar transmitters and high-capacity directed interstellar communications links crossing the solar system's line of sight.
+We present a comprehensive, multi-band technosignature survey of the ultracool dwarf planetary system TRAPPIST-1 ($d = 12.14\text{ pc}$, $39.6\text{ ly}$) using $732.1\text{ GB}$ of raw baseband voltage recordings from the 100-meter Green Bank Telescope. Across four microwave receiver bands (S-band: $2.1\text{ GHz}$, S/C-band: $3.0\text{ GHz}$, X-band: $7.9\text{ GHz}$, and Ku-band: $12.0\text{ GHz}$) spanning $750.0\text{ MHz}$ of aggregate radio frequency bandwidth, we evaluate $1,024$ dual-polarization channel observations across two distinct epochs and multi-chunk temporal dwells. Moving beyond conventional continuous-wave (CW) narrowband beacon models, we deploy an 18-stage native pipeline implementing the *Bystander Information-Theoretic Framework*: hunting capacity-achieving spread-spectrum communications, blind forward error correction (FEC) parity constraints, interstellar medium (ISM) channel authentication, and millisecond-pulsar galactic phase re-timing. No extraterrestrial technosignatures were detected. We attribute $302$ cyclic spectral activity flags to harmonic complexes of the receiver's $22.35\text{ Hz}$ analog-to-digital sampling comb ($\Delta f = 1,430.5\text{ Hz} = 64 \times 22.35\text{ Hz}$) and triage $11$ candidate detections as receiver polyphase filterbank DC bleed and ultra-clean thermal noise baselines. We establish continuous Equivalent Isotropically Radiated Power ($\text{EIRP}$) upper limits ranging from $\le 41.8\text{ GW}$ (narrowband) and $\le 71.6\text{ TW}$ (wideband) at $2.1\text{ GHz}$ to $\le 83.6\text{ GW}$ (narrowband) and $\le 143.2\text{ TW}$ (wideband) at $12.0\text{ GHz}$ across the cumulative dwell (and $\le 535 - 1,070\text{ TW}$ instantaneous single-chunk), placing the first quantitative constraints on wideband coded telecommunications links crossing Earth's line of sight toward TRAPPIST-1.
 
 ---
 
 ## 1. Introduction
 
-The search for extraterrestrial intelligence (SETI) has historically relied on the beacon hypothesis: the assumption that an extraterrestrial civilization intentionally transmits a high-power, spectrally narrow continuous-wave (CW) carrier tone directly toward the Solar System (e.g., Tarter 2001; Enriquez et al. 2017; Margot et al. 2021). Consequently, algorithmic pipelines such as `turboSETI` (Enriquez & Siemion 2019) have been engineered to optimize detection of drifting carrier lines ($\Delta f \sim 1 - 3\text{ Hz}$, $|\dot{f}| \le 2\text{ Hz s}^{-1}$) within incoherent power spectra.
+The search for extraterrestrial intelligence (SETI) has historically relied on the beacon hypothesis: the assumption that an extraterrestrial civilization intentionally transmits a high-power, spectrally narrow continuous-wave (CW) carrier tone directly toward the Solar System (e.g., Tarter 2001; Enriquez et al. 2017; Margot et al. 2021). Consequently, algorithmic search pipelines such as `turboSETI` (Enriquez & Siemion 2019) have been engineered to optimize detection of drifting sinusoidal carrier lines ($\Delta f \sim 1 - 3\text{ Hz}$, $|\dot{f}| \le 2\text{ Hz s}^{-1}$) within incoherent power spectra.
 
-However, from an information-theoretic standpoint, high-power unmodulated tones are profoundly inefficient for transmitting data. According to Shannon's channel capacity theorem (Shannon 1948), an advanced civilization transmitting point-to-point communications traffic between stellar systems will maximize information capacity per unit energy by employing wideband spread-spectrum modulations (DSSS/FHSS), high-order constellations, and near-Shannon-limit forward error correction (FEC) codes (such as LDPC or Turbo codes; Gallager 1962; MacKay 1999). Over an uncoordinated interstellar eavesdropping geometry—the *Bystander Model*—such communications links do not target Earth. Instead, terrestrial observers intercept only off-axis sidelobes, scattered paths, or chance alignments between stellar nodes. 
+However, from an information-theoretic standpoint, high-power unmodulated tones are profoundly inefficient for transmitting data. According to Shannon's channel capacity theorem (Shannon 1948), an advanced civilization transmitting point-to-point communications traffic between stellar nodes will maximize information capacity per unit energy by employing wideband spread-spectrum modulations (DSSS/FHSS), high-order constellations, and near-Shannon-limit forward error correction (FEC) codes (such as LDPC or Turbo codes; Gallager 1962; MacKay 1999). Over an uncoordinated interstellar eavesdropping geometry—the *Bystander Model*—such communications links do not target Earth. Instead, terrestrial observers intercept only off-axis sidelobes, scattered paths, or chance geometric alignments between communicating stellar or planetary nodes.
 
-Crucially, **a capacity-achieving communications link is mathematically designed to be statistically indistinguishable from zero-mean Gaussian thermal noise ($p(y) \approx \mathcal{CN}(0, \sigma^2)$) to any receiver lacking the cryptographic codebook.** Conventional energy detectors, spectral kurtosis sieves, and bicoherence estimators are completely blind to such signals, reporting them as nominal thermal background.
+Crucially, **a capacity-achieving communications link is mathematically designed to be statistically indistinguishable from zero-mean Gaussian thermal noise ($p(y) \approx \mathcal{CN}(0, \sigma^2)$) to any receiver lacking the cryptographic codebook.** Conventional energy detectors, spectral kurtosis sieves, and bicoherence estimators are completely blind to such signals, discarding them as nominal thermal background.
 
-The TRAPPIST-1 system (Gillon et al. 2017) represents an exceptional laboratory for bystander technosignature searches. Located $12.14\text{ pc}$ from Earth, this M8V ultracool dwarf hosts seven Earth-sized terrestrial planets in a compact resonant chain (Luger et al. 2017), with three planets ($e, f, g$) residing within the circumstellar habitable zone. Due to its ecliptic latitude ($\beta = +0.63^\circ$), TRAPPIST-1 lies inside the Earth Transit Zone (ETZ; Heller & Pudritz 2016), meaning observers in the system can observe Earth transiting the Sun. Furthermore, the orbital planes of the seven planets are aligned within $<0.1^\circ$ to our line of sight, creating frequent mutual occultation windows where inter-planet communications beams point directly across terrestrial radio telescopes.
+The TRAPPIST-1 system (Gillon et al. 2017) represents an exceptional laboratory for bystander technosignature searches. Located $12.14\text{ pc}$ from Earth, this M8V ultracool dwarf hosts seven Earth-sized terrestrial planets in a compact resonant chain (Luger et al. 2017), with three planets ($e, f, g$) residing within the circumstellar habitable zone. Due to its ecliptic latitude ($\beta = +0.63^\circ$), TRAPPIST-1 lies inside the Earth Transit Zone (ETZ; Heller & Pudritz 2016), meaning observers in the system can observe Earth transiting the Sun. Furthermore, the orbital planes of the seven planets are coplanar within $<0.1^\circ$ and inclined at $i \approx 89.7^\circ - 89.9^\circ$ along our line of sight. This edge-on architecture produces frequent mutual occultations and conjunctions between planets, creating geometric alignment windows where inter-planet communications beams point directly across terrestrial radio telescopes.
 
-In this work, we present a complete full-spectrum microwave survey of TRAPPIST-1, covering $750\text{ MHz}$ across four frequency bands recorded by the 100-meter Green Bank Telescope. Rather than assuming beacons, we deploy an 18-stage native pipeline implemented in the formal verification language Kain, introducing:
+Prior targeted radio searches of TRAPPIST-1 have searched exclusively for narrowband CW carriers. Pinchuk et al. (2019) observed TRAPPIST-1 with the Green Bank Telescope at L-band ($1.15 - 1.73\text{ GHz}$) using an automated Doppler drift search, achieving EIRP limits of $\sim 4.7 \times 10^{10}\text{ W}$ ($47\text{ GW}$) for continuous tones. Similarly, Breakthrough Listen primary surveys (Enriquez et al. 2017; Price et al. 2020) covered L-band and S-band using incoherent dynamic spectra.
+
+In this work, we present a complete full-spectrum microwave survey of TRAPPIST-1, covering $750\text{ MHz}$ across four frequency bands recorded by the 100-meter Green Bank Telescope. Rather than assuming unmodulated beacons, we deploy an 18-stage native pipeline implemented in the formal verification language Kain, introducing:
 1. **Blind Soft-Decision Dual-Code Testing (`fec_ghost`)**: Testing baseband soft symbols against sparse dual parity constraints without prior knowledge of the codebook.
-2. **Kolmogorov Channel Authentication (`ism_stamp`)**: Authenticating whether signals exhibit diffractive interstellar scintillation (DISS) with Kolmogorov scaling ($\nu^{4.4}$) across parsec baselines.
+2. **Interstellar Propagation Channel Authentication (`ism_stamp`)**: Evaluating scintillation and plasma propagation signatures across parsec baselines while accounting for the weak scattering regime of the Local Interstellar Medium.
 3. **Inverted Spectral Kurtosis (`gauss_perfection`)**: Escalating signals that maintain mathematical Gaussian perfection across independent pointings and polarizations.
 4. **Galactic Pulsar Re-timing (`pulsar_clock`)**: Testing for deliberate carrier synchronization against the collective galactic millisecond pulsar timebase.
 
@@ -39,7 +41,7 @@ In this work, we present a complete full-spectrum microwave survey of TRAPPIST-1
 ### 2.1 Green Bank Telescope Baseband Recordings
 The primary observations were conducted using the Robert C. Byrd Green Bank Telescope (GBT) under Breakthrough Listen project `AGBT17A_999_12` (MJD 57807, 2017-02-23). Voltages were digitized using the Green Bank Ultimate Pulsar Processing Instrument (GUPPI) baseband backend across 64 polyphase filterbank (PFB) coarse channels with 8-bit real and imaginary sampling ($N_{\text{bits}} = 8$), yielding an aggregate sample rate $f_s = 2.9296875\text{ MHz}$ per coarse channel ($\Delta f_{\text{chan}} = 2.9296875\text{ MHz}$, $t_{\text{bin}} = 341.33\text{ ns}$).
 
-The dataset comprises 16 raw scans representing eight ON/OFF pointing cadence pairs across four receiver bands. In accordance with the monolithic campaign doctrine, each scan was archived in three consecutive volume segments (`.0000.raw`, `.0001.raw`, `.0002.raw`), totaling $45.0\text{ GB}$ per scan and an aggregate volume of $732.1\text{ GB}$ on disk.
+The dataset comprises 16 raw scans representing eight ON/OFF pointing cadence pairs across four receiver bands (Table 1). In accordance with the monolithic campaign doctrine, each scan was archived in three consecutive volume segments (`.0000.raw`, `.0001.raw`, `.0002.raw`), totaling $45.0\text{ GB}$ per scan and an aggregate volume of $732.1\text{ GB}$ on disk.
 
 ```
 Table 1: Log of GBT GUPPI Baseband Observations for TRAPPIST-1
@@ -84,13 +86,13 @@ The processed baseband streams were routed through the TurboKain 18-stage native
 [ Dual-Polarization Baseband Voltages (X, Y) ]
                       │
                       ▼
-[ Stage 1: Spatial Subspace Projection (subspace_null) ]
-  Eigen-decomposition: P_perp = I - u u^H
+[ Stage 1: Dual-Polarization Eigen-Filter (subspace_null) ]
+  Covariance Decomposition: R = V Lambda V^H, P_perp = I - u u^H
                       │
         ┌─────────────┴─────────────┐
         ▼                           ▼
 [ Spectral & Temporal Sieve ]  [ Alien Information Keystones ]
-  • sk_gate (Kurtosis)          • ism_stamp (Kolmogorov DISS)
+  • sk_gate (Kurtosis)          • ism_stamp (Propagation Auth)
   • xeno_scan (6-Marker)        • gauss_perfection (Q-score)
   • boxcar_bank (DM Trials)     • pulsar_clock (Phi-Folding)
   • drift_hunt / jerk_track     • fec_ghost (Soft Parity Boxplus)
@@ -105,19 +107,21 @@ The processed baseband streams were routed through the TurboKain 18-stage native
 [ Stage 18: Full HD Diagnostic Dashboard (waterfall) ]
 ```
 
-### 3.1 Dual-Polarization Spatial Subspace Nulling (`subspace_null`)
-Directional radio frequency interference (RFI) from near-field transmitters and terrestrial downlinks typically arrives polarized. For each time block $b$, the spatial covariance matrix between feeds $X$ and $Y$ is:
-$$\mathbf{R} = \frac{1}{L} \sum_{l=0}^{L-1} \mathbf{v}[l] \mathbf{v}^H[l], \quad \mathbf{v}[l] = \begin{bmatrix} v_X[l] \\ v_Y[l] \end{bmatrix}$$
-An exact closed-form analytical eigen-decomposition yields eigenvalues $\lambda_1 \ge \lambda_2 \ge 0$ and dominant eigenvector $\mathbf{u}_1$. When the condition ratio $\gamma = \lambda_1 / \lambda_2 \ge 5.0$, the dominant spatial mode is identified as polarized RFI, and an orthogonal projection operator:
+### 3.1 Dual-Polarization Eigen-Polarimetric Nulling (`subspace_null`)
+Directional radio frequency interference (RFI) from near-field transmitters and terrestrial downlinks typically arrives strongly polarized. For a single dish with dual orthogonal linear feeds $X$ and $Y$, the baseband stream defines a 2-dimensional complex polarization vector $\mathbf{v}[l] = [v_X[l], v_Y[l]]^T$. For each time block $b$, the sample polarization covariance matrix is:
+$$\mathbf{R} = \frac{1}{L} \sum_{l=0}^{L-1} \mathbf{v}[l] \mathbf{v}^H[l]$$
+An exact analytical Hermitian eigen-decomposition yields eigenvalues $\lambda_1 \ge \lambda_2 \ge 0$ and dominant eigenvector $\mathbf{u}_1$. The condition ratio $\gamma = \lambda_1 / \lambda_2$ quantifies polarization contrast: unpolarized thermal noise yields $\gamma \sim 1.0 - 2.5$, whereas highly polarized RFI produces $\gamma \ge 5.0$.
+
+When $\gamma \ge 5.0$, an orthogonal projection operator:
 $$\mathbf{P}^\perp = \mathbf{I} - \mathbf{u}_1 \mathbf{u}_1^H$$
-is applied to the baseband samples. This suppresses polarized RFI by $30 - 45\text{ dB}$ while preserving the continuous phase and celestial timing of unpolarized or orthogonal wave components.
+is constructed. To protect celestial sources that may themselves be highly polarized, $\mathbf{P}^\perp$ is audited against the cadence state: the projection is applied to excise directional RFI only when the dominant mode $\mathbf{u}_1$ is common across ON and OFF pointings, or when the Stokes parameters indicate terrestrial origin. Unpolarized thermal noise passes with $\mathbf{P}^\perp \equiv \mathbf{I}$, maintaining zero distortion across the celestial stream.
 
 ### 3.2 Inverted Spectral Kurtosis & Gaussian Perfection (`gauss_perfection`)
-In legacy pipelines, spectral kurtosis ($SK$) is utilized strictly as an excision veto: any channel with $SK \ne 1.0$ is discarded as RFI. In the Bystander framework, this logic is inverted. A transmitter operating at Shannon capacity shapes its symbol constellation and codebook such that its time-domain envelope achieves maximum entropy and perfect Gaussianity.
+In legacy search pipelines, spectral kurtosis ($SK$) is utilized strictly as an excision veto: any channel with $SK \ne 1.0$ is discarded as RFI. In the Bystander framework, this logic is inverted. A transmitter operating at Shannon capacity shapes its symbol constellation and codebook such that its time-domain envelope achieves maximum entropy and perfect Gaussianity.
 
-`gauss_perfection` evaluates the time-domain kurtosis $SK_t = m_4 / m_2^2$, 3-ordinal permutation entropy $H_1$, and Lempel-Ziv complexity $K_{\text{LZ}}$ across independent ON and OFF cadence pointings. A perfection figure of merit $Q$ is computed:
-$$Q = \frac{1}{|SK_t - 3.0| + \epsilon} \cdot H_1 \cdot C_{\text{common}}$$
-where $C_{\text{common}}$ is the cross-pointing common-mode correlation. When a signal holds Gaussianity to four decimal places ($|SK_t - 3.0| < 0.005$, $H_1 > 0.999$) in both ON and OFF pointings, it is escalated under the `PERFECT-COMMON` verdict, subjecting it to downstream channel authentication.
+`gauss_perfection` evaluates the time-domain kurtosis $SK_t = m_4 / m_2^2$ (which equals $3.0$ for a zero-mean Gaussian distribution), the mean STFT spectral kurtosis $\langle SK(f) \rangle$ across frequency bins (which equals $1.0$ for Gaussian noise), 3-ordinal permutation entropy $H_1$, and Lempel-Ziv complexity $K_{\text{LZ}}$ across independent ON and OFF cadence pointings. A perfection figure of merit $Q$ is computed:
+$$Q = \frac{H_1}{\left| \frac{SK_t}{3.0} - 1.0 \right| + \epsilon} \cdot C_{\text{common}}$$
+where $\epsilon = 10^{-6}$ prevents singularity and $C_{\text{common}}$ is the cross-pointing common-mode flag. When a signal maintains time-domain Gaussianity to within four decimal places ($\left|SK_t/3.0 - 1.0\right| < 0.005$, $H_1 > 0.999$) in both ON and OFF pointings, it is escalated under the `PERFECT-COMMON` verdict, subjecting it to downstream channel authentication.
 
 ### 3.3 Blind Soft-Decision Dual-Code Sieve (`fec_ghost`)
 Linear block codes $[n, k]$ and Low-Density Parity-Check (LDPC) codes enforce linear parity constraints over the Galois field $\mathbb{F}_2$:
@@ -128,7 +132,7 @@ Rather than searching the intractable space of all generator matrices, `fec_ghos
 
 For a given mask $\mathbf{m}_j$, the syndrome expectation is computed using the Gallager boxplus product:
 $$S(\mathbf{m}_j) = \mathbb{E}\left[ \prod_{i \in \text{supp}(\mathbf{m}_j)} \tanh\left( \frac{y_i}{2\sigma^2} \right) \right]$$
-For unconstrained thermal Gaussian noise, the symmetry of the soft symbol distribution dictates $\mathbb{E}[S] \equiv 0$, with variance $\sigma_S^2 = m_2^{w/2} / N_{\text{block}}$. When a physical parity-check constraint is present, $S(\mathbf{m}_j)$ biases away from zero. Significance is evaluated via:
+For unconstrained thermal Gaussian noise, the symmetry of the soft symbol distribution dictates $\mathbb{E}[S] \equiv 0$, with variance $\sigma_S^2 = (\mathbb{E}[\tanh^2(y / (2\sigma^2))])^w / N_{\text{block}} \approx (m_2 / 4\sigma^4)^{w/2} / N_{\text{block}}$. When a physical parity-check constraint is present, $S(\mathbf{m}_j)$ biases away from zero. Significance is evaluated via:
 $$z = \frac{S(\mathbf{m}_j) \sqrt{N_{\text{block}}}}{\sigma_S}$$
 A candidate is flagged only if $z$ exceeds the trials-corrected Bonferroni threshold ($p_{\text{FA}} \le 10^{-6}$, corresponding to $z_{\text{gate}} \approx 6.66\sigma$ across $256$ masks, 8 temporal shifts, and 16 blocks).
 
@@ -136,14 +140,12 @@ A candidate is flagged only if $z$ exceeds the trials-corrected Bonferroni thres
 A terrestrial or instrumental transmitter does not propagate through the interstellar plasma. In contrast, an astronomical emission originating from TRAPPIST-1 ($d = 12.14\text{ pc}$, galactic dispersion measure $\text{DM} \approx 0.363\text{ pc cm}^{-3}$) must traverse the cold, magnetized, turbulent interstellar medium (ISM; Rickett 1990; Cordes & Lazio 2002).
 
 `ism_stamp` computes the 2D dynamic intensity autocorrelation function (ACF) $R_I(\Delta t, \Delta\nu)$ across $N_{\text{sb}} = 8$ contiguous frequency sub-bands:
-1. **Diffractive Scintillation Scaling**: It extracts the decorrelation bandwidth $\Delta\nu_d$ (half-width at half-maximum) and scintillation timescale $\Delta t_d$ (half-width at $1/e$). For a Kolmogorov turbulence spectrum, these parameters must satisfy the power-law relation:
+1. **Diffractive Scintillation Scaling (DISS)**: In the strong scattering regime ($\nu \ll \nu_{\text{trans}}$), a point source exhibits diffractive decorrelation bandwidth $\Delta\nu_d$ (half-width at half-maximum) and scintillation timescale $\Delta t_d$ (half-width at $1/e$) that scale with Kolmogorov turbulence:
    $$\Delta\nu_d(\nu) \propto \nu^p, \quad p = 4.4 \pm 0.5$$
    $$\Delta t_d(\nu) \propto \nu^q, \quad q = 1.2 \pm 0.5$$
-   A reduced $\chi^2$ grid fit evaluates whether the measured decorrelation scales with the theoretical Kolmogorov exponent.
+   **Weak Scattering Regime at 12 pc:** For TRAPPIST-1, the line of sight traverses the Local Interstellar Chimney with very low electron column density ($\text{DM} \approx 0.363\text{ pc cm}^{-3}$). The transition frequency between strong and weak scattering is $\nu_{\text{trans}} \lesssim 100 - 300\text{ MHz}$. Consequently, at our observing frequencies ($2.1 - 12.0\text{ GHz}$), radio propagation is in the **weak scattering regime** ($\nu \gg \nu_{\text{trans}}$). In weak scattering, diffractive speckles do not form ($\Delta\nu_d \gg \nu$, modulation index $m_d \ll 1$), and intensity variations are dominated by refractive scintillation (RISS) over timescales of weeks. Therefore, the absence of a fine-scale DISS speckle pattern at 8 GHz cannot rule out a celestial origin for TRAPPIST-1; pointing invariance (ON vs. OFF contrast) serves as the primary discriminator.
 2. **Faraday Rotation Synthesis**: Dual-polarization complex cross-visibilities $\mathcal{V} = v_X v_Y^*$ are mapped against a rotation measure grid $\text{RM} \in [-500, +500]\text{ rad m}^{-2}$ to test for interstellar Faraday rotation.
 3. **Dispersion Arrival Slope**: Sub-band arrival times are tested for the cold-plasma dispersion relation $\Delta t \propto \nu^{-2}$.
-
-A candidate is certified as `STAMPED` only if $p = 4.4 \pm 0.5$, $\chi^2 \le 2.0$, and the scintillation parameters decorrelate between sub-bands ($\Delta\nu_d < \Delta f_{\text{band}}$). Local terrestrial RFI exhibits infinite decorrelation bandwidth ($\Delta\nu_d \to \infty$) or broadband simultaneity ($\Delta\nu_d \equiv \Delta f_{\text{chan}}$), failing the stamp test.
 
 ### 3.5 Galactic Timebase Re-timing (`pulsar_clock`)
 Civilizations intending to maintain synchronization across interstellar baselines without shared ephemerides may synchronize transmissions to celestial clocks visible throughout the Galaxy: millisecond pulsars (e.g., PSR B1937+21, PSR J0437-4715).
@@ -177,7 +179,7 @@ Total            1024      711 (69.4%)       302 (29.5%)       11 (1.1%)
 No drifting continuous-wave carriers were detected across the entire $750\text{ MHz}$ survey: `drift_hunt` retained zero candidates above the $6\sigma$ detection threshold ($\text{hits} = 0$).
 
 ### 4.1 Forensic Diagnosis of the 1,430.5 Hz Sampling Comb
-A total of $302$ channel observations triggered `ACTIVITY-FLAG` status, with $289$ flags ($95.7\%$) originating from cyclic spectral baud line detections in `fam_god`.
+A total of $302$ channel observations triggered `ACTIVITY-FLAG` status (Table 2), with $289$ flags ($95.7\%$) originating from cyclic spectral baud line detections in `fam_god`.
 
 When mapped across frequency space, the detected cyclic frequencies $\alpha$ do not correspond to physical baud rates of an independent transmitter. Instead, they form an exact, invariant arithmetic ladder:
 $$\alpha_k = \alpha_0 + k \cdot \Delta f$$
@@ -186,7 +188,7 @@ $$\Delta f = 1,430.518\text{ Hz}$$
 Cross-referencing this spacing with the GUPPI digitization architecture reveals its physical origin:
 $$\Delta f_{\text{hum}} = \frac{f_s}{131,072} = \frac{2,929,687.5\text{ Hz}}{131,072} = 22.35174\text{ Hz}$$
 $$64 \times \Delta f_{\text{hum}} = 64 \times 22.35174\text{ Hz} = 1,430.511\text{ Hz}$$
-The detected lines represent the exact $64^{\text{th}}$ harmonic sub-comb of the GUPPI analog-to-digital converter's hardware sampling clock. This comb is common to both ON and OFF pointings, invariant across all four receiver bands, and is definitively categorized as **instrumental sampling comb intermodulation**.
+The detected lines represent the exact $64^{\text{th}}$ harmonic sub-comb of the GUPPI analog-to-digital converter's hardware sampling clock. This comb is common to both ON and OFF pointings, invariant across all four receiver bands, and is definitively categorized as **instrumental sampling comb intermodulation** (see Figure 2).
 
 ![Figure 1: High-Density Diagnostic Dashboard for X-Band Channel 49 (7959 MHz)](figures/figure1_xband_thermal_waterfall.png)
 *Figure 1: TurboKain science dashboard for X-band Channel 49 ($7,959.0\text{ MHz}$) during Epoch 2 Chunk 1. Panel 1: Mean power bandpass showing flat Gaussian thermal noise floor ($+0.1\text{ dB}$ margin). Panel 2: Dynamic spectrum heatmap across 512 half-spectrum bins from $7,959.0\text{ MHz}$ to $7,960.4\text{ MHz}$. Panel 3: Total power envelope $P(t)$ (fluctuation $<0.3\text{ dB}$). Panel 4: Spectral kurtosis $SK(f) = 1.000$ across all bins. Panel 5--8: Telemetry HUD showing honest negative receipts (`NOISE FLOOR RECEIPT: PASS`).*
@@ -203,13 +205,13 @@ In each instance, `pulsar_clock` flagged `CLOCK-CANDIDATE`, and `gauss_perfectio
 $$z_\phi = 18.87\sigma \quad \text{and} \quad z_{\text{UTC}} = 18.87\sigma \quad (\Delta z \equiv 0.00\sigma)$$
 Because the signal folded with identical statistical significance in both topocentric UTC and pulsar phase, there is zero pulsar phase coherence. The feature represents an **unmodulated local oscillator (LO) DC bias spike** at the zero-frequency bin of the polyphase filterbank, which folds identically under any periodic timebase.
 
-### 4.3 Triage of X-Band Gaussian Perfection Candidates (Channels 24 & 49)
-Five candidates were flagged in the X-band ($7,907.7\text{ MHz}$) at Channel 23 ($7,882.8\text{ MHz}$), Channel 24 ($7,885.7\text{ MHz}$), and Channel 49 ($7,959.0\text{ MHz}$). These channels triggered `gauss_perfection` with extraordinary $Q$ figures of merit ranging from $367.7$ to $815.2$ (`PERFECT-COMMON`).
+### 4.3 Triage of X-Band Gaussian Perfection Candidates (Channels 23, 24, & 49)
+Five candidates were flagged in the X-band ($7,907.7\text{ MHz}$) at Channel 23 ($7,882.8\text{ MHz}$), Channel 24 ($7,885.7\text{ MHz}$), and Channel 49 ($7,959.0\text{ MHz}$). These channels triggered `gauss_perfection` with high $Q$ figures of merit ranging from $367.7$ to $815.2$ (`PERFECT-COMMON`).
 
 Forensic analysis of the baseband telemetry revealed:
-1. **Mathematical Gaussianity**: The channels exhibited time-domain kurtosis $SK_t = 1.072 - 1.075$, permutation entropy $H_1 = 0.999$, and LZW complexity $K_{\text{LZ}} = 1.009 - 1.041$. The channel noise is so pristinely devoid of RFI that $|SK_t - 3.0|$ dropped to $\sim 0.001$, causing the denominator of $Q$ to minimize and inflating the perfection index.
-2. **Absence of Interstellar Scintillation**: Running `ism_stamp` on Channel 49 yielded decorrelation bandwidth $\Delta\nu_d = 0.0\text{ Hz}$, $p = 0.0$, and rotation measure $\text{RM} = 0.0\text{ rad m}^{-2}$, failing the Kolmogorov DISS screen requirement.
-3. **Identical Soft-Parity Floor**: Evaluating `fec_ghost` over Channel 49 revealed a soft parity bias of $z = 7.11\sigma$ on the ON pointing and $z = 7.12\sigma$ on the OFF pointing. Because the parity score is invariant to antenna pointing and devoid of ISM dispersion, it represents the **digitizer's 8-bit quantization noise floor**, not an interstellar transmission. Because `stamp` was null, `fec_ghost` correctly capped the verdict at `RESIDUE`, preventing a false claim.
+1. **Mathematical Gaussianity**: Across STFT frequency bins, the channels exhibited mean spectral kurtosis $\langle SK(f) \rangle = 1.072 - 1.075$, while the time-domain kurtosis was $SK_t \approx 3.0036$. The normalized time-domain deviation was $\left|SK_t/3.0 - 1.0\right| \approx 0.0012$ (logged in telemetry as $\texttt{sk\_t\_x1e4} = 12$), permutation entropy $H_1 = 0.999$, and LZW complexity $K_{\text{LZ}} = 1.009 - 1.041$. The channel noise is so pristinely devoid of RFI that the denominator of $Q$ dropped to $\sim 0.0012$, inflating the perfection index into the hundreds (Figure 1).
+2. **Absence of Channel Modulation**: Running `ism_stamp` on Channel 49 yielded decorrelation bandwidth $\Delta\nu_d = 0.0\text{ Hz}$, $p = 0.0$, and rotation measure $\text{RM} = 0.0\text{ rad m}^{-2}$. As established in Section 3.4, the 12 pc path length is in weak scattering, meaning diffractive modulation is physically expected to be absent.
+3. **Identical Soft-Parity Floor**: Evaluating `fec_ghost` over Channel 49 revealed a soft parity bias of $z = 7.11\sigma$ on the ON pointing and $z = 7.12\sigma$ on the OFF pointing ($\Delta z = 0.01\sigma$). Because the parity score is invariant to antenna pointing and devoid of temporal evolution, it represents the **digitizer's 8-bit quantization noise floor**, not an interstellar transmission. Because `stamp` was null, `fec_ghost` correctly capped the verdict at `RESIDUE`, preventing a false claim.
 
 ---
 
@@ -253,19 +255,21 @@ Ku-Band          11.982       20.0        35.46 Jy      625.2 GW    1070.2 TW   
 ====================================================================================================================
 ```
 
-These rigorous thresholds rule out any continuous narrowband transmitter exceeding **$41.8\text{ GW}$ at S-band** or **$83.6\text{ GW}$ at Ku-band** over the cumulative dwell, and wideband spread-spectrum communications exceeding **$71.6\text{ TW}$ at S-band** or **$143.2\text{ TW}$ at Ku-band**. Under instantaneous single-chunk detection ($5.73\text{ s}$), transmitters are bounded to $\le 535.1\text{ TW}$ at S-band and $\le 1,070.2\text{ TW}$ at Ku-band. For comparison, the planetary radar at the Arecibo Observatory possessed an effective peak EIRP of $\sim 20\text{ TW}$ at $2.38\text{ GHz}$, and the Goldstone Solar System Radar (DSS-14) operates at $\sim 10\text{ TW}$ at $8.56\text{ GHz}$. Our results demonstrate that no planetary radar or directed inter-planet microwave communications link comparable to terrestrial deep-space radar facilities was active and beamed toward Earth during these observations.
+These thresholds (Table 3) rule out any continuous narrowband transmitter exceeding **$41.8\text{ GW}$ at S-band** or **$83.6\text{ GW}$ at Ku-band** over the cumulative dwell, and wideband spread-spectrum communications exceeding **$71.6\text{ TW}$ at S-band** or **$143.2\text{ TW}$ at Ku-band**. Under instantaneous single-chunk detection ($5.73\text{ s}$), transmitters are bounded to $\le 535.1\text{ TW}$ at S-band and $\le 1,070.2\text{ TW}$ at Ku-band.
+
+For comparison, our narrowband limits at S-band ($\le 41.8\text{ GW}$) are consistent with the L-band CW limits reported by Pinchuk et al. (2019) ($\sim 47\text{ GW}$) and Margot et al. (2021). However, this work establishes the **first wideband spread-spectrum and blind FEC coding EIRP limits** for TRAPPIST-1, extending coverage into the X-band ($7.9\text{ GHz}$) and Ku-band ($12.0\text{ GHz}$). In comparison to terrestrial planetary radars, the planetary radar at the Arecibo Observatory possessed an effective peak EIRP of $\sim 20\text{ TW}$ at $2.38\text{ GHz}$, and the Goldstone Solar System Radar (DSS-14) operates at $\sim 10\text{ TW}$ at $8.56\text{ GHz}$. Our results demonstrate that no planetary radar or high-capacity directed inter-planet microwave communications link comparable to terrestrial deep-space facilities was active and beamed across Earth's line of sight during these observations.
 
 ---
 
 ## 6. Discussion: Overcoming the Blind Spot of Legacy SETI
 
-This survey demonstrates the practical operational deployment of the *Bystander Information-Theoretic Framework*. 
+This survey demonstrates the practical operational deployment of the *Bystander Information-Theoretic Framework*.
 
 Traditional SETI pipelines discard signals that look like noise. In doing so, they engineer a profound systematic selection bias: **they search exclusively for civilizations that deliberately waste energy shouting continuous tones at Earth.** If technological civilizations optimize their communications according to the fundamental laws of information theory, their signals will occupy wide bandwidths, exhibit statistical Gaussianity ($SK \to 1.0$), and maximize entropy.
 
 By deploying `fec_ghost`, `ism_stamp`, and `gauss_perfection`, this survey established that:
 1. Shannon-camouflaged spread-spectrum traffic can be tested directly in baseband data without knowing the modulation constellation or codebook.
-2. The interstellar medium acts as an immutable physical filter. Requiring a Kolmogorov DISS scaling receipt ($\nu^{4.4}$) immediately eliminates near-field terrestrial interference without relying solely on simple ON/OFF spatial pointing comparisons.
+2. Interstellar plasma propagation regimes must be matched to target distance: while Kolmogorov DISS scaling ($\nu^{4.4}$) is the gold standard for distant galactic beacons ($d \gtrsim 100\text{ pc}$), targets within the Local Bubble ($d \sim 12\text{ pc}$) at microwave frequencies reside in weak scattering, where pointing invariance is the essential discriminator.
 3. Instrumental artifacts such as ADC sampling combs and PFB DC center spikes can be quantitatively cataloged and diagnosed through exact arithmetic harmonic matching rather than subjective threshold tuning.
 
 ---
@@ -291,6 +295,7 @@ The complete, zero-dependency TurboKain native signal processing engine, formal 
 * MacKay, D. J. C. 1999, IEEE Trans. Inf. Theory, 45, 399
 * Margot, J.-L., Pinchuk, P., Geil, R., et al. 2021, AJ, 161, 55
 * Ozaktas, H. M., Zalevsky, Z., & Kutay, M. A. 2001, The Fractional Fourier Transform (John Wiley & Sons)
+* Pinchuk, P., Margot, J.-L., Greenberg, A. H., et al. 2019, AJ, 157, 122
 * Price, D. C., Enriquez, J. E., Brzycki, B., et al. 2020, AJ, 159, 86
 * Rickett, B. J. 1990, ARA&A, 28, 561
 * Rosso, O. A., Larrondo, H. A., Martin, M. T., Plastino, A., & Fuentes, M. A. 2007, PRL, 99, 154102
