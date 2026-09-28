@@ -13,6 +13,8 @@
 *A native, whole-program optimized, formally verified digital signal processing engine for astronomical baseband recordings.*
 
 > ✉️ **Contact for researchers:** Interested in collaborating, reviewing methods, or requesting data access? Reach us at **taylor@kainlang.com**.
+>
+> ⚙️ **Built in Kain:** TurboKain is written natively in [Kain](https://github.com/kainlang/kain) — compiler, stdlib, and language repo at **[github.com/kainlang/kain](https://github.com/kainlang/kain)**.
 
 > 📘 **Documentation Directory:**
 > - **[User Guide (`docs/USER_GUIDE.md`)](docs/USER_GUIDE.md)** — Complete operational handbook, configuration parameters, and workflow walkthroughs.
