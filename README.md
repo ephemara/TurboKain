@@ -12,6 +12,8 @@
 ### High-Throughput Coherent Radio Technosignature & Bystander Traffic Pipeline
 *A native, whole-program optimized, formally verified digital signal processing engine for astronomical baseband recordings.*
 
+> ✉️ **Contact for researchers:** Interested in collaborating, reviewing methods, or requesting data access? Reach us at **taylor@kainlang.com**.
+
 > 📘 **Documentation Directory:**
 > - **[User Guide (`docs/USER_GUIDE.md`)](docs/USER_GUIDE.md)** — Complete operational handbook, configuration parameters, and workflow walkthroughs.
 > - **[Waterfall Diagnostic Gallery (`docs/waterfall_examples/`)](docs/waterfall_examples/)** — Gallery of 1920×1080 scientific dynamic spectrum renders.
