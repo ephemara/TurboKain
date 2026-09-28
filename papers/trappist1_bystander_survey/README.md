@@ -1,4 +1,4 @@
-# A Multi-Band Bystander Technosignature Survey of TRAPPIST-1: Deep Microwave Limits on Coded Spread-Spectrum Traffic and Galactic Clocks
+# A Multi-Window Baseband Pilot Survey of TRAPPIST-1: Limits on Narrowband and Coded Spread-Spectrum Emission at 2-12 GHz
 
 **Folder:** `papers/trappist1_bystander_survey/`  
 **Target:** TRAPPIST-1 (2MASS J23062928-0502285)  
@@ -6,7 +6,7 @@
 **Telescope:** Robert C. Byrd Green Bank Telescope (100 m)  
 **Survey Volume:** 732.1 GB raw GUPPI baseband voltages across 4 microwave bands (2.1 to 12.0 GHz)  
 **Total Channels Swept:** 1,024 dual-polarization observations  
-**Status:** Complete / Fully Replicable / Ready for Pre-print (arXiv/RNAAS/AJ)
+**Status:** Revised pilot draft (2026-09-28) — honest negative, methods pilot. Peer-review pass complete; injection calibration + DOI bundle deferred (see manuscript §7). Suitable for RNAAS / methods note now; AJ-track after §7 punch list.
 
 ---
 
