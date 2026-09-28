@@ -1,0 +1,1066 @@
+// ============================================================================
+// pulsar_clock.kn — TurboKain Tool 3: galactic re-timer (fold in pulsar
+// phase, not UTC).
+//
+// A monument that wants late listeners from ANY star uses a clock every star
+// can see: millisecond pulsars (B1937+21, J0437-4715, J1713+0747 ensemble).
+// Voltages chopped on a shared galactic timebase are jittered noise in UTC
+// and coherent in pulsar phase. This tool is a TRANSFORM, not a detector:
+// MJD/UTC -> barycentric correction (low-order Earth-ephemeris series passed
+// as argv/data, never baked) -> resample t -> pulsar-phase phi via
+//   phi(t) = (tb-t0)*f + 1/2*(tb-t0)^2*fdot
+// (nearest + linear lanes under converge retime) -> emit retimed.f32 +
+// phi-fold profile + phi-frame spectrum. Claims come from downstream
+// receipts in phi-domain; this tool reports coherence contrast (phi vs UTC)
+// plus the hum-smear falsifier (UTC-locked backend hum is phi-incoherent,
+// so retiming smears it — hum suppression as a feature, receipt included).
+//
+// Preset table (B1937+21 / J0437-4715 / J1713+0747 / ENSEMBLE) is DATA:
+// fully overridable via --psr-f/--psr-fdot/--t0. Ephemeris series likewise
+// via --bary-a1/--bary-t/--bary-a2 (defaults: no correction, honest).
+//
+// Time axis is slice-relative (t = i/fs, t0 default 0); --mjd is provenance
+// only. Laws: ephemeris_ok, hum_smear_ok (>=3 dB or CLOCK-SUSPECT),
+// phi_coverage_ok (else GAPPED). Verdicts: CLOCK-CANDIDATE (phi-coherent +
+// hum smeared-or-absent) / UTC-ONLY / GAPPED / CLEAN.
+//
+//   core pulsar_clock --in <f32> [--fs HZ] [--mjd F] [--psr NAME]
+//     [--psr-f F --psr-fdot F --t0 F] [--bary-a1 S --bary-t S --bary-a2 S]
+//     [--out <stem>] [--csv <csv>] [--data-dir D] [--json] [--prove]
+//
+// Outputs: <stem>.retimed.f32 + <stem>.fold.csv (phase_bin,power_x100,
+// z_x100) + clock csv (psr,coverage_pc,hum_drop_db,peak_bin,verdict).
+// Exit 0 searched / 1 help-or-prove-FAIL / 2 error.
+//
+// Bled-for notes: +32 Byte arenas; one decay per arena per fn (error paths
+// LEAK, OS reclaims — slice.kn precedent); scaled ints on every table
+// (str(Float) truncates); nested ifs for argv (and/or don't short-circuit);
+// loop kernels inline or in LARGE callees only (small ptr-loop callees
+// crashed: boxcar_bank/xvm_sandbox precedent — run_clock/hum_probe/
+// frame_peak are large and own or borrow arenas, scalar helpers are fns);
+// Float assumed f64 (phase needs >2^24 cycles; documented).
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+use _common::k_CreateFileA
+use _common::k_ReadFile
+use _common::k_GetFileSizeEx
+use _common::k_CloseHandle
+use _common::k_GetLastError
+use _common::null_ptr
+use _common::GEN_READ
+use _common::OPEN_EXISTING
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::FS_HZ
+use _common::bref
+use _common::bstore
+use _common::parse_int_text
+use _common::parse_float_text
+use _common::find_from
+use _common::f32_of_quad
+use _common::sk_fft
+use _common::median_of
+use _common::write_bin_file
+
+// ── Geometry / gates (data-grade constants with receipts, not tuning) ───────
+const PHI_NB: Int = 64
+const SIG_THRESH: Float = 6.0
+const HUM_RATIO_MIN: Float = 20.0
+const HUM_DROP_MIN_X100: Int = 300
+const COV_MIN_PC: Int = 90
+const PC_ENV_FS: Float = 6000.0
+const PC_SEG: Int = 65536
+
+// ── Laws ────────────────────────────────────────────────────────────────────
+law ephemeris_ok(a1x100: Int, perx100: Int) -> Bool:
+    return a1x100 >= -60000 and a1x100 <= 60000 and perx100 > 0
+
+law hum_smear_ok(drop_db_x100: Int) -> Bool:
+    return drop_db_x100 >= 300
+
+law phi_coverage_ok(cov_pc: Int) -> Bool:
+    return cov_pc >= 90
+
+// ── Scalar helpers (effect-free shapes; ptr-loop kernels stay inline in ────
+// ── large callees per the boxcar_bank small-callee crash precedent) ─────────
+fn phase_of(tb: Float, t0: Float, f: Float, fd: Float) -> Float:
+    let dt: Float = tb - t0
+    return dt * f + 0.5 * dt * dt * fd
+
+fn bary_of(t: Float, a1: Float, per: Float, a2: Float) -> Float:
+    if per <= 0.0:
+        return t
+    let w: Float = 6.283185307179586 * t / per
+    return t + a1 * sin(w) + a2 * sin(w + w)
+
+fn log2_pos(r: Float) -> Float:
+    if r <= 0.0:
+        return -90.0
+    var k: Int = 0
+    var m: Float = r
+    while m >= 2.0:
+        m = m / 2.0
+        k = k + 1
+    while m < 1.0:
+        m = m * 2.0
+        k = k - 1
+    var f: Float = 0.0
+    var step: Float = 0.5
+    var it: Int = 0
+    while it < 24:
+        m = m * m
+        if m >= 2.0:
+            m = m / 2.0
+            f = f + step
+        step = step / 2.0
+        it = it + 1
+    return (k as Float) + f
+
+fn sqrt_newton(v: Float) -> Float:
+    if v <= 0.0:
+        return 0.0
+    var g: Float = v
+    if g < 1.0:
+        g = 1.0
+    var sit: Int = 0
+    while sit < 20:
+        g = 0.5 * (g + v / g)
+        sit = sit + 1
+    return g
+
+fn db10_of_ratio(r: Float) -> Float:
+    if r <= 0.0:
+        return -900.0
+    return 10.0 * log2_pos(r) / 3.321928094887362
+
+fn pclock_float_to_f32bits(v: Float) -> Int:
+    if v == 0.0:
+        return 0
+    var sign: Int = 0
+    var x: Float = v
+    if x < 0.0:
+        sign = 1
+        x = 0.0 - x
+    var exp: Int = 127
+    while x >= 2.0:
+        x = x / 2.0
+        exp = exp + 1
+    while x < 1.0:
+        x = x * 2.0
+        exp = exp - 1
+    if exp <= 0:
+        return sign * 2147483648
+    if exp >= 255:
+        return sign * 2147483648 + 255 * 8388608
+    let mant: Int = ((x - 1.0) * 8388608.0) as Int
+    return sign * 2147483648 + exp * 8388608 + mant
+
+fn decide_verdict(phi_hot: Int, utc_hot: Int, hum_ok: Int, cov_ok: Int) -> Int:
+    if cov_ok == 0:
+        return 3
+    if phi_hot == 1:
+        if hum_ok == 1:
+            return 2
+        return 0
+    if utc_hot == 1:
+        return 1
+    return 0
+
+// ── converge retime: nearest (spec) vs linear (fast lane) ───────────────────
+fn retime_sample_spec(x0: Float, x1: Float, frac: Float) -> Float:
+    if frac < 0.5:
+        return x0
+    return x1
+
+converge retime(x0: Float, x1: Float, frac: Float) -> Float:
+    spec reference:
+        return retime_sample_spec(x0, x1, frac)
+    fast scalar_lane when target("llvm"):
+        return x0 + (x1 - x0) * frac
+    verify random(8)
+
+// ── Large callee 1: uniform-phi resample + phi/UTC folds + coverage ─────────
+// res[j] = x resampled on the uniform-phi grid (linear converge lane).
+// pc_prof[2*PHI_NB]: phi bin mean_x100, z_x100. res2[0..4]: phi_z, utc_z,
+// cov_pc, peak_bin, utc_peak_bin.
+fn run_clock(x: ptr<Float>, n: Int, fs: Float, f: Float, fd: Float, t0: Float, a1: Float, per: Float, a2: Float, res: ptr<Float>, pc_prof: ptr<Float>, res2: ptr<Float>) -> Int with Unsafe:
+    let tb0: Float = bary_of(0.0, a1, per, a2)
+    let tbE: Float = bary_of((n as Float) / fs, a1, per, a2)
+    let p0: Float = phase_of(tb0, t0, f, fd)
+    let pE: Float = phase_of(tbE, t0, f, fd)
+    var span: Float = pE - p0
+    if span <= 0.0:
+        span = 1.0
+    var j: Int = 0
+    while j < n:
+        let psi: Float = p0 + span * (j as Float) / (n as Float)
+        var tt: Float = t0 + (psi - p0) / f
+        var it: Int = 0
+        while it < 3:
+            let tb: Float = bary_of(tt, a1, per, a2)
+            let ph: Float = phase_of(tb, t0, f, fd)
+            let dph: Float = f + (tb - t0) * fd
+            var step: Float = 0.0
+            if dph != 0.0:
+                step = (ph - psi) / dph
+            tt = tt - step
+            it = it + 1
+        var spos: Float = tt * fs
+        if spos < 0.0:
+            spos = 0.0
+        if spos > ((n - 2) as Float):
+            spos = ((n - 2) as Float)
+        let i0: Int = spos as Int
+        let fr: Float = spos - (i0 as Float)
+        let xa: Float = mem_load(ptr_offset(x, i0, "Float"), "Float")
+        let xb: Float = mem_load(ptr_offset(x, i0 + 1, "Float"), "Float")
+        mem_store(ptr_offset(res, j, "Float"), retime(xa, xb, fr), "Float")
+        j = j + 1
+    let mut psum: ptr<Float> = alloc_zeroed(PHI_NB, "Float")
+    let mut pcnt: ptr<Float> = alloc_zeroed(PHI_NB, "Float")
+    let mut usum: ptr<Float> = alloc_zeroed(PHI_NB, "Float")
+    let mut ucnt: ptr<Float> = alloc_zeroed(PHI_NB, "Float")
+    let mut hit: ptr<Float> = alloc_zeroed(PHI_NB, "Float")
+    var i: Int = 0
+    var gsum: Float = 0.0
+    while i < n:
+        let t: Float = (i as Float) / fs
+        let tb: Float = bary_of(t, a1, per, a2)
+        let xv: Float = mem_load(ptr_offset(x, i, "Float"), "Float")
+        gsum = gsum + xv
+        let ph: Float = phase_of(tb, t0, f, fd)
+        var fr1: Float = ph - (((ph as Int) as Float))
+        if fr1 < 0.0:
+            fr1 = fr1 + 1.0
+        if fr1 >= 1.0:
+            fr1 = fr1 - 1.0
+        var b: Int = (fr1 * (PHI_NB as Float)) as Int
+        if b < 0:
+            b = 0
+        if b >= PHI_NB:
+            b = PHI_NB - 1
+        mem_store(ptr_offset(psum, b, "Float"), mem_load(ptr_offset(psum, b, "Float"), "Float") + xv, "Float")
+        mem_store(ptr_offset(pcnt, b, "Float"), mem_load(ptr_offset(pcnt, b, "Float"), "Float") + 1.0, "Float")
+        mem_store(ptr_offset(hit, b, "Float"), 1.0, "Float")
+        let u: Float = (t - t0) * f
+        var fr2: Float = u - (((u as Int) as Float))
+        if fr2 < 0.0:
+            fr2 = fr2 + 1.0
+        if fr2 >= 1.0:
+            fr2 = fr2 - 1.0
+        var bu: Int = (fr2 * (PHI_NB as Float)) as Int
+        if bu < 0:
+            bu = 0
+        if bu >= PHI_NB:
+            bu = PHI_NB - 1
+        mem_store(ptr_offset(usum, bu, "Float"), mem_load(ptr_offset(usum, bu, "Float"), "Float") + xv, "Float")
+        mem_store(ptr_offset(ucnt, bu, "Float"), mem_load(ptr_offset(ucnt, bu, "Float"), "Float") + 1.0, "Float")
+        i = i + 1
+    let mut pmean: ptr<Float> = alloc_zeroed(PHI_NB, "Float")
+    let mut umean: ptr<Float> = alloc_zeroed(PHI_NB, "Float")
+    let mut scr: ptr<Float> = alloc_zeroed(PHI_NB, "Float")
+    // Theoretical noise unit (lag_hunt lesson): never the measured global
+    // MAD of the profile — a strong coherent signal inflates its own unit
+    // and self-nulls (P2 sine self-nulled to z~1). se = MAD(x)/sqrt(M).
+    // MAD rides the first 65536 samples (stationary-noise assumption).
+    var mcap: Int = n
+    if mcap > 65536:
+        mcap = 65536
+    let mut nbuf: ptr<Float> = alloc_zeroed(mcap, "Float")
+    let mut nscr: ptr<Float> = alloc_zeroed(mcap, "Float")
+    var ci2: Int = 0
+    while ci2 < mcap:
+        mem_store(ptr_offset(nbuf, ci2, "Float"), mem_load(ptr_offset(x, ci2, "Float"), "Float"), "Float")
+        ci2 = ci2 + 1
+    let xmed: Float = median_of(nbuf, nscr, mcap)
+    ci2 = 0
+    while ci2 < mcap:
+        var dd: Float = mem_load(ptr_offset(nbuf, ci2, "Float"), "Float") - xmed
+        if dd < 0.0:
+            dd = 0.0 - dd
+        mem_store(ptr_offset(nbuf, ci2, "Float"), dd, "Float")
+        ci2 = ci2 + 1
+    let xmad: Float = median_of(nbuf, nscr, mcap)
+    decay nbuf
+    decay nscr
+    let mper: Float = (n as Float) / (PHI_NB as Float)
+    var se: Float = (1.4826 * xmad) / sqrt_newton(mper)
+    if se <= 0.0:
+        se = 0.000000000001
+    var cov: Int = 0
+    var k: Int = 0
+    let gmean: Float = gsum / (n as Float)
+    while k < PHI_NB:
+        let c: Float = mem_load(ptr_offset(pcnt, k, "Float"), "Float")
+        if c > 0.0:
+            mem_store(ptr_offset(pmean, k, "Float"), mem_load(ptr_offset(psum, k, "Float"), "Float") / c, "Float")
+        else:
+            mem_store(ptr_offset(pmean, k, "Float"), gmean, "Float")
+        let cu: Float = mem_load(ptr_offset(ucnt, k, "Float"), "Float")
+        if cu > 0.0:
+            mem_store(ptr_offset(umean, k, "Float"), mem_load(ptr_offset(usum, k, "Float"), "Float") / cu, "Float")
+        else:
+            mem_store(ptr_offset(umean, k, "Float"), gmean, "Float")
+        if mem_load(ptr_offset(hit, k, "Float"), "Float") > 0.5:
+            cov = cov + 1
+        k = k + 1
+    let pmed: Float = median_of(pmean, scr, PHI_NB)
+    let umed: Float = median_of(umean, scr, PHI_NB)
+    let pspread: Float = se
+    let uspread: Float = se
+    var phiz: Float = -1.0
+    var utcz: Float = -1.0
+    var pbin: Int = 0
+    var ubin: Int = 0
+    k = 0
+    while k < PHI_NB:
+        let dp: Float = mem_load(ptr_offset(pmean, k, "Float"), "Float") - pmed
+        var adp: Float = dp
+        if adp < 0.0:
+            adp = 0.0 - adp
+        let zp: Float = adp / pspread
+        mem_store(ptr_offset(pc_prof, k * 2, "Float"), mem_load(ptr_offset(pmean, k, "Float"), "Float") * 100.0, "Float")
+        mem_store(ptr_offset(pc_prof, k * 2 + 1, "Float"), zp * 100.0, "Float")
+        if zp > phiz:
+            phiz = zp
+            pbin = k
+        let du: Float = mem_load(ptr_offset(umean, k, "Float"), "Float") - umed
+        var adu: Float = du
+        if adu < 0.0:
+            adu = 0.0 - adu
+        let zu: Float = adu / uspread
+        if zu > utcz:
+            utcz = zu
+            ubin = k
+        k = k + 1
+    mem_store(ptr_offset(res2, 0, "Float"), phiz, "Float")
+    mem_store(ptr_offset(res2, 1, "Float"), utcz, "Float")
+    mem_store(ptr_offset(res2, 2, "Float"), ((cov * 100) / PHI_NB) as Float, "Float")
+    mem_store(ptr_offset(res2, 3, "Float"), (pbin as Float), "Float")
+    mem_store(ptr_offset(res2, 4, "Float"), (ubin as Float), "Float")
+    decay psum
+    decay pcnt
+    decay usum
+    decay ucnt
+    decay hit
+    decay pmean
+    decay umean
+    decay scr
+    return 0
+
+// ── Large callee 2: hum-family probe pre/post retime (Goertzel, inline) ─────
+// hres[0..3]: hum_present, drop_db_x100, hum_f_hz_x100, ratio_x100.
+fn hum_probe(x: ptr<Float>, res: ptr<Float>, n: Int, fs: Float, hres: ptr<Float>) -> Int with Unsafe:
+    var dec: Int = ((fs / PC_ENV_FS) + 0.5) as Int
+    if dec < 1:
+        dec = 1
+    var m: Int = n / dec
+    if m > PC_SEG:
+        m = PC_SEG
+    if m < 64:
+        mem_store(ptr_offset(hres, 0, "Float"), 0.0, "Float")
+        mem_store(ptr_offset(hres, 1, "Float"), 0.0, "Float")
+        mem_store(ptr_offset(hres, 2, "Float"), 0.0, "Float")
+        mem_store(ptr_offset(hres, 3, "Float"), 0.0, "Float")
+        return 0
+    let mut e0: ptr<Float> = alloc_zeroed(m, "Float")
+    let mut e1: ptr<Float> = alloc_zeroed(m, "Float")
+    var s0: Float = 0.0
+    var s1: Float = 0.0
+    var i: Int = 0
+    while i < m:
+        var a0: Float = 0.0
+        var a1v: Float = 0.0
+        var kk: Int = 0
+        while kk < dec:
+            let v0: Float = mem_load(ptr_offset(x, i * dec + kk, "Float"), "Float")
+            a0 = a0 + v0 * v0
+            let v1: Float = mem_load(ptr_offset(res, i * dec + kk, "Float"), "Float")
+            a1v = a1v + v1 * v1
+            kk = kk + 1
+        a0 = a0 / (dec as Float)
+        a1v = a1v / (dec as Float)
+        mem_store(ptr_offset(e0, i, "Float"), a0, "Float")
+        mem_store(ptr_offset(e1, i, "Float"), a1v, "Float")
+        s0 = s0 + a0
+        s1 = s1 + a1v
+        i = i + 1
+    s0 = s0 / (m as Float)
+    s1 = s1 / (m as Float)
+    i = 0
+    while i < m:
+        mem_store(ptr_offset(e0, i, "Float"), mem_load(ptr_offset(e0, i, "Float"), "Float") - s0, "Float")
+        mem_store(ptr_offset(e1, i, "Float"), mem_load(ptr_offset(e1, i, "Float"), "Float") - s1, "Float")
+        i = i + 1
+    let rate: Float = fs / (dec as Float)
+    var best_pre: Float = 0.0
+    var best_post: Float = 0.0
+    var best_f: Float = 0.0
+    var fi: Int = 0
+    while fi < 4:
+        var fq: Float = 22.35
+        if fi == 1:
+            fq = 44.70
+        elif fi == 2:
+            fq = 134.11
+        elif fi == 3:
+            fq = 178.81
+        let w: Float = 6.283185307179586 * fq / rate
+        let cc: Float = 2.0 * cos(w)
+        var q0: Float = 0.0
+        var q1: Float = 0.0
+        var q2: Float = 0.0
+        var r0: Float = 0.0
+        var r1: Float = 0.0
+        var r2: Float = 0.0
+        var g: Int = 0
+        while g < m:
+            let xv0: Float = mem_load(ptr_offset(e0, g, "Float"), "Float")
+            let nq0: Float = xv0 + cc * q1 - q2
+            q2 = q1
+            q1 = nq0
+            q0 = nq0
+            let xv1: Float = mem_load(ptr_offset(e1, g, "Float"), "Float")
+            let nr0: Float = xv1 + cc * r1 - r2
+            r2 = r1
+            r1 = nr0
+            r0 = nr0
+            g = g + 1
+        let pw0: Float = q1 * q1 + q2 * q2 - cc * q1 * q2
+        let pw1: Float = r1 * r1 + r2 * r2 - cc * r1 * r2
+        if pw0 > best_pre:
+            best_pre = pw0
+            best_post = pw1
+            best_f = fq
+        fi = fi + 1
+    var floorv: Float = 0.0
+    fi = 0
+    while fi < 3:
+        var fq2: Float = 31.0
+        if fi == 1:
+            fq2 = 57.0
+        elif fi == 2:
+            fq2 = 103.0
+        let w2: Float = 6.283185307179586 * fq2 / rate
+        let cc2: Float = 2.0 * cos(w2)
+        var t1: Float = 0.0
+        var t2: Float = 0.0
+        var g2: Int = 0
+        while g2 < m:
+            let xvv: Float = mem_load(ptr_offset(e0, g2, "Float"), "Float")
+            let nq: Float = xvv + cc2 * t1 - t2
+            t2 = t1
+            t1 = nq
+            g2 = g2 + 1
+        floorv = floorv + (t1 * t1 + t2 * t2 - cc2 * t1 * t2)
+        fi = fi + 1
+    floorv = floorv / 3.0
+    if floorv <= 0.0:
+        floorv = 0.000000000001
+    let ratio: Float = best_pre / floorv
+    var present: Float = 0.0
+    if ratio >= HUM_RATIO_MIN:
+        present = 1.0
+    var drop: Float = 0.0
+    if best_post > 0.0:
+        drop = db10_of_ratio(best_pre / best_post)
+    else:
+        drop = 60.0
+    mem_store(ptr_offset(hres, 0, "Float"), present, "Float")
+    mem_store(ptr_offset(hres, 1, "Float"), drop * 100.0, "Float")
+    mem_store(ptr_offset(hres, 2, "Float"), best_f * 100.0, "Float")
+    mem_store(ptr_offset(hres, 3, "Float"), ratio * 100.0, "Float")
+    decay e0
+    decay e1
+    return 0
+
+// ── Large callee 3: phi-frame spectrum (envelope-of-retimed spectrum) ───────
+// fres[0..1]: frame peak freq_hz_x100, z_x100.
+fn frame_peak(res: ptr<Float>, n: Int, fs: Float, fres: ptr<Float>) -> Int with Unsafe:
+    var dec: Int = ((fs / PC_ENV_FS) + 0.5) as Int
+    if dec < 1:
+        dec = 1
+    var m: Int = n / dec
+    if m > PC_SEG:
+        m = PC_SEG
+    if m < 64:
+        mem_store(ptr_offset(fres, 0, "Float"), 0.0, "Float")
+        mem_store(ptr_offset(fres, 1, "Float"), 0.0, "Float")
+        return 0
+    var nfft: Int = 16
+    while nfft < m:
+        nfft = nfft * 2
+    let mut re: ptr<Float> = alloc_zeroed(nfft, "Float")
+    let mut im: ptr<Float> = alloc_zeroed(nfft, "Float")
+    var s: Float = 0.0
+    var i: Int = 0
+    while i < m:
+        var a: Float = 0.0
+        var kk: Int = 0
+        while kk < dec:
+            let v: Float = mem_load(ptr_offset(res, i * dec + kk, "Float"), "Float")
+            a = a + v * v
+            kk = kk + 1
+        a = a / (dec as Float)
+        mem_store(ptr_offset(re, i, "Float"), a, "Float")
+        s = s + a
+        i = i + 1
+    s = s / (m as Float)
+    i = 0
+    while i < m:
+        let w: Float = 0.5 * (1.0 - cos(6.283185307179586 * (i as Float) / (((m - 1) as Float))))
+        mem_store(ptr_offset(re, i, "Float"), (mem_load(ptr_offset(re, i, "Float"), "Float") - s) * w, "Float")
+        i = i + 1
+    let frc: Int = sk_fft(re, im, nfft)
+    if frc != 0:
+        mem_store(ptr_offset(fres, 0, "Float"), 0.0, "Float")
+        mem_store(ptr_offset(fres, 1, "Float"), 0.0, "Float")
+        decay re
+        decay im
+        return 0
+    let nb: Int = nfft / 2 + 1
+    let mut pw: ptr<Float> = alloc_zeroed(nb, "Float")
+    let mut scr2: ptr<Float> = alloc_zeroed(nb, "Float")
+    var b: Int = 0
+    while b < nb:
+        let rv: Float = mem_load(ptr_offset(re, b, "Float"), "Float")
+        let iv: Float = mem_load(ptr_offset(im, b, "Float"), "Float")
+        mem_store(ptr_offset(pw, b, "Float"), rv * rv + iv * iv, "Float")
+        b = b + 1
+    decay re
+    decay im
+    let rate: Float = fs / (dec as Float)
+    let df: Float = rate / (nfft as Float)
+    let med: Float = median_of(pw, scr2, nb)
+    var mad2: Float = 0.0
+    b = 0
+    while b < nb:
+        var d: Float = mem_load(ptr_offset(pw, b, "Float"), "Float") - med
+        if d < 0.0:
+            d = 0.0 - d
+        mem_store(ptr_offset(scr2, b, "Float"), d, "Float")
+        b = b + 1
+    let mad: Float = median_of(scr2, pw, nb)
+    var spread: Float = 1.4826 * mad
+    if spread <= 0.0:
+        spread = 0.000000000001
+    var bf: Float = 0.0
+    var bz: Float = -1.0
+    b = 2
+    while b < nb:
+        let z: Float = (mem_load(ptr_offset(pw, b, "Float"), "Float") - med) / spread
+        if z > bz:
+            bz = z
+            bf = (b as Float) * df
+        b = b + 1
+    mem_store(ptr_offset(fres, 0, "Float"), bf * 100.0, "Float")
+    mem_store(ptr_offset(fres, 1, "Float"), bz * 100.0, "Float")
+    decay pw
+    decay scr2
+    return 0
+
+pub fn pulsar_clock_usage() -> String:
+    var t: String = "pulsar_clock 0.1.0 — TurboKain galactic re-timer (Tool 3)\n"
+    t = t + "MJD/UTC -> barycentric correction -> resample t to pulsar phase\n"
+    t = t + "phi(t)=(tb-t0)*f+1/2*(tb-t0)^2*fdot (converge retime lanes) ->\n"
+    t = t + "retimed.f32 + phi-fold profile + phi-frame spectrum.\n"
+    t = t + "Verdicts: CLOCK-CANDIDATE (phi-coherent + hum smeared-or-absent)\n"
+    t = t + "  / UTC-ONLY / GAPPED / CLEAN. Hum smear is a falsifier receipt.\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  pulsar_clock --in <f32> --fs HZ [--mjd F] [--psr NAME]\n"
+    t = t + "    [--psr-f F --psr-fdot F --t0 F] [--bary-a1 S --bary-t S --bary-a2 S]\n"
+    t = t + "    [--out <stem>] [--csv <csv>] [--data-dir D] [--json] [--prove]\n"
+    t = t + "  --psr: B1937+21 | J0437-4715 | J1713+0747 | ENSEMBLE (data table,\n"
+    t = t + "    overridable; --psr-f/--psr-fdot/--t0 win when given).\n"
+    t = t + "\n"
+    t = t + "EXIT CODES: 0 searched, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+pub fn pulsar_clock_prove() -> Int with Unsafe:
+    println("pulsar_clock: running 4-check prove battery...")
+    var npass: Int = 0
+    var total: Int = 4
+    let pfs: Float = 2000.0
+    let pn: Int = 4000
+    let pf: Float = 173.0
+    let pfd: Float = 8.25
+    // P1: white noise -> CLEAN both domains.
+    var seed: Int = 777
+    let mut n1: ptr<Float> = alloc_zeroed(pn, "Float")
+    var i: Int = 0
+    while i < pn:
+        var u: Float = 0.0
+        var cu: Int = 0
+        while cu < 6:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            u = u + ((seed as Float) / 2147483648.0)
+            cu = cu + 1
+        mem_store(ptr_offset(n1, i, "Float"), (u - 3.0) * 1.41421356, "Float")
+        i = i + 1
+    let mut r1: ptr<Float> = alloc_zeroed(pn, "Float")
+    let mut p1: ptr<Float> = alloc_zeroed(PHI_NB * 2, "Float")
+    let mut o1: ptr<Float> = alloc_zeroed(5, "Float")
+    let c1: Int = run_clock(n1, pn, pfs, pf, pfd, 0.0, 0.0, 0.0, 0.0, r1, p1, o1)
+    let p1z: Float = mem_load(ptr_offset(o1, 0, "Float"), "Float")
+    let u1z: Float = mem_load(ptr_offset(o1, 1, "Float"), "Float")
+    var h1a: Int = 0
+    if p1z < SIG_THRESH:
+        if u1z < SIG_THRESH:
+            h1a = 1
+    if c1 == 0:
+        if h1a == 1:
+            npass = npass + 1
+            println("  [PASS] P1 noise CLEAN (phi_z_x100=" + str(p1z * 100.0) + " utc_z_x100=" + str(u1z * 100.0) + ")")
+        else:
+            println("  [FAIL] P1 noise hot (phi_z_x100=" + str(p1z * 100.0) + " utc_z_x100=" + str(u1z * 100.0) + ")")
+    else:
+        println("  [FAIL] P1 run_clock rc=" + str(c1))
+    decay n1
+    decay r1
+    decay p1
+    decay o1
+    // P2: UTC-periodic sine at f -> UTC-ONLY (vanishes in phi).
+    let mut n2: ptr<Float> = alloc_zeroed(pn, "Float")
+    seed = 4242
+    i = 0
+    while i < pn:
+        var u2: Float = 0.0
+        var c2: Int = 0
+        while c2 < 6:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            u2 = u2 + ((seed as Float) / 2147483648.0)
+            c2 = c2 + 1
+        let t2: Float = (i as Float) / pfs
+        mem_store(ptr_offset(n2, i, "Float"), (u2 - 3.0) * 1.41421356 + 3.0 * sin(6.283185307179586 * pf * t2), "Float")
+        i = i + 1
+    let mut r2: ptr<Float> = alloc_zeroed(pn, "Float")
+    let mut p2: ptr<Float> = alloc_zeroed(PHI_NB * 2, "Float")
+    let mut o2: ptr<Float> = alloc_zeroed(5, "Float")    let c2r: Int = run_clock(n2, pn, pfs, pf, pfd, 0.0, 0.0, 0.0, 0.0, r2, p2, o2)
+    let p2z: Float = mem_load(ptr_offset(o2, 0, "Float"), "Float")
+    let u2z: Float = mem_load(ptr_offset(o2, 1, "Float"), "Float")
+    var h2a: Int = 0
+    if u2z >= SIG_THRESH:
+        if p2z < SIG_THRESH:
+            h2a = 1
+    if c2r == 0:
+        if h2a == 1:
+            npass = npass + 1
+            println("  [PASS] P2 UTC-ONLY (utc_z_x100=" + str(u2z * 100.0) + " phi_z_x100=" + str(p2z * 100.0) + ")")
+        else:
+            println("  [FAIL] P2 want UTC hot/phi cold (utc_z_x100=" + str(u2z * 100.0) + " phi_z_x100=" + str(p2z * 100.0) + ")")
+    else:
+        println("  [FAIL] P2 run_clock rc=" + str(c2r))
+    decay n2
+    decay r2
+    decay p2
+    decay o2
+    // P3: phi-chopped packets (pulsar-gated) -> CLOCK-CANDIDATE in phi.
+    let mut n3: ptr<Float> = alloc_zeroed(pn, "Float")
+    seed = 9001
+    i = 0
+    while i < pn:
+        var u3: Float = 0.0
+        var c3: Int = 0
+        while c3 < 6:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            u3 = u3 + ((seed as Float) / 2147483648.0)
+            c3 = c3 + 1
+        let t3: Float = (i as Float) / pfs
+        let psi3: Float = pf * t3 + 0.5 * pfd * t3 * t3
+        var fr3: Float = psi3 - (((psi3 as Int) as Float))
+        if fr3 < 0.0:
+            fr3 = fr3 + 1.0
+        var gate: Float = 0.0
+        if fr3 < 0.0625:
+            gate = 8.0
+        mem_store(ptr_offset(n3, i, "Float"), (u3 - 3.0) * 1.41421356 + gate, "Float")
+        i = i + 1
+    let mut r3: ptr<Float> = alloc_zeroed(pn, "Float")
+    let mut p3: ptr<Float> = alloc_zeroed(PHI_NB * 2, "Float")
+    let mut o3: ptr<Float> = alloc_zeroed(5, "Float")
+    let c3r: Int = run_clock(n3, pn, pfs, pf, pfd, 0.0, 0.0, 0.0, 0.0, r3, p3, o3)
+    let p3z: Float = mem_load(ptr_offset(o3, 0, "Float"), "Float")
+    let u3z: Float = mem_load(ptr_offset(o3, 1, "Float"), "Float")
+    var h3a: Int = 0
+    if p3z >= SIG_THRESH:
+        if u3z < SIG_THRESH:
+            h3a = 1
+    if c3r == 0:
+        if h3a == 1:
+            npass = npass + 1
+            println("  [PASS] P3 CLOCK-CANDIDATE (phi_z_x100=" + str(p3z * 100.0) + " utc_z_x100=" + str(u3z * 100.0) + ")")
+        else:
+            println("  [FAIL] P3 want phi hot/UTC cold (phi_z_x100=" + str(p3z * 100.0) + " utc_z_x100=" + str(u3z * 100.0) + ")")
+    else:
+        println("  [FAIL] P3 run_clock rc=" + str(c3r))
+    decay n3
+    decay r3
+    decay p3
+    decay o3
+    // P4: hum comb -> smeared >=3 dB receipt + no CLOCK fire.
+    let mut n4: ptr<Float> = alloc_zeroed(pn, "Float")
+    seed = 31337
+    i = 0
+    while i < pn:
+        var u4: Float = 0.0
+        var c4: Int = 0
+        while c4 < 6:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            u4 = u4 + ((seed as Float) / 2147483648.0)
+            c4 = c4 + 1
+        let t4: Float = (i as Float) / pfs
+        let hum: Float = 4.0 * sin(6.283185307179586 * 44.7 * t4) + 2.0 * sin(6.283185307179586 * 89.4 * t4)
+        mem_store(ptr_offset(n4, i, "Float"), (u4 - 3.0) * 1.41421356 + hum, "Float")
+        i = i + 1
+    let mut r4: ptr<Float> = alloc_zeroed(pn, "Float")
+    let mut p4: ptr<Float> = alloc_zeroed(PHI_NB * 2, "Float")
+    let mut o4: ptr<Float> = alloc_zeroed(5, "Float")
+    let c4r: Int = run_clock(n4, pn, pfs, pf, pfd, 0.0, 0.0, 0.0, 0.0, r4, p4, o4)
+    let mut h4: ptr<Float> = alloc_zeroed(4, "Float")
+    let c4h: Int = hum_probe(n4, r4, pn, pfs, h4)
+    let present4: Float = mem_load(ptr_offset(h4, 0, "Float"), "Float")
+    let drop4: Float = mem_load(ptr_offset(h4, 1, "Float"), "Float")
+    let p4z: Float = mem_load(ptr_offset(o4, 0, "Float"), "Float")
+    var h4a: Int = 0
+    if present4 > 0.5:
+        if drop4 >= 300.0:
+            if p4z < SIG_THRESH:
+                h4a = 1
+    if c4r == 0:
+        if c4h == 0:
+            if h4a == 1:
+                npass = npass + 1
+                println("  [PASS] P4 hum smeared (drop_db_x100=" + str(drop4) + " phi_z_x100=" + str(p4z * 100.0) + " no-CLOCK)")
+            else:
+                println("  [FAIL] P4 want drop>=300 + phi cold (drop_db_x100=" + str(drop4) + " phi_z_x100=" + str(p4z * 100.0) + " present=" + str(present4) + ")")
+        else:
+            println("  [FAIL] P4 hum_probe rc=" + str(c4h))
+    else:
+        println("  [FAIL] P4 run_clock rc=" + str(c4r))
+    decay n4
+    decay r4
+    decay p4
+    decay o4
+    decay h4
+    println("receipt=PASS prove=" + str(npass) + "/" + str(total))
+    if npass == total:
+        return EXIT_OK
+    return EXIT_HELP
+
+pub fn pulsar_clock_main(args: Array<String>) -> Int with Unsafe:
+    var in_path: String = ""
+    var data_dir: String = ""
+    var out_stem: String = ""
+    var csv_path: String = ""
+    var psr: String = "ENSEMBLE"
+    var mjd: Float = 0.0
+    var psr_f: Float = 0.0
+    var psr_fd: Float = 0.0
+    var t0: Float = 0.0
+    var f_set: Int = 0
+    var fd_set: Int = 0
+    var t0_set: Int = 0
+    var a1: Float = 0.0
+    var aper: Float = 0.0
+    var a2: Float = 0.0
+    var fs: Float = FS_HZ
+    var json: Int = 0
+    var show_help: Int = 0
+    var do_prove: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--json":
+            json = 1
+        elif a == "--prove":
+            do_prove = 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_stem = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fs = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--mjd":
+            if i + 1 < len(args):
+                mjd = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--psr":
+            if i + 1 < len(args):
+                psr = args[i + 1]
+                i = i + 1
+        elif a == "--psr-f":
+            if i + 1 < len(args):
+                psr_f = parse_float_text(args[i + 1])
+                f_set = 1
+                i = i + 1
+        elif a == "--psr-fdot":
+            if i + 1 < len(args):
+                psr_fd = parse_float_text(args[i + 1])
+                fd_set = 1
+                i = i + 1
+        elif a == "--t0":
+            if i + 1 < len(args):
+                t0 = parse_float_text(args[i + 1])
+                t0_set = 1
+                i = i + 1
+        elif a == "--bary-a1":
+            if i + 1 < len(args):
+                a1 = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--bary-t":
+            if i + 1 < len(args):
+                aper = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--bary-a2":
+            if i + 1 < len(args):
+                a2 = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    var pi: Int = 0
+    while pi < len(pos):
+        let pp: String = pos[pi]
+        if pi == 0:
+            if in_path == "":
+                in_path = pp
+        elif pi == 1:
+            if out_stem == "":
+                out_stem = pp
+        pi = pi + 1
+    if show_help == 1:
+        print(pulsar_clock_usage())
+        return EXIT_HELP
+    if do_prove == 1:
+        return pulsar_clock_prove()
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+    if in_path != "":
+        if data_dir != "":
+            if find_from(in_path, ":", 0) < 0:
+                if len(in_path) > 0:
+                    if char_at(in_path, 0) != "/":
+                        in_path = data_dir + "/" + in_path
+    if in_path == "":
+        println("pulsar_clock: no input. usage: pulsar_clock --in <f32> --fs HZ [--prove]")
+        return EXIT_ERROR
+    // Preset table = data (overridable). Approx ATNF spin frequencies.
+    if psr == "B1937+21":
+        if f_set == 0:
+            psr_f = 641.928359123
+        if fd_set == 0:
+            psr_fd = -0.00000000000429
+    elif psr == "J0437-4715":
+        if f_set == 0:
+            psr_f = 173.6879457
+        if fd_set == 0:
+            psr_fd = -0.00000000000173
+    elif psr == "J1713+0747":
+        if f_set == 0:
+            psr_f = 218.811843
+        if fd_set == 0:
+            psr_fd = -0.00000000000041
+    elif psr == "ENSEMBLE":
+        if f_set == 0:
+            psr_f = 200.0
+        if fd_set == 0:
+            psr_fd = 0.0
+    else:
+        if f_set == 0:
+            println("pulsar_clock: unknown --psr " + psr + " without --psr-f")
+            return EXIT_ERROR
+    if t0_set == 0:
+        t0 = 0.0
+    if fs <= 0.0:
+        println("pulsar_clock: bad --fs")
+        return EXIT_ERROR
+    if psr_f <= 0.0:
+        println("pulsar_clock: bad pulsar frequency")
+        return EXIT_ERROR
+    if ephemeris_ok((a1 * 100.0) as Int, (aper * 100.0) as Int) == false:
+        if aper <= 0.0:
+            if a1 == 0.0:
+                if a2 == 0.0:
+                    aper = 1.0
+        if ephemeris_ok((a1 * 100.0) as Int, (aper * 100.0) as Int) == false:
+            println("pulsar_clock: ephemeris law FAIL (|a1|<=600s, T>0)")
+            return EXIT_ERROR
+    // ── Load .f32 (fold_sum handle pattern) ──
+    let h: ptr<Void> = k_CreateFileA(in_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h) == -1:
+        println("pulsar_clock: open fail err=" + str(k_GetLastError()) + ": " + in_path)
+        return EXIT_ERROR
+    let szslot: ptr<Int> = alloc_zeroed(1, "Int")
+    var fsize: Int = -1
+    if k_GetFileSizeEx(h, szslot) != 0:
+        fsize = mem_load(szslot, "Int")
+    decay szslot
+    if fsize < 64:
+        println("pulsar_clock: file too small")
+        return EXIT_ERROR
+    let nsamp: Int = fsize / 4
+    let mut rawbuf: ptr<Byte> = alloc_zeroed(fsize + 32, "Byte")
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    mem_store(nslot, 0, "Int")
+    let rok: Int = k_ReadFile(h, rawbuf, fsize, nslot, null_ptr())
+    let got: Int = mem_load(nslot, "Int")
+    let ch: Int = k_CloseHandle(h)
+    if rok == 0 or got < fsize:
+        println("pulsar_clock: short read")
+        return EXIT_ERROR
+    let mut p2t: ptr<Float> = alloc_zeroed(254, "Float")
+    var pv: Float = 1.0
+    var di: Int = 0
+    while di < 126:
+        pv = pv / 2.0
+        di = di + 1
+    var pj: Int = 0
+    while pj < 254:
+        mem_store(ptr_offset(p2t, pj, "Float"), pv, "Float")
+        pv = pv * 2.0
+        pj = pj + 1
+    let mut xbuf: ptr<Float> = alloc_zeroed(nsamp, "Float")
+    var ds: Int = 0
+    while ds < nsamp:
+        let v: Float = f32_of_quad(bref(rawbuf, ds * 4), bref(rawbuf, ds * 4 + 1), bref(rawbuf, ds * 4 + 2), bref(rawbuf, ds * 4 + 3), p2t)
+        mem_store(ptr_offset(xbuf, ds, "Float"), v, "Float")
+        ds = ds + 1
+    decay rawbuf
+    decay p2t
+    let mut retimed: ptr<Float> = alloc_zeroed(nsamp, "Float")
+    let mut pc_prof: ptr<Float> = alloc_zeroed(PHI_NB * 2, "Float")
+    let mut rres: ptr<Float> = alloc_zeroed(5, "Float")
+    let rc: Int = run_clock(xbuf, nsamp, fs, psr_f, psr_fd, t0, a1, aper, a2, retimed, pc_prof, rres)
+    if rc != 0:
+        println("pulsar_clock: retime fail")
+        return EXIT_ERROR
+    let phiz: Float = mem_load(ptr_offset(rres, 0, "Float"), "Float")
+    let utcz: Float = mem_load(ptr_offset(rres, 1, "Float"), "Float")
+    let covpc: Int = mem_load(ptr_offset(rres, 2, "Float"), "Float") as Int
+    let peakbin: Int = mem_load(ptr_offset(rres, 3, "Float"), "Float") as Int
+    let mut hres: ptr<Float> = alloc_zeroed(4, "Float")
+    let hrc: Int = hum_probe(xbuf, retimed, nsamp, fs, hres)
+    let mut fres: ptr<Float> = alloc_zeroed(2, "Float")
+    let frc2: Int = frame_peak(retimed, nsamp, fs, fres)
+    let present: Float = mem_load(ptr_offset(hres, 0, "Float"), "Float")
+    let dropdb: Float = mem_load(ptr_offset(hres, 1, "Float"), "Float") / 100.0
+    let drop_x100: Int = mem_load(ptr_offset(hres, 1, "Float"), "Float") as Int
+    let humf: Int = mem_load(ptr_offset(hres, 2, "Float"), "Float") as Int
+    let framef: Int = mem_load(ptr_offset(fres, 0, "Float"), "Float") as Int
+    let framez: Int = mem_load(ptr_offset(fres, 1, "Float"), "Float") as Int
+    var hum_ok: Int = 1
+    if present > 0.5:
+        if hum_smear_ok(drop_x100) == false:
+            hum_ok = 0
+    var cov_ok: Int = 0
+    if phi_coverage_ok(covpc) == true:
+        cov_ok = 1
+    var phi_hot: Int = 0
+    if phiz >= SIG_THRESH:
+        phi_hot = 1
+    var utc_hot: Int = 0
+    if utcz >= SIG_THRESH:
+        utc_hot = 1
+    let vv: Int = decide_verdict(phi_hot, utc_hot, hum_ok, cov_ok)
+    var verdict: String = "CLEAN"
+    if vv == 1:
+        verdict = "UTC-ONLY"
+    elif vv == 2:
+        verdict = "CLOCK-CANDIDATE"
+    elif vv == 3:
+        verdict = "GAPPED"
+    var flag: String = "OK"
+    if present > 0.5:
+        if hum_ok == 0:
+            flag = "CLOCK-SUSPECT"
+    var stem: String = out_stem
+    if stem == "":
+        stem = "pulsar_clock"
+    var csvp: String = csv_path
+    if csvp == "":
+        csvp = stem + ".clock.csv"
+    // retimed.f32 encode
+    let mut obytes: ptr<Byte> = alloc_zeroed(fsize + 32, "Byte")
+    var eo: Int = 0
+    while eo < nsamp:
+        let bits: Int = pclock_float_to_f32bits(mem_load(ptr_offset(retimed, eo, "Float"), "Float"))
+        var ub: Int = bits
+        if ub < 0:
+            ub = ub + 2147483648
+            ub = ub + 2147483648
+        bstore(obytes, eo * 4, ub % 256)
+        bstore(obytes, eo * 4 + 1, (ub / 256) % 256)
+        bstore(obytes, eo * 4 + 2, (ub / 65536) % 256)
+        bstore(obytes, eo * 4 + 3, (ub / 16777216) % 256)
+        eo = eo + 1
+    let wrc: Int = write_bin_file(stem + ".retimed.f32", obytes, fsize)
+    decay obytes
+    var foldcsv: String = "phase_bin,power_x100,z_x100\n"
+    var fb: Int = 0
+    while fb < PHI_NB:
+        foldcsv = foldcsv + str(fb) + "," + str(mem_load(ptr_offset(pc_prof, fb * 2, "Float"), "Float")) + "," + str(mem_load(ptr_offset(pc_prof, fb * 2 + 1, "Float"), "Float")) + "\n"
+        fb = fb + 1
+    fs_write_text(stem + ".fold.csv", foldcsv)
+    var csv: String = "psr,coverage_pc,hum_drop_db,peak_bin,verdict\n"
+    csv = csv + psr + "," + str(covpc) + "," + str(drop_x100) + "," + str(peakbin) + "," + verdict + "\n"
+    fs_write_text(csvp, csv)
+    var md: String = "| key | value |\n|---|---|\n"
+    md = md + "| psr | " + psr + " |\n"
+    md = md + "| psr_f_hz_x100 | " + str(psr_f * 100.0) + " |\n"
+    md = md + "| mjd_x100 | " + str(mjd * 100.0) + " |\n"
+    md = md + "| phi_z_x100 | " + str(phiz * 100.0) + " |\n"
+    md = md + "| utc_z_x100 | " + str(utcz * 100.0) + " |\n"
+    md = md + "| coverage_pc | " + str(covpc) + " |\n"
+    md = md + "| hum_present | " + str(present) + " |\n"
+    md = md + "| hum_f_hz_x100 | " + str(humf) + " |\n"
+    md = md + "| hum_drop_db_x100 | " + str(drop_x100) + " |\n"
+    md = md + "| frame_f_hz_x100 | " + str(framef) + " |\n"
+    md = md + "| frame_z_x100 | " + str(framez) + " |\n"
+    md = md + "| peak_bin | " + str(peakbin) + " |\n"
+    md = md + "| flag | " + flag + " |\n"
+    md = md + "| verdict | " + verdict + " |\n"
+    println(md)
+    fs_write_text(stem + ".clock.md", md)
+    if json == 1:
+        println("{\"psr\":\"" + psr + "\",\"verdict\":\"" + verdict + "\",\"phi_z_x100\":" + str(phiz * 100.0) + ",\"utc_z_x100\":" + str(utcz * 100.0) + ",\"hum_drop_db_x100\":" + str(drop_x100) + ",\"coverage_pc\":" + str(covpc) + "}")
+    println("pulsar_clock: verdict=" + verdict + " flag=" + flag + " phi_z_x100=" + str(phiz * 100.0) + " utc_z_x100=" + str(utcz * 100.0))
+    println("receipt=PASS searched=1 verdict=" + verdict)
+    decay xbuf
+    decay retimed
+    decay pc_prof
+    decay rres
+    decay hres
+    decay fres
+    decay nslot
+    return EXIT_OK

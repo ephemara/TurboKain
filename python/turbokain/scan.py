@@ -36,8 +36,14 @@ F32_DETECTORS = [
     "xeno_scan",
     "perm_entropy",
     "lag_hunt",
+    "ism_stamp",
+    "gauss_perfection",
+    "pulsar_clock",
     "waterfall",
 ]
+# NOTE: fec_ghost is gated-only (runs iff ism_stamp verdict is STAMPED/SKY-LIKE).
+# It rides the core.exe gated sweep (Stage 3e), never the fire-everything bundle —
+# ghost without stamp drowns in terrestrial codes (DVB-S2/LTE/WiFi).
 
 
 @dataclass

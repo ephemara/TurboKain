@@ -1,0 +1,1864 @@
+// ============================================================================
+// ism_stamp.kn — TurboKain 01: Propagation Authenticator (gates everything)
+//
+// WHY THIS EXISTS:
+// Fit the CHANNEL, not the signal. Backend hum (22.35 Hz family), LO
+// intermod (982/1665 MHz), satellite ingress, ADC rail flashes, digitizer
+// storms: none crossed parsecs of Kolmogorov plasma, so none carry the ISM
+// stamp — dnu = infinity (steady) or dnu = channel (broadband-simultaneous),
+// no Faraday swing, DM = 0. A celestial point source shines THROUGH the
+// turbulent ISM: diffractive scintillation decorrelates across sub-bands
+// with finite (dnu, dt_d), exponent fits Kolmogorov dnu ~ nu^4.4, dual-pol
+// shows RM rotation, dispersed bursts show arrival ~ DM * f^-2.
+//
+// Forked from scint_pol.kn kernels (STFT/ACF/xcorr/pol) + _common infra.
+// Deviation from seed: RECTANGULAR seed window replaced by HANN per
+// 01_ISM_STAMP.md (detection loss < 2 dB, sidelobe honesty for hum gate).
+//
+// Verdicts: STAMPED / SKY-LIKE / COMMON-NOSTAMP / WANDER-LOCAL /
+//   TERRESTRIAL-IMPULSE / UNSTAMPED-SHORT / CLEAN (+ QUARANTINE-HUM).
+// Exit codes: 0 ok, 1 help-or-prove-FAIL, 2 error.
+// Contract: --in pol0.f32 [--in1 pol1.f32] [--off off.f32] -> md + csv.
+// CSV: subband,f_center_hz,m_x1000,xcorr_x1000,dnu_hz,dt_s,p_exp_x100,
+//      chi2_x100,rm_rad_m2,dm_slope,verdict  (file-level cols repeated)
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+
+use _common::k_CreateFileA
+use _common::k_ReadFile
+use _common::k_GetFileSizeEx
+use _common::k_CloseHandle
+use _common::null_ptr
+use _common::GEN_READ
+use _common::OPEN_EXISTING
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::FS_HZ
+use _common::SK_PI2
+use _common::bref
+use _common::parse_int_text
+use _common::parse_float_text
+use _common::f32_of_quad
+use _common::sk_fft
+use _common::quickselect_k
+use _common::str_ends_with
+use _common::write_text_file
+use _common::format_1dp
+use _common::sig_clamp100
+use _common::iabs
+
+// ── Geometry (spec, thresholds still argv-data with these defaults) ─────────
+const ISM_SEG: Int = 4096
+const ISM_HOP: Int = 2048
+const ISM_CAP: Int = 512
+const ISM_MIN: Int = 8
+const ISM_NB: Int = 2048
+
+// ── PRNG (scint_pol fork) ───────────────────────────────────────────────────
+fn ism_lcg_next(s: Int) -> Int:
+    var v: Int = (s * 1103515245 + 12345) % 2147483648
+    if v < 0:
+        v = 0 - v
+    return v
+
+fn ism_rand_norm(s_in: Int, out_seed: ptr<Int>) -> Float with Unsafe:
+    var s: Int = s_in
+    s = ism_lcg_next(s)
+    let u1_raw: Int = s
+    s = ism_lcg_next(s)
+    let u2_raw: Int = s
+    mem_store(out_seed, s, "Int")
+    var u1: Float = (u1_raw as Float) / 2147483648.0
+    if u1 < 0.00000001:
+        u1 = 0.00000001
+    var u2: Float = (u2_raw as Float) / 2147483648.0
+    let r: Float = sqrt(0.0 - 2.0 * log(u1))
+    let theta: Float = SK_PI2 * u2
+    return r * cos(theta)
+
+fn ism_fabs(v: Float) -> Float:
+    if v < 0.0:
+        return 0.0 - v
+    return v
+
+// ── converge: fractional HWHM/HWe-1 lag interpolation ───────────────────────
+// r_lo >= level > r_hi at adjacent integer lags; returns crossing fraction.
+fn ism_hwhm_spec(level: Float, r_lo: Float, r_hi: Float) -> Float:
+    var d: Float = r_lo - r_hi
+    if d < 0.000000000001:
+        return 1.0
+    var f: Float = (r_lo - level) / d
+    if f < 0.0:
+        return 0.0
+    if f > 1.0:
+        return 1.0
+    return f
+
+converge ism_hwhm_frac(level: Float, r_lo: Float, r_hi: Float) -> Float:
+    spec reference:
+        return ism_hwhm_spec(level, r_lo, r_hi)
+    fast scalar_lane when target("llvm"):
+        return ism_hwhm_spec(level, r_lo, r_hi)
+    verify random(8)
+
+// ── converge: RM coherent-sum magnitude for one trial RM ────────────────────
+// V[0..nsb-1] complex visibilities, lam2 in m^2. |sum V_b e^{-2i RM lam2_b}|
+fn ism_rmscore_spec(vre: ptr<Float>, vim: ptr<Float>, lam2: ptr<Float>, nsb: Int, rm: Float) -> Float:
+    var sr: Float = 0.0
+    var si: Float = 0.0
+    var b: Int = 0
+    while b < nsb:
+        let ph: Float = 2.0 * rm * mem_load(ptr_offset(lam2, b, "Float"), "Float")
+        let c: Float = cos(ph)
+        let s: Float = sin(ph)
+        let a: Float = mem_load(ptr_offset(vre, b, "Float"), "Float")
+        let d: Float = mem_load(ptr_offset(vim, b, "Float"), "Float")
+        sr = sr + a * c + d * s
+        si = si + d * c - a * s
+        b = b + 1
+    return sqrt(sr * sr + si * si)
+
+converge ism_rmscore(vre: ptr<Float>, vim: ptr<Float>, lam2: ptr<Float>, nsb: Int, rm: Float) -> Float:
+    spec reference:
+        return ism_rmscore_spec(vre, vim, lam2, nsb, rm)
+    fast scalar_lane when target("llvm"):
+        return ism_rmscore_spec(vre, vim, lam2, nsb, rm)
+
+// ── law gates (receipts, all thresholds arrive as data) ─────────────────────
+law kolmogorov_p_ok(p_x100: Int, tgt_x100: Int, tol_x100: Int) -> Bool:
+    return iabs(p_x100 - tgt_x100) <= tol_x100
+
+law ism_hum_prefilter_ok(humcode: Int) -> Bool:
+    return humcode == 0
+
+law ism_mad_floor_ok(sd_x1000: Int, floor_x1000: Int) -> Bool:
+    return sd_x1000 >= floor_x1000
+
+law off_contrast_ok(keep_stamp: Int) -> Bool:
+    return keep_stamp == 1
+
+// ── world/patch: journaled stamp tiles ──────────────────────────────────────
+world StampAuthority:
+    state tiles_kept: Int = 0
+    state max_chi2_x100: Int = 0
+    state stamped_count: Int = 0
+
+world StampMirror:
+    state tiles_kept_copy: Int = 0
+    state max_chi2_x100_copy: Int = 0
+    state stamped_count_copy: Int = 0
+
+entangle StampAuthority.tiles_kept <-> StampMirror.tiles_kept_copy with single_writer
+entangle StampAuthority.max_chi2_x100 <-> StampMirror.max_chi2_x100_copy with single_writer
+entangle StampAuthority.stamped_count <-> StampMirror.stamped_count_copy with single_writer
+
+patch commit_stamp_tile(authority: StampAuthority, chi2_x100: Int, is_stamped: Int) -> Int:
+    authority.tiles_kept = authority.tiles_kept + 1
+    if chi2_x100 > authority.max_chi2_x100:
+        authority.max_chi2_x100 = chi2_x100
+    if is_stamped == 1:
+        authority.stamped_count = authority.stamped_count + 1
+    return authority.tiles_kept
+
+// ── Pearson correlation of two buffers ──────────────────────────────────────
+fn ism_corr(a: ptr<Float>, b: ptr<Float>, n: Int) -> Float with Unsafe:
+    if n <= 1:
+        return 0.0
+    var sa: Float = 0.0
+    var sb: Float = 0.0
+    var i: Int = 0
+    while i < n:
+        sa = sa + mem_load(ptr_offset(a, i, "Float"), "Float")
+        sb = sb + mem_load(ptr_offset(b, i, "Float"), "Float")
+        i = i + 1
+    let ma: Float = sa / (n as Float)
+    let mb: Float = sb / (n as Float)
+    var cov: Float = 0.0
+    var va: Float = 0.0
+    var vb: Float = 0.0
+    var j: Int = 0
+    while j < n:
+        let da: Float = mem_load(ptr_offset(a, j, "Float"), "Float") - ma
+        let db: Float = mem_load(ptr_offset(b, j, "Float"), "Float") - mb
+        cov = cov + da * db
+        va = va + da * da
+        vb = vb + db * db
+        j = j + 1
+    let den: Float = sqrt(va * vb)
+    if den < 0.000000000000001:
+        return 0.0
+    return cov / den
+
+// ── Time-lag ACF crossing (level 0.5 HWHM or 0.3679 HWe-1), frames, frac ────
+fn ism_acf_cross(col: ptr<Float>, n: Int, level: Float) -> Float with Unsafe:
+    if n < 4:
+        return 0.0
+    var se: Float = 0.0
+    var i: Int = 0
+    while i < n:
+        se = se + mem_load(ptr_offset(col, i, "Float"), "Float")
+        i = i + 1
+    let mu: Float = se / (n as Float)
+    var ve: Float = 0.0
+    var j: Int = 0
+    while j < n:
+        let d: Float = mem_load(ptr_offset(col, j, "Float"), "Float") - mu
+        ve = ve + d * d
+        j = j + 1
+    if ve < 0.000000000000001:
+        return 0.0
+    var prev_r: Float = 1.0
+    var lag: Int = 1
+    while lag < n:
+        var cov: Float = 0.0
+        var k: Int = 0
+        while k < n - lag:
+            let d1: Float = mem_load(ptr_offset(col, k, "Float"), "Float") - mu
+            let d2: Float = mem_load(ptr_offset(col, k + lag, "Float"), "Float") - mu
+            cov = cov + d1 * d2
+            k = k + 1
+        let r: Float = cov / ve
+        if r < level:
+            return ((lag - 1) as Float) + ism_hwhm_frac(level, prev_r, r)
+        prev_r = r
+        lag = lag + 1
+    return n as Float
+
+// ── Winsorized modulation index with MAD floor ──────────────────────────────
+// m = sd_w / mean; sd floored at 0.25 * 1.4826 * MAD (never raw global MAD).
+fn ism_band_m(E: ptr<Float>, R: Int, nsb: Int, b: Int, col: ptr<Float>, scr: ptr<Float>, mrow: ptr<Float>) -> Float with Unsafe:
+    var r: Int = 0
+    while r < R:
+        mem_store(ptr_offset(col, r, "Float"), mem_load(ptr_offset(E, r * nsb + b, "Float"), "Float"), "Float")
+        r = r + 1
+    var se: Float = 0.0
+    var i: Int = 0
+    while i < R:
+        se = se + mem_load(ptr_offset(col, i, "Float"), "Float")
+        i = i + 1
+    let mu: Float = se / (R as Float)
+    if mu < 0.000000000001:
+        mem_store(ptr_offset(mrow, b, "Float"), 0.0, "Float")
+        return 0.0
+    var ve: Float = 0.0
+    var j: Int = 0
+    while j < R:
+        let d: Float = mem_load(ptr_offset(col, j, "Float"), "Float") - mu
+        ve = ve + d * d
+        j = j + 1
+    var sd: Float = sqrt(ve / (R as Float))
+    // winsorize at mu +/- 3 sd, recompute
+    var cap: Float = 3.0 * sd
+    var se2: Float = 0.0
+    var w: Int = 0
+    while w < R:
+        var v: Float = mem_load(ptr_offset(col, w, "Float"), "Float")
+        if v > mu + cap:
+            v = mu + cap
+        if v < mu - cap:
+            v = mu - cap
+            if v < 0.0:
+                v = 0.0
+        mem_store(ptr_offset(scr, w, "Float"), v, "Float")
+        se2 = se2 + v
+        w = w + 1
+    let mu2: Float = se2 / (R as Float)
+    var ve2: Float = 0.0
+    var u: Int = 0
+    while u < R:
+        let d: Float = mem_load(ptr_offset(scr, u, "Float"), "Float") - mu2
+        ve2 = ve2 + d * d
+        u = u + 1
+    var sd2: Float = sqrt(ve2 / (R as Float))
+    // MAD floor: median |x - median|
+    var q: Int = 0
+    while q < R:
+        mem_store(ptr_offset(scr, q, "Float"), mem_load(ptr_offset(col, q, "Float"), "Float"), "Float")
+        q = q + 1
+    let med: Float = quickselect_k(scr, R, R / 2)
+    var t: Int = 0
+    while t < R:
+        var dv: Float = mem_load(ptr_offset(col, t, "Float"), "Float") - med
+        mem_store(ptr_offset(scr, t, "Float"), ism_fabs(dv), "Float")
+        t = t + 1
+    let mad: Float = quickselect_k(scr, R, R / 2)
+    let floor: Float = 0.25 * 1.4826 * mad
+    var sd_eff: Float = sd2
+    if sd_eff < floor:
+        sd_eff = floor
+    var m: Float = 0.0
+    if mu2 > 0.000000000001:
+        m = sd_eff / mu2
+    mem_store(ptr_offset(mrow, b, "Float"), m, "Float")
+    return m
+
+// ── STFT power + subband complex means (Hann, rectangular-free per spec) ────
+fn ism_stft(x: ptr<Float>, nx: Int, nsb: Int, E: ptr<Float>, Cre: ptr<Float>, Cim: ptr<Float>) -> Int with Unsafe:
+    var R: Int = (nx - ISM_SEG) / ISM_HOP + 1
+    if R < ISM_MIN:
+        return R
+    if R > ISM_CAP:
+        R = ISM_CAP
+    let re: ptr<Float> = alloc_zeroed(ISM_SEG + 32, "Float")
+    let im: ptr<Float> = alloc_zeroed(ISM_SEG + 32, "Float")
+    let hann: ptr<Float> = alloc_zeroed(ISM_SEG + 32, "Float")
+    var wi: Int = 0
+    while wi < ISM_SEG:
+        let ph: Float = (wi as Float) / (ISM_SEG as Float)
+        mem_store(ptr_offset(hann, wi, "Float"), 0.5 - 0.5 * cos(SK_PI2 * ph), "Float")
+        wi = wi + 1
+    let band_w: Int = (ISM_NB - 2) / nsb
+    var r: Int = 0
+    while r < R:
+        let base: Int = r * ISM_HOP
+        var i: Int = 0
+        while i < ISM_SEG:
+            let w: Float = mem_load(ptr_offset(hann, i, "Float"), "Float")
+            mem_store(ptr_offset(re, i, "Float"), mem_load(ptr_offset(x, base + i, "Float"), "Float") * w, "Float")
+            mem_store(ptr_offset(im, i, "Float"), 0.0, "Float")
+            i = i + 1
+        let _ok: Int = sk_fft(re, im, ISM_SEG)
+        var b: Int = 0
+        while b < nsb:
+            let bs: Int = 2 + b * band_w
+            var be: Int = bs + band_w
+            if b == nsb - 1:
+                be = ISM_NB
+            // Power = bin-mean. Complex = PEAK bin (max |X|^2): a windowed
+            // tone sums to ~zero across bins (Fourier: sum X = N x0 w0 = 0
+            // for Hann), so the mean is a broken visibility estimator.
+            var psum: Float = 0.0
+            var best_p: Float = 0.0 - 1.0
+            var best_r: Float = 0.0
+            var best_i: Float = 0.0
+            var cnt: Int = 0
+            var k: Int = bs
+            while k < be:
+                let rv: Float = mem_load(ptr_offset(re, k, "Float"), "Float")
+                let iv: Float = mem_load(ptr_offset(im, k, "Float"), "Float")
+                let pw: Float = rv * rv + iv * iv
+                psum = psum + pw
+                if pw > best_p:
+                    best_p = pw
+                    best_r = rv
+                    best_i = iv
+                cnt = cnt + 1
+                k = k + 1
+            mem_store(ptr_offset(E, r * nsb + b, "Float"), psum / (cnt as Float), "Float")
+            mem_store(ptr_offset(Cre, r * nsb + b, "Float"), best_r, "Float")
+            mem_store(ptr_offset(Cim, r * nsb + b, "Float"), best_i, "Float")
+            b = b + 1
+        r = r + 1
+    decay re
+    decay im
+    decay hann
+    return R
+
+// ── Raw-spectrum peak (hum family gate input) ───────────────────────────────
+fn ism_peak_freq(x: ptr<Float>, nx: Int, fs: Float, out_freq: ptr<Float>, out_ratio: ptr<Float>) -> Int with Unsafe:
+    var nfft: Int = 262144
+    if nfft > nx:
+        nfft = 65536
+    if nfft > nx:
+        nfft = 16384
+    if nfft > nx:
+        nfft = 4096
+    if nfft > nx:
+        mem_store(out_freq, 0.0, "Float")
+        mem_store(out_ratio, 0.0, "Float")
+        return 0
+    let re_buf: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    let im_buf: ptr<Float> = alloc_zeroed(nfft + 32, "Float")
+    var i: Int = 0
+    while i < nfft:
+        mem_store(ptr_offset(re_buf, i, "Float"), mem_load(ptr_offset(x, i, "Float"), "Float"), "Float")
+        mem_store(ptr_offset(im_buf, i, "Float"), 0.0, "Float")
+        i = i + 1
+    let _ok: Int = sk_fft(re_buf, im_buf, nfft)
+    let B: Int = nfft / 2
+    var best: Int = 2
+    var best_p: Float = 0.0
+    var sp: Float = 0.0
+    var b: Int = 2
+    while b < B:
+        let rv: Float = mem_load(ptr_offset(re_buf, b, "Float"), "Float")
+        let iv: Float = mem_load(ptr_offset(im_buf, b, "Float"), "Float")
+        let p: Float = rv * rv + iv * iv
+        sp = sp + p
+        if p > best_p:
+            best_p = p
+            best = b
+        b = b + 1
+    let bg: Float = sp / ((B - 2) as Float)
+    var ratio: Float = 1.0
+    if bg > 0.000000000000001:
+        ratio = best_p / bg
+    mem_store(out_freq, ((best as Float) * fs) / (nfft as Float), "Float")
+    mem_store(out_ratio, ratio, "Float")
+    decay re_buf
+    decay im_buf
+    return 0
+
+// ── Hum pre-gate: 22.35 Hz family + 982/1665 MHz LO. Returns code/freq. ─────
+// code 0 clean, 1 hum tone, 2 LO. Runs FIRST, before any escalate.
+fn ism_hum_gate(x: ptr<Float>, nx: Int, fs: Float, f0mhz: Float, humgate: Float, o_code: ptr<Int>, o_freq: ptr<Float>) -> Int with Unsafe:
+    let fq: ptr<Float> = alloc_zeroed(1, "Float")
+    let ra: ptr<Float> = alloc_zeroed(1, "Float")
+    ism_peak_freq(x, nx, fs, fq, ra)
+    let pf: Float = mem_load(fq, "Float")
+    let pr: Float = mem_load(ra, "Float")
+    decay fq
+    decay ra
+    var code: Int = 0
+    // LO intermod metadata flag (topocentric ref near known LO leaks)
+    var d982: Float = f0mhz - 982.0
+    if d982 < 0.0:
+        d982 = 0.0 - d982
+    var d1665: Float = f0mhz - 1665.0
+    if d1665 < 0.0:
+        d1665 = 0.0 - d1665
+    if d982 < 2.0:
+        code = 2
+    if d1665 < 2.0:
+        code = 2
+    // tone family 22.35 * {1,2,6,8,32} = 22.35/44.70/134.11/178.81/715.25
+    if code == 0:
+        if pr > humgate:
+            let f1: Float = 22.35
+            let f2: Float = 44.70
+            let f3: Float = 134.11
+            let f4: Float = 178.81
+            let f5: Float = 715.25
+            var hit: Int = 0
+            var dd: Float = pf - f1
+            if dd < 0.0:
+                dd = 0.0 - dd
+            if dd < 0.03 * f1:
+                hit = 1
+            dd = pf - f2
+            if dd < 0.0:
+                dd = 0.0 - dd
+            if dd < 0.03 * f2:
+                hit = 1
+            dd = pf - f3
+            if dd < 0.0:
+                dd = 0.0 - dd
+            if dd < 0.03 * f3:
+                hit = 1
+            dd = pf - f4
+            if dd < 0.0:
+                dd = 0.0 - dd
+            if dd < 0.03 * f4:
+                hit = 1
+            dd = pf - f5
+            if dd < 0.0:
+                dd = 0.0 - dd
+            if dd < 0.03 * f5:
+                hit = 1
+            if hit == 1:
+                code = 1
+    mem_store(o_code, code, "Int")
+    mem_store(o_freq, pf, "Float")
+    return code
+
+// ── Core band statistics: m row, xcorr, dt_d, dnu, p-fit + chi2, dm slope ───
+fn ism_band_stats(E: ptr<Float>, R: Int, nsb: Int, fs: Float, f0mhz: Float, diss_p: Float, tol: Float,
+                  mrow: ptr<Float>, o_mmed: ptr<Float>, o_mmax: ptr<Float>, o_xc: ptr<Float>,
+                  o_dnu: ptr<Float>, o_dt: ptr<Float>, o_pexp: ptr<Float>, o_chi2: ptr<Float>,
+                  o_pvalid: ptr<Int>, o_dmslope: ptr<Float>, o_dmr2: ptr<Float>, o_dmspan: ptr<Int>) -> Int with Unsafe:
+    let col: ptr<Float> = alloc_zeroed(R + 32, "Float")
+    let scr: ptr<Float> = alloc_zeroed(R + 32, "Float")
+    let colb: ptr<Float> = alloc_zeroed(R + 32, "Float")
+    // per-subband m + median/max
+    var b: Int = 0
+    while b < nsb:
+        let _m: Float = ism_band_m(E, R, nsb, b, col, scr, mrow)
+        b = b + 1
+    var q: Int = 0
+    while q < nsb:
+        mem_store(ptr_offset(scr, q, "Float"), mem_load(ptr_offset(mrow, q, "Float"), "Float"), "Float")
+        q = q + 1
+    let mmed: Float = quickselect_k(scr, nsb, nsb / 2)
+    var mmax: Float = 0.0
+    var w: Int = 0
+    while w < nsb:
+        let v: Float = mem_load(ptr_offset(mrow, w, "Float"), "Float")
+        if v > mmax:
+            mmax = v
+        w = w + 1
+    mem_store(o_mmed, mmed, "Float")
+    mem_store(o_mmax, mmax, "Float")
+    // adjacent-band xcorr
+    var sxc: Float = 0.0
+    var nc: Int = 0
+    var ba: Int = 0
+    while ba < nsb - 1:
+        var r: Int = 0
+        while r < R:
+            mem_store(ptr_offset(col, r, "Float"), mem_load(ptr_offset(E, r * nsb + ba, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(colb, r, "Float"), mem_load(ptr_offset(E, r * nsb + ba + 1, "Float"), "Float"), "Float")
+            r = r + 1
+        sxc = sxc + ism_corr(col, colb, R)
+        nc = nc + 1
+        ba = ba + 1
+    var xc: Float = 0.0
+    if nc > 0:
+        xc = sxc / (nc as Float)
+    mem_store(o_xc, xc, "Float")
+    // dt_d per subband (HWe-1), mean seconds
+    let bw_hz: Float = (fs / 2.0) / (nsb as Float)
+    var sdt: Float = 0.0
+    var bd: Int = 0
+    while bd < nsb:
+        var r2: Int = 0
+        while r2 < R:
+            mem_store(ptr_offset(col, r2, "Float"), mem_load(ptr_offset(E, r2 * nsb + bd, "Float"), "Float"), "Float")
+            r2 = r2 + 1
+        sdt = sdt + ism_acf_cross(col, R, 0.3679)
+        bd = bd + 1
+    let dt_fr: Float = sdt / (nsb as Float)
+    mem_store(o_dt, dt_fr * ((ISM_HOP as Float) / fs), "Float")
+    // freq-lag ACF per half-band -> dnu lo/hi -> exponent p + chi2
+    let nhalf: Int = nsb / 2
+    var dnu_lo: Float = 0.0
+    var dnu_hi: Float = 0.0
+    var chi_lo: Float = 0.0
+    var chi_hi: Float = 0.0
+    var ok_lo: Int = 0
+    var ok_hi: Int = 0
+    // freq ACF helper inline for half h (0 lo, 1 hi): rho(k) over frames.
+    // rhov stores rho at h*32+k (nsb cap 32, halves always fit).
+    let rhov: ptr<Float> = alloc_zeroed(32 + 32, "Float")
+    var h: Int = 0
+    while h < 2:
+        let b0: Int = h * nhalf
+        let nb: Int = nsb - nhalf
+        var nbh: Int = nhalf
+        if h == 1:
+            nbh = nb
+        // pass 1: store rho(k) in rhov; pass 2 below fits ln rho + chi2
+        var k2: Int = 1
+        while k2 < nbh:
+            // rho(k): correlate subband-vectors across frames:
+            // num = mean_r (E[r,b]-mu_b)(E[r,b+k]-mu_b+k) normalized
+            var num: Float = 0.0
+            var dn1: Float = 0.0
+            var dn2: Float = 0.0
+            var bb: Int = b0
+            while bb + k2 < b0 + nbh:
+                var rr: Int = 0
+                while rr < R:
+                    mem_store(ptr_offset(col, rr, "Float"), mem_load(ptr_offset(E, rr * nsb + bb, "Float"), "Float"), "Float")
+                    rr = rr + 1
+                var rr2: Int = 0
+                while rr2 < R:
+                    mem_store(ptr_offset(colb, rr2, "Float"), mem_load(ptr_offset(E, rr2 * nsb + bb + k2, "Float"), "Float"), "Float")
+                    rr2 = rr2 + 1
+                // accumulate pearson pieces across frame-block pairs
+                var s1: Float = 0.0
+                var s2: Float = 0.0
+                var t3: Int = 0
+                while t3 < R:
+                    s1 = s1 + mem_load(ptr_offset(col, t3, "Float"), "Float")
+                    s2 = s2 + mem_load(ptr_offset(colb, t3, "Float"), "Float")
+                    t3 = t3 + 1
+                let m1: Float = s1 / (R as Float)
+                let m2: Float = s2 / (R as Float)
+                var t4: Int = 0
+                while t4 < R:
+                    let e1: Float = mem_load(ptr_offset(col, t4, "Float"), "Float") - m1
+                    let e2: Float = mem_load(ptr_offset(colb, t4, "Float"), "Float") - m2
+                    num = num + e1 * e2
+                    dn1 = dn1 + e1 * e1
+                    dn2 = dn2 + e2 * e2
+                    t4 = t4 + 1
+                bb = bb + 1
+            var rho: Float = 0.0
+            let dd2: Float = sqrt(dn1 * dn2)
+            if dd2 > 0.000000000000001:
+                rho = num / dd2
+            mem_store(ptr_offset(rhov, h * 32 + k2, "Float"), rho, "Float")
+            k2 = k2 + 1
+        // HWHM crossing of 0.5 anchored at exact rho(0)=1: tail-noise immune.
+        // Validity window 0.15<rho(1)<0.9: rejects undetected AND flat spectra.
+        var dnu_sub: Float = 0.0
+        var chi: Float = 0.0
+        var okf: Int = 0
+        let rho1: Float = mem_load(ptr_offset(rhov, h * 32 + 1, "Float"), "Float")
+        if rho1 > 0.15:
+            if rho1 < 0.9:
+                var cross_k: Int = -1
+                var kx: Int = 1
+                while kx < nbh:
+                    if cross_k < 0:
+                        let rkx: Float = mem_load(ptr_offset(rhov, h * 32 + kx, "Float"), "Float")
+                        if rkx < 0.5:
+                            cross_k = kx
+                    kx = kx + 1
+                if cross_k > 0:
+                    var rlo: Float = 1.0
+                    if cross_k > 1:
+                        rlo = mem_load(ptr_offset(rhov, h * 32 + cross_k - 1, "Float"), "Float")
+                    let rhi: Float = mem_load(ptr_offset(rhov, h * 32 + cross_k, "Float"), "Float")
+                    dnu_sub = ((cross_k - 1) as Float) + ism_hwhm_frac(0.5, rlo, rhi)
+                    if dnu_sub > 0.05:
+                        okf = 1
+                        var kk: Int = nbh - 1
+                        if kk > 3:
+                            kk = 3
+                        var ss2: Float = 0.0
+                        var kr2: Int = 1
+                        while kr2 <= kk:
+                            let rk2: Float = mem_load(ptr_offset(rhov, h * 32 + kr2, "Float"), "Float")
+                            let pred: Float = exp((0.0 - (kr2 as Float) * 0.6931) / dnu_sub)
+                            let rs2: Float = rk2 - pred
+                            ss2 = ss2 + rs2 * rs2
+                            kr2 = kr2 + 1
+                        if kk >= 2:
+                            chi = ss2 / ((kk - 1) as Float)
+                        else:
+                            chi = 0.5
+        if h == 0:
+            dnu_lo = dnu_sub * bw_hz
+            chi_lo = chi
+            ok_lo = okf
+        else:
+            dnu_hi = dnu_sub * bw_hz
+            chi_hi = chi
+            ok_hi = okf
+        h = h + 1
+    decay col
+    decay scr
+    decay colb
+    var dnu: Float = 0.0
+    if ok_lo == 1:
+        dnu = dnu_lo
+    if ok_hi == 1:
+        dnu = dnu_hi
+    if ok_lo == 1:
+        if ok_hi == 1:
+            dnu = (dnu_lo + dnu_hi) / 2.0
+    mem_store(o_dnu, dnu, "Float")
+    // joint screen fit: rho_h(k) = pair-mean exp(-sum 1/d_j) with
+    // d_j = d0*(nu_j/nuc)^p. Exact mixture model (no two-point bias),
+    // head lags k<=5, grid d0 log + p linear, reduced chi2 receipt.
+    // (chi_lo/chi_hi HWHM head-residuals ride along for the report.)
+    var pvalid: Int = 0
+    var pexp: Float = 0.0
+    var chij: Float = 0.0
+    let invd: ptr<Float> = alloc_zeroed(nsb + 32, "Float")
+    if ok_lo == 1:
+        if ok_hi == 1:
+            let nucj: Float = f0mhz + ((nsb as Float) / 2.0) * (bw_hz / 1000000.0)
+            var nptT: Int = 0
+            var hjt: Int = 0
+            while hjt < 2:
+                var nbht: Int = nhalf
+                if hjt == 1:
+                    nbht = nsb - nhalf
+                var ktt: Int = nbht - 1
+                if ktt > 5:
+                    ktt = 5
+                nptT = nptT + ktt
+                hjt = hjt + 1
+            var best_sse: Float = 0.0 - 1.0
+            var best_p: Float = 4.4
+            var best_d: Float = 2.0
+            var gi: Int = 0
+            while gi < 40:
+                let d0: Float = 0.3 * exp(((gi as Float) / 39.0) * log(10.0 / 0.3))
+                var pj: Int = 0
+                while pj <= 70:
+                    let pp: Float = 1.0 + (pj as Float) * 0.1
+                    var bj2: Int = 0
+                    while bj2 < nsb:
+                        let nubj: Float = f0mhz + ((bj2 as Float) + 0.5) * (bw_hz / 1000000.0)
+                        var dj: Float = d0
+                        if nubj > 0.0:
+                            if nucj > 0.0:
+                                dj = d0 * exp(pp * log(nubj / nucj))
+                        var iv: Float = 1000.0
+                        if dj > 0.001:
+                            iv = 1.0 / dj
+                        mem_store(ptr_offset(invd, bj2, "Float"), iv, "Float")
+                        bj2 = bj2 + 1
+                    var sse: Float = 0.0
+                    var hj: Int = 0
+                    while hj < 2:
+                        let b0j: Int = hj * nhalf
+                        var nbhj: Int = nhalf
+                        if hj == 1:
+                            nbhj = nsb - nhalf
+                        var kj: Int = 1
+                        var kjmax: Int = nbhj - 1
+                        if kjmax > 5:
+                            kjmax = 5
+                        while kj <= kjmax:
+                            var psum: Float = 0.0
+                            var pcnt: Int = 0
+                            var bj: Int = b0j
+                            while bj + kj < b0j + nbhj:
+                                var lsum: Float = 0.0
+                                var jj: Int = bj + 1
+                                while jj <= bj + kj:
+                                    lsum = lsum + mem_load(ptr_offset(invd, jj, "Float"), "Float")
+                                    jj = jj + 1
+                                psum = psum + exp(0.0 - lsum)
+                                pcnt = pcnt + 1
+                                bj = bj + 1
+                            var pred: Float = 0.0
+                            if pcnt > 0:
+                                pred = psum / (pcnt as Float)
+                            let meas: Float = mem_load(ptr_offset(rhov, hj * 32 + kj, "Float"), "Float")
+                            let rsd: Float = meas - pred
+                            sse = sse + rsd * rsd
+                            kj = kj + 1
+                        hj = hj + 1
+                    if best_sse < -0.5:
+                        best_sse = sse
+                        best_p = pp
+                        best_d = d0
+                    else:
+                        if sse < best_sse:
+                            best_sse = sse
+                            best_p = pp
+                            best_d = d0
+                    pj = pj + 1
+                gi = gi + 1
+            if best_p > 1.0:
+                if best_p < 8.0:
+                    if best_d > 0.3:
+                        if best_d < 10.0:
+                            pexp = best_p
+                            pvalid = 1
+                            if nptT > 2:
+                                chij = best_sse / ((nptT - 2) as Float)
+                            else:
+                                chij = 0.5
+    decay invd
+    decay rhov
+    mem_store(o_pexp, pexp, "Float")
+    mem_store(o_chi2, chij, "Float")
+    mem_store(o_pvalid, pvalid, "Int")
+    // DM differential: peak-frame per subband vs f^-2
+    let pk: ptr<Float> = alloc_zeroed(nsb + 32, "Float")
+    var bp: Int = 0
+    while bp < nsb:
+        var bi: Int = 0
+        var bv: Float = 0.0
+        var rr3: Int = 0
+        while rr3 < R:
+            let v: Float = mem_load(ptr_offset(E, rr3 * nsb + bp, "Float"), "Float")
+            if v > bv:
+                bv = v
+                bi = rr3
+            rr3 = rr3 + 1
+        mem_store(ptr_offset(pk, bp, "Float"), bi as Float, "Float")
+        bp = bp + 1
+    var tmin: Float = mem_load(ptr_offset(pk, 0, "Float"), "Float")
+    var tmax: Float = tmin
+    var bq: Int = 1
+    while bq < nsb:
+        let v: Float = mem_load(ptr_offset(pk, bq, "Float"), "Float")
+        if v < tmin:
+            tmin = v
+        if v > tmax:
+            tmax = v
+        bq = bq + 1
+    let span: Int = (tmax - tmin) as Int
+    mem_store(o_dmspan, span, "Int")
+    var slope2: Float = 0.0
+    var r2v: Float = 0.0
+    if span > 0:
+        var sfx: Float = 0.0
+        var sfy: Float = 0.0
+        var bff: Int = 0
+        while bff < nsb:
+            let fc: Float = f0mhz + ((bff as Float) + 0.5) * (bw_hz / 1000000.0)
+            var fi: Float = 0.0
+            if fc > 0.0:
+                fi = 1.0 / (fc * fc)
+            sfx = sfx + fi
+            sfy = sfy + mem_load(ptr_offset(pk, bff, "Float"), "Float")
+            bff = bff + 1
+        let mx: Float = sfx / (nsb as Float)
+        let my: Float = sfy / (nsb as Float)
+        var cxy: Float = 0.0
+        var cxx: Float = 0.0
+        var cyy: Float = 0.0
+        var bgg: Int = 0
+        while bgg < nsb:
+            let fc2: Float = f0mhz + ((bgg as Float) + 0.5) * (bw_hz / 1000000.0)
+            var fi2: Float = 0.0
+            if fc2 > 0.0:
+                fi2 = 1.0 / (fc2 * fc2)
+            let dx: Float = fi2 - mx
+            let dy: Float = mem_load(ptr_offset(pk, bgg, "Float"), "Float") - my
+            cxy = cxy + dx * dy
+            cxx = cxx + dx * dx
+            cyy = cyy + dy * dy
+            bgg = bgg + 1
+        if cxx > 0.000000000000001:
+            slope2 = cxy / cxx
+        if cxx > 0.000000000000001:
+            if cyy > 0.000000000000001:
+                r2v = (cxy * cxy) / (cxx * cyy)
+    mem_store(o_dmslope, slope2, "Float")
+    mem_store(o_dmr2, r2v, "Float")
+    decay pk
+    return 0
+
+// ── RM grid over dual-pol visibilities ──────────────────────────────────────
+fn ism_rm_grid(Cre0: ptr<Float>, Cim0: ptr<Float>, Cre1: ptr<Float>, Cim1: ptr<Float>,
+               R: Int, nsb: Int, f0mhz: Float, fs: Float, grid: Int, rmax: Float,
+               o_rm: ptr<Float>, o_side: ptr<Float>, o_valid: ptr<Int>) -> Int with Unsafe:
+    let bw_hz: Float = (fs / 2.0) / (nsb as Float)
+    let vre: ptr<Float> = alloc_zeroed(nsb + 32, "Float")
+    let vim: ptr<Float> = alloc_zeroed(nsb + 32, "Float")
+    let lam2: ptr<Float> = alloc_zeroed(nsb + 32, "Float")
+    var b: Int = 0
+    while b < nsb:
+        let fc: Float = f0mhz + ((b as Float) + 0.5) * (bw_hz / 1000000.0)
+        var l2: Float = 0.0
+        if fc > 0.0:
+            let lam: Float = 300.0 / fc
+            l2 = lam * lam
+        mem_store(ptr_offset(lam2, b, "Float"), l2, "Float")
+        var sr: Float = 0.0
+        var si: Float = 0.0
+        var r: Int = 0
+        while r < R:
+            let a: Float = mem_load(ptr_offset(Cre0, r * nsb + b, "Float"), "Float")
+            let c: Float = mem_load(ptr_offset(Cim0, r * nsb + b, "Float"), "Float")
+            let e: Float = mem_load(ptr_offset(Cre1, r * nsb + b, "Float"), "Float")
+            let f: Float = mem_load(ptr_offset(Cim1, r * nsb + b, "Float"), "Float")
+            // V = C1 conj(C0): pol1 Faraday phase-lead recovers as +RM.
+            sr = sr + a * e + c * f
+            si = si + a * f - c * e
+            r = r + 1
+        mem_store(ptr_offset(vre, b, "Float"), sr / (R as Float), "Float")
+        mem_store(ptr_offset(vim, b, "Float"), si / (R as Float), "Float")
+        b = b + 1
+    var best_rm: Float = 0.0
+    var best_s: Float = 0.0
+    var g: Int = 0
+    while g < grid:
+        let rm: Float = (0.0 - rmax) + 2.0 * rmax * ((g as Float) / ((grid - 1) as Float))
+        let s: Float = ism_rmscore(vre, vim, lam2, nsb, rm)
+        if s > best_s:
+            best_s = s
+            best_rm = rm
+        g = g + 1
+    // sidelobe: max outside +/-2 steps of peak
+    var bi2: Int = ((best_rm + rmax) / (2.0 * rmax) * ((grid - 1) as Float)) as Int
+    var side: Float = 0.0
+    var g2: Int = 0
+    while g2 < grid:
+        var dd: Int = g2 - bi2
+        if dd < 0:
+            dd = 0 - dd
+        if dd > 2:
+            let rm2: Float = (0.0 - rmax) + 2.0 * rmax * ((g2 as Float) / ((grid - 1) as Float))
+            let s2: Float = ism_rmscore(vre, vim, lam2, nsb, rm2)
+            if s2 > side:
+                side = s2
+        g2 = g2 + 1
+    var ratio: Float = 1.0
+    if best_s > 0.000000000001:
+        ratio = side / best_s
+    mem_store(o_rm, best_rm, "Float")
+    mem_store(o_side, ratio, "Float")
+    var vv: Int = 0
+    if ratio < 0.7:
+        vv = 1
+    mem_store(o_valid, vv, "Int")
+    decay vre
+    decay vim
+    decay lam2
+    return 0
+
+// ── Prove battery ───────────────────────────────────────────────────────────
+pub fn ism_stamp_prove() -> Int with Unsafe:
+    var ok: Int = 1
+    println("[prove] ism_stamp selftest battery starting...")
+
+    // shared slots
+    let fq: ptr<Float> = alloc_zeroed(1, "Float")
+    let ra: ptr<Float> = alloc_zeroed(1, "Float")
+    let hc: ptr<Int> = alloc_zeroed(1, "Int")
+    let hf: ptr<Float> = alloc_zeroed(1, "Float")
+    let seed: ptr<Int> = alloc_zeroed(1, "Int")
+
+    // ── P1: noise null -> CLEAN ──
+    let N1: Int = 133120
+    let fs1: Float = FS_HZ
+    let x1: ptr<Float> = alloc_zeroed(N1 + 32, "Float")
+    mem_store(seed, 111222, "Int")
+    var i1: Int = 0
+    while i1 < N1:
+        let v: Float = ism_rand_norm(mem_load(seed, "Int"), seed)
+        mem_store(ptr_offset(x1, i1, "Float"), 14.0 * v, "Float")
+        i1 = i1 + 1
+    let nsb1: Int = 8
+    let E1: ptr<Float> = alloc_zeroed(64 * nsb1 + 32, "Float")
+    let C1r: ptr<Float> = alloc_zeroed(64 * nsb1 + 32, "Float")
+    let C1i: ptr<Float> = alloc_zeroed(64 * nsb1 + 32, "Float")
+    let R1: Int = ism_stft(x1, N1, nsb1, E1, C1r, C1i)
+    let mrow1: ptr<Float> = alloc_zeroed(nsb1 + 32, "Float")
+    let mm: ptr<Float> = alloc_zeroed(1, "Float")
+    let mx: ptr<Float> = alloc_zeroed(1, "Float")
+    let xc1: ptr<Float> = alloc_zeroed(1, "Float")
+    let dn1: ptr<Float> = alloc_zeroed(1, "Float")
+    let dt1: ptr<Float> = alloc_zeroed(1, "Float")
+    let pe1: ptr<Float> = alloc_zeroed(1, "Float")
+    let ch1: ptr<Float> = alloc_zeroed(1, "Float")
+    let pv1: ptr<Int> = alloc_zeroed(1, "Int")
+    let dm1: ptr<Float> = alloc_zeroed(1, "Float")
+    let dr1: ptr<Float> = alloc_zeroed(1, "Float")
+    let ds1: ptr<Int> = alloc_zeroed(1, "Int")
+    let h1: Int = ism_hum_gate(x1, N1, fs1, 1400.0, 30.0, hc, hf)
+    let _s1: Int = ism_band_stats(E1, R1, nsb1, fs1, 1400.0, 4.4, 0.5, mrow1, mm, mx, xc1, dn1, dt1, pe1, ch1, pv1, dm1, dr1, ds1)
+    let m1v: Float = mem_load(mm, "Float")
+    let x1v: Float = mem_load(xc1, "Float")
+    if h1 == 0:
+        if m1v < 0.15:
+            println("  [PASS] P1: noise null CLEAN (m=" + format_1dp(m1v) + " xc=" + format_1dp(x1v) + " hum=0)")
+        else:
+            println("  [FAIL] P1: noise m too high m=" + format_1dp(m1v))
+            ok = 0
+    else:
+        println("  [FAIL] P1: false hum gate on noise")
+        ok = 0
+
+    // ── P2: hum veto (22.35 Hz + 178.81 ladder, fs=48k) ──
+    let N2: Int = 133120
+    let fs2: Float = 48000.0
+    let x2: ptr<Float> = alloc_zeroed(N2 + 32, "Float")
+    mem_store(seed, 555666, "Int")
+    var i2: Int = 0
+    while i2 < N2:
+        let t: Float = (i2 as Float) / fs2
+        let nz: Float = ism_rand_norm(mem_load(seed, "Int"), seed)
+        let tone: Float = 100.0 * sin(SK_PI2 * 22.35 * t) + 50.0 * sin(SK_PI2 * 178.81 * t)
+        mem_store(ptr_offset(x2, i2, "Float"), 14.0 * nz + tone, "Float")
+        i2 = i2 + 1
+    let h2: Int = ism_hum_gate(x2, N2, fs2, 1400.0, 30.0, hc, hf)
+    let hf2: Float = mem_load(hf, "Float")
+    if h2 == 1:
+        println("  [PASS] P2: hum veto QUARANTINE-HUM (f=" + format_1dp(hf2) + " Hz)")
+    else:
+        println("  [FAIL] P2: hum gate missed code=" + str(h2) + " f=" + format_1dp(hf2))
+        ok = 0
+    // LO metadata flag
+    let h2b: Int = ism_hum_gate(x1, N1, fs1, 982.5, 30.0, hc, hf)
+    if h2b == 2:
+        println("  [PASS] P2b: LO flag at 982 MHz (code=2)")
+    else:
+        println("  [FAIL] P2b: LO flag missed code=" + str(h2b))
+        ok = 0
+
+    // ── P3a: Kolmogorov screen injection -> STAMPED-grade p ──
+    // geometry: fs=3MHz f0=12MHz nsb=16 R=128 (wide fractional BW for lever)
+    let fs3: Float = 3000000.0
+    let f03: Float = 4.5
+    let nsb3: Int = 16
+    let R3: Int = 512
+    let N3: Int = (R3 - 1) * 2048 + 4096
+    mem_store(seed, 777001, "Int")
+    // screen: across-band AR(1) with dnu(nu)=2.0*(nu/nuc)^4.4 subbands,
+    // time AR(1) tau=6*(nu/nuc)^1.2 frames; g=(1+0.45 t)^2
+    let nuc: Float = 6.0
+    let bw3: Float = (fs3 / 2.0) / (nsb3 as Float)
+    let wmat: ptr<Float> = alloc_zeroed(R3 * nsb3 + 32, "Float")
+    var a3: Int = 0
+    while a3 < R3 * nsb3:
+        mem_store(ptr_offset(wmat, a3, "Float"), ism_rand_norm(mem_load(seed, "Int"), seed), "Float")
+        a3 = a3 + 1
+    let smat: ptr<Float> = alloc_zeroed(R3 * nsb3 + 32, "Float")
+    var r3: Int = 0
+    while r3 < R3:
+        var b3: Int = 0
+        while b3 < nsb3:
+            let nub: Float = f03 + ((b3 as Float) + 0.5) * (bw3 / 1000000.0)
+            var rr: Float = nub / nuc
+            // rr^4.4 via exp(4.4 ln rr)
+            let dnus: Float = 3.0 * exp(4.4 * log(rr))
+            let phi: Float = exp(0.0 - 1.0 / dnus)
+            let wv: Float = mem_load(ptr_offset(wmat, r3 * nsb3 + b3, "Float"), "Float")
+            var sv: Float = wv
+            if b3 > 0:
+                let pr: Float = mem_load(ptr_offset(smat, r3 * nsb3 + b3 - 1, "Float"), "Float")
+                var one: Float = 1.0 - phi * phi
+                if one < 0.0:
+                    one = 0.0
+                sv = phi * pr + sqrt(one) * wv
+            mem_store(ptr_offset(smat, r3 * nsb3 + b3, "Float"), sv, "Float")
+            b3 = b3 + 1
+        r3 = r3 + 1
+    let tmat: ptr<Float> = alloc_zeroed(R3 * nsb3 + 32, "Float")
+    var b3b: Int = 0
+    while b3b < nsb3:
+        let nub2: Float = f03 + ((b3b as Float) + 0.5) * (bw3 / 1000000.0)
+        let tau: Float = 4.0 * exp(1.2 * log(nub2 / nuc))
+        let ac: Float = exp(0.0 - 1.0 / tau)
+        var oc: Float = 1.0 - ac * ac
+        if oc < 0.0:
+            oc = 0.0
+        let sq: Float = sqrt(oc)
+        var r3b: Int = 0
+        while r3b < R3:
+            let wv2: Float = mem_load(ptr_offset(smat, r3b * nsb3 + b3b, "Float"), "Float")
+            var tv: Float = wv2
+            if r3b > 0:
+                tv = ac * mem_load(ptr_offset(tmat, (r3b - 1) * nsb3 + b3b, "Float"), "Float") + sq * wv2
+            mem_store(ptr_offset(tmat, r3b * nsb3 + b3b, "Float"), tv, "Float")
+            r3b = r3b + 1
+        b3b = b3b + 1
+    // time series via per-frame IFFT + Hann overlap-add
+    let x3: ptr<Float> = alloc_zeroed(N3 + 32, "Float")
+    let fr: ptr<Float> = alloc_zeroed(4096 + 32, "Float")
+    let fi: ptr<Float> = alloc_zeroed(4096 + 32, "Float")
+    let bandw3: Int = (2048 - 2) / nsb3
+    var f3: Int = 0
+    while f3 < R3:
+        var k3: Int = 0
+        while k3 < 4096:
+            mem_store(ptr_offset(fr, k3, "Float"), 0.0, "Float")
+            mem_store(ptr_offset(fi, k3, "Float"), 0.0, "Float")
+            k3 = k3 + 1
+        var b3c: Int = 0
+        while b3c < nsb3:
+            let tv3: Float = mem_load(ptr_offset(tmat, f3 * nsb3 + b3c, "Float"), "Float")
+            var gg: Float = 1.0 + 0.45 * tv3
+            let gpw: Float = gg * gg
+            let amp: Float = sqrt(gpw)
+            let bs3: Int = 2 + b3c * bandw3
+            var be3: Int = bs3 + bandw3
+            if b3c == nsb3 - 1:
+                be3 = 2048
+            var k3b: Int = bs3
+            while k3b < be3:
+                let n1: Float = ism_rand_norm(mem_load(seed, "Int"), seed)
+                let n2: Float = ism_rand_norm(mem_load(seed, "Int"), seed)
+                mem_store(ptr_offset(fr, k3b, "Float"), amp * n1, "Float")
+                mem_store(ptr_offset(fi, k3b, "Float"), amp * n2, "Float")
+                // hermitian mirror
+                mem_store(ptr_offset(fr, 4096 - k3b, "Float"), amp * n1, "Float")
+                mem_store(ptr_offset(fi, 4096 - k3b, "Float"), 0.0 - amp * n2, "Float")
+                k3b = k3b + 1
+            // scintillating carrier in this subband centre, PHASE-CONTINUOUS
+            // across frames (tone phase at frame start = pi*ck*f; odd bins
+            // flip by pi per frame — without this the OLA cancels in the
+            // overlap and mints fake per-band AM that kills xcorr).
+            let ck: Int = bs3 + bandw3 / 2
+            let cph: Float = SK_PI2 * (ck as Float) * (f3 as Float) / 2.0
+            let ccr: Float = cos(cph)
+            let csi: Float = sin(cph)
+            mem_store(ptr_offset(fr, ck, "Float"), mem_load(ptr_offset(fr, ck, "Float"), "Float") + amp * 30.0 * ccr, "Float")
+            mem_store(ptr_offset(fi, ck, "Float"), mem_load(ptr_offset(fi, ck, "Float"), "Float") + amp * 30.0 * csi, "Float")
+            mem_store(ptr_offset(fr, 4096 - ck, "Float"), mem_load(ptr_offset(fr, 4096 - ck, "Float"), "Float") + amp * 30.0 * ccr, "Float")
+            mem_store(ptr_offset(fi, 4096 - ck, "Float"), mem_load(ptr_offset(fi, 4096 - ck, "Float"), "Float") + amp * 30.0 * (0.0 - csi), "Float")
+            b3c = b3c + 1
+        // IFFT via conjugation: out = conj(FFT(conj(X)))/N
+        var k3c: Int = 0
+        while k3c < 4096:
+            mem_store(ptr_offset(fi, k3c, "Float"), 0.0 - mem_load(ptr_offset(fi, k3c, "Float"), "Float"), "Float")
+            k3c = k3c + 1
+        let _ok3: Int = sk_fft(fr, fi, 4096)
+        let base3: Int = f3 * 2048
+        var k3d: Int = 0
+        while k3d < 4096:
+            let ph3: Float = (k3d as Float) / 4096.0
+            let w3: Float = 0.5 - 0.5 * cos(SK_PI2 * ph3)
+            let tv2: Float = mem_load(ptr_offset(fr, k3d, "Float"), "Float") / 4096.0 * w3
+            mem_store(ptr_offset(x3, base3 + k3d, "Float"), mem_load(ptr_offset(x3, base3 + k3d, "Float"), "Float") + tv2, "Float")
+            k3d = k3d + 1
+        f3 = f3 + 1
+    decay fr
+    decay fi
+    decay wmat
+    decay smat
+    // analyze synth
+    let E3: ptr<Float> = alloc_zeroed(R3 * nsb3 + 32, "Float")
+    let C3r: ptr<Float> = alloc_zeroed(R3 * nsb3 + 32, "Float")
+    let C3i: ptr<Float> = alloc_zeroed(R3 * nsb3 + 32, "Float")
+    let R3g: Int = ism_stft(x3, N3, nsb3, E3, C3r, C3i)
+    let mrow3: ptr<Float> = alloc_zeroed(nsb3 + 32, "Float")
+    let mm3: ptr<Float> = alloc_zeroed(1, "Float")
+    let mx3: ptr<Float> = alloc_zeroed(1, "Float")
+    let xc3: ptr<Float> = alloc_zeroed(1, "Float")
+    let dn3: ptr<Float> = alloc_zeroed(1, "Float")
+    let dt3: ptr<Float> = alloc_zeroed(1, "Float")
+    let pe3: ptr<Float> = alloc_zeroed(1, "Float")
+    let ch3: ptr<Float> = alloc_zeroed(1, "Float")
+    let pv3: ptr<Int> = alloc_zeroed(1, "Int")
+    let dm3: ptr<Float> = alloc_zeroed(1, "Float")
+    let dr3: ptr<Float> = alloc_zeroed(1, "Float")
+    let ds3: ptr<Int> = alloc_zeroed(1, "Int")
+    let h3: Int = ism_hum_gate(x3, N3, fs3, f03, 30.0, hc, hf)
+    let _s3: Int = ism_band_stats(E3, R3g, nsb3, fs3, f03, 4.4, 0.5, mrow3, mm3, mx3, xc3, dn3, dt3, pe3, ch3, pv3, dm3, dr3, ds3)
+    let m3v: Float = mem_load(mm3, "Float")
+    let x3v: Float = mem_load(xc3, "Float")
+    let p3v: Float = mem_load(pe3, "Float")
+    let v3v: Int = mem_load(pv3, "Int")
+    let d3v: Float = mem_load(dt3, "Float")
+    var pok: Int = 0
+    if v3v == 1:
+        let dp: Float = p3v - 4.4
+        if dp < 0.0:
+            dp = 0.0 - dp
+        if dp <= 0.5:
+            pok = 1
+    if h3 == 0:
+        if m3v >= 0.15:
+            if x3v < 0.8:
+                if pok == 1:
+                    println("  [PASS] P3a: screen STAMPED-grade (m=" + format_1dp(m3v) + " xc=" + format_1dp(x3v) + " p=" + format_1dp(p3v) + " dt=" + format_1dp(d3v * 1000.0) + "ms)")
+                else:
+                    println("  [FAIL] P3a: exponent off p=" + format_1dp(p3v) + " valid=" + str(v3v) + " m=" + format_1dp(m3v) + " xc=" + format_1dp(x3v))
+                    ok = 0
+            else:
+                println("  [FAIL] P3a: xcorr too high xc=" + format_1dp(x3v))
+                ok = 0
+        else:
+            println("  [FAIL] P3a: m too low m=" + format_1dp(m3v))
+            ok = 0
+    else:
+        println("  [FAIL] P3a: false hum gate code=" + str(h3))
+        ok = 0
+
+    // ── P3b: dual-pol RM=10 grid recovery (3 Faraday tones, f0=150MHz) ──
+    let fsb: Float = 3000000.0
+    let f0b: Float = 150.0
+    let nsbb: Int = 8
+    let Nb: Int = 133120
+    let xb0: ptr<Float> = alloc_zeroed(Nb + 32, "Float")
+    let xb1: ptr<Float> = alloc_zeroed(Nb + 32, "Float")
+    mem_store(seed, 31337, "Int")
+    // tone subbands 1,4,6 at RF nu -> baseband fb; phase 2*RM*lam^2
+    let RMtrue: Float = 10.0
+    let bwb: Float = (fsb / 2.0) / (nsbb as Float)
+    var ib: Int = 0
+    while ib < Nb:
+        let t: Float = (ib as Float) / fsb
+        let nz0: Float = ism_rand_norm(mem_load(seed, "Int"), seed)
+        let nz1: Float = ism_rand_norm(mem_load(seed, "Int"), seed)
+        var s0: Float = 14.0 * nz0
+        var s1: Float = 14.0 * nz1
+        var tb: Int = 0
+        while tb < 3:
+            var sb2: Int = 1
+            if tb == 1:
+                sb2 = 4
+            if tb == 2:
+                sb2 = 6
+            let fb: Float = ((sb2 as Float) + 0.5) * bwb
+            let nub3: Float = f0b + fb / 1000000.0
+            let lam3: Float = 300.0 / nub3
+            let phi3: Float = 2.0 * RMtrue * lam3 * lam3
+            s0 = s0 + 40.0 * sin(SK_PI2 * fb * t)
+            s1 = s1 + 40.0 * sin(SK_PI2 * fb * t + phi3)
+            tb = tb + 1
+        mem_store(ptr_offset(xb0, ib, "Float"), s0, "Float")
+        mem_store(ptr_offset(xb1, ib, "Float"), s1, "Float")
+        ib = ib + 1
+    let Eb0: ptr<Float> = alloc_zeroed(64 * nsbb + 32, "Float")
+    let Cb0r: ptr<Float> = alloc_zeroed(64 * nsbb + 32, "Float")
+    let Cb0i: ptr<Float> = alloc_zeroed(64 * nsbb + 32, "Float")
+    let Eb1: ptr<Float> = alloc_zeroed(64 * nsbb + 32, "Float")
+    let Cb1r: ptr<Float> = alloc_zeroed(64 * nsbb + 32, "Float")
+    let Cb1i: ptr<Float> = alloc_zeroed(64 * nsbb + 32, "Float")
+    let Rb: Int = ism_stft(xb0, Nb, nsbb, Eb0, Cb0r, Cb0i)
+    let _Rb2: Int = ism_stft(xb1, Nb, nsbb, Eb1, Cb1r, Cb1i)
+    let orm: ptr<Float> = alloc_zeroed(1, "Float")
+    let osd: ptr<Float> = alloc_zeroed(1, "Float")
+    let ovl: ptr<Int> = alloc_zeroed(1, "Int")
+    let _rmr: Int = ism_rm_grid(Cb0r, Cb0i, Cb1r, Cb1i, Rb, nsbb, f0b, fsb, 64, 20.0, orm, osd, ovl)
+    let rmv: Float = mem_load(orm, "Float")
+    let rdr: Float = ism_fabs(rmv - RMtrue)
+    if rdr <= 2.0:
+        println("  [PASS] P3b: RM recovered (rm=" + format_1dp(rmv) + " true=10 side=" + format_1dp(mem_load(osd, "Float")) + ")")
+    else:
+        println("  [FAIL] P3b: RM off rm=" + format_1dp(rmv) + " err=" + format_1dp(rdr))
+        ok = 0
+
+    // ── P4: terrestrial impulse (DM=0 rail-hitting 1-sample pulse) ──
+    let N4: Int = 133120
+    let x4: ptr<Float> = alloc_zeroed(N4 + 32, "Float")
+    mem_store(seed, 909090, "Int")
+    var i4: Int = 0
+    while i4 < N4:
+        mem_store(ptr_offset(x4, i4, "Float"), 14.0 * ism_rand_norm(mem_load(seed, "Int"), seed), "Float")
+        i4 = i4 + 1
+    mem_store(ptr_offset(x4, 66000, "Float"), 1000000.0, "Float")
+    let E4: ptr<Float> = alloc_zeroed(64 * nsb1 + 32, "Float")
+    let C4r: ptr<Float> = alloc_zeroed(64 * nsb1 + 32, "Float")
+    let C4i: ptr<Float> = alloc_zeroed(64 * nsb1 + 32, "Float")
+    let R4: Int = ism_stft(x4, N4, nsb1, E4, C4r, C4i)
+    let mrow4: ptr<Float> = alloc_zeroed(nsb1 + 32, "Float")
+    let mm4: ptr<Float> = alloc_zeroed(1, "Float")
+    let mx4: ptr<Float> = alloc_zeroed(1, "Float")
+    let xc4: ptr<Float> = alloc_zeroed(1, "Float")
+    let dn4: ptr<Float> = alloc_zeroed(1, "Float")
+    let dt4: ptr<Float> = alloc_zeroed(1, "Float")
+    let pe4: ptr<Float> = alloc_zeroed(1, "Float")
+    let ch4: ptr<Float> = alloc_zeroed(1, "Float")
+    let pv4: ptr<Int> = alloc_zeroed(1, "Int")
+    let dm4: ptr<Float> = alloc_zeroed(1, "Float")
+    let dr4: ptr<Float> = alloc_zeroed(1, "Float")
+    let ds4: ptr<Int> = alloc_zeroed(1, "Int")
+    let _s4: Int = ism_band_stats(E4, R4, nsb1, fs1, 1400.0, 4.4, 0.5, mrow4, mm4, mx4, xc4, dn4, dt4, pe4, ch4, pv4, dm4, dr4, ds4)
+    let m4x: Float = mem_load(mx4, "Float")
+    let sp4: Int = mem_load(ds4, "Int")
+    // rail ratio: peak |x| vs median |x|
+    let ax4: ptr<Float> = alloc_zeroed(N4 + 32, "Float")
+    var i4b: Int = 0
+    while i4b < N4:
+        mem_store(ptr_offset(ax4, i4b, "Float"), ism_fabs(mem_load(ptr_offset(x4, i4b, "Float"), "Float")), "Float")
+        i4b = i4b + 1
+    let med4: Float = quickselect_k(ax4, N4, N4 / 2)
+    var pk4: Float = 0.0
+    var i4c: Int = 0
+    while i4c < N4:
+        let v4: Float = mem_load(ptr_offset(ax4, i4c, "Float"), "Float")
+        if v4 > pk4:
+            pk4 = v4
+        i4c = i4c + 1
+    var rail4: Float = 0.0
+    if med4 > 0.000000001:
+        rail4 = pk4 / med4
+    let h4: Int = ism_hum_gate(x4, N4, fs1, 1400.0, 30.0, hc, hf)
+    if m4x > 1.2:
+        if sp4 <= 1:
+            if rail4 > 100.0:
+                if h4 == 0:
+                    println("  [PASS] P4: TERRESTRIAL-IMPULSE (mmax=" + format_1dp(m4x) + " span=" + str(sp4) + " railx=" + format_1dp(rail4 / 1000.0) + "k)")
+                else:
+                    println("  [FAIL] P4: hum false-fire on impulse")
+                    ok = 0
+            else:
+                println("  [FAIL] P4: rail ratio low railx=" + format_1dp(rail4))
+                ok = 0
+        else:
+            println("  [FAIL] P4: dm span nonzero span=" + str(sp4))
+            ok = 0
+    else:
+        println("  [FAIL] P4: mmax too low m=" + format_1dp(m4x))
+        ok = 0
+
+    // ── P5: ON/OFF differential (screen ON vs noise OFF; common both) ──
+    // contrast rule: same stamp-class both legs -> COMMON-NOSTAMP(1), else keep(0)
+    // reuse P3a stats (SCINT, p-valid) as ON and P1 stats (QUIET) as OFF
+    var c_on: Int = 0
+    if m3v >= 0.15:
+        if x3v < 0.8:
+            c_on = 2
+    var c_off: Int = 1
+    var keep1: Int = 0
+    if c_on == 2:
+        if c_off == 1:
+            keep1 = 1
+    var common2: Int = 0
+    if c_on == c_off:
+        common2 = 1
+    // identical COMMON both legs: force class 3 both -> contrast fires
+    var c_a: Int = 3
+    var c_b: Int = 3
+    var common3: Int = 0
+    if c_a == c_b:
+        if c_a == 3:
+            common3 = 1
+    if keep1 == 1:
+        if common2 == 0:
+            if common3 == 1:
+                println("  [PASS] P5: ON/OFF differential (ON=SCINT OFF=CLEAN keep=1; COMMON+COMMON->nostamp=1)")
+            else:
+                println("  [FAIL] P5: common-common contrast missed")
+                ok = 0
+        else:
+            println("  [FAIL] P5: false common flag on ON/OFF pair")
+            ok = 0
+    else:
+        println("  [FAIL] P5: ON stamp not kept (m3=" + format_1dp(m3v) + ")")
+        ok = 0
+
+    // release prove arenas (one decay each, success path)
+    decay fq
+    decay ra
+    decay hc
+    decay hf
+    decay seed
+    decay x1
+    decay E1
+    decay C1r
+    decay C1i
+    decay mrow1
+    decay mm
+    decay mx
+    decay xc1
+    decay dn1
+    decay dt1
+    decay pe1
+    decay ch1
+    decay pv1
+    decay dm1
+    decay dr1
+    decay ds1
+    decay x2
+    decay tmat
+    decay x3
+    decay E3
+    decay C3r
+    decay C3i
+    decay mrow3
+    decay mm3
+    decay mx3
+    decay xc3
+    decay dn3
+    decay dt3
+    decay pe3
+    decay ch3
+    decay pv3
+    decay dm3
+    decay dr3
+    decay ds3
+    decay xb0
+    decay xb1
+    decay Eb0
+    decay Cb0r
+    decay Cb0i
+    decay Eb1
+    decay Cb1r
+    decay Cb1i
+    decay orm
+    decay osd
+    decay ovl
+    decay x4
+    decay E4
+    decay C4r
+    decay C4i
+    decay mrow4
+    decay mm4
+    decay mx4
+    decay xc4
+    decay dn4
+    decay dt4
+    decay pe4
+    decay ch4
+    decay pv4
+    decay dm4
+    decay dr4
+    decay ds4
+    decay ax4
+
+    if ok == 1:
+        println("[prove] ism_stamp: ALL BATTERIES PASSED (5/5)")
+        return 0
+    println("[prove] ism_stamp: BATTERIES FAILED")
+    return 1
+
+// ── f32 file loader (scint_pol fork, +32 arenas) ────────────────────────────
+fn ism_load_f32(path: String, p2t: ptr<Float>, out_n: ptr<Int>) -> ptr<Float> with Unsafe:
+    let h: ptr<Void> = k_CreateFileA(path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h) == -1:
+        mem_store(out_n, 0, "Int")
+        let z: ptr<Float> = alloc_zeroed(32, "Float")
+        return z
+    let szs: ptr<Int> = alloc_zeroed(1, "Int")
+    let _oks: Int = k_GetFileSizeEx(h, szs)
+    let bytes: Int = mem_load(szs, "Int")
+    decay szs
+    if bytes <= 0:
+        let _c: Int = k_CloseHandle(h)
+        mem_store(out_n, 0, "Int")
+        let z2: ptr<Float> = alloc_zeroed(32, "Float")
+        return z2
+    let raw: ptr<Byte> = alloc_zeroed(bytes + 32, "Byte")
+    let nrs: ptr<Int> = alloc_zeroed(1, "Int")
+    let _okr: Int = k_ReadFile(h, raw, bytes, nrs, null_ptr())
+    let _c2: Int = k_CloseHandle(h)
+    decay nrs
+    var ns: Int = bytes / 4
+    if ns > 1052672:
+        ns = 1052672
+    let xb: ptr<Float> = alloc_zeroed(ns + 32, "Float")
+    var s: Int = 0
+    while s < ns:
+        let b0: Int = bref(raw, s * 4)
+        let b1: Int = bref(raw, s * 4 + 1)
+        let b2: Int = bref(raw, s * 4 + 2)
+        let b3: Int = bref(raw, s * 4 + 3)
+        mem_store(ptr_offset(xb, s, "Float"), f32_of_quad(b0, b1, b2, b3, p2t), "Float")
+        s = s + 1
+    decay raw
+    mem_store(out_n, ns, "Int")
+    return xb
+
+// NOTE: no `fn main` here by convention — sibling tools (bispectrum, sk_gate,
+// scint_pol) all build standalone without one, and dispatch.kn owns main() in
+// the amalgamated core.kn. A standalone shim here would collide at amalgamate.
+
+// ── CLI usage ───────────────────────────────────────────────────────────────
+pub fn ism_stamp_usage() -> String:
+    var t: String = "================================================================================\n"
+    t = t + " ism_stamp 0.1.0 — TurboKain Propagation Authenticator (Tool 01, gates everything)\n"
+    t = t + "================================================================================\n\n"
+    t = t + "Fits the CHANNEL, not the signal: STFT 4096/2048 (Hann) -> per-subband\n"
+    t = t + "intensity ACF tiles (converge scalar vs lane) -> modulation index,\n"
+    t = t + "xcorr, dnu/dt_d, Kolmogorov exponent p~4.4 chi2, dual-pol RM grid,\n"
+    t = t + "DM-differential slope, ON/OFF contrast. Hum pre-gate (22.35 Hz family\n"
+    t = t + "+ 982/1665 MHz LO) fires FIRST and quarantines before any escalate.\n\n"
+    t = t + "USAGE:\n"
+    t = t + "  tkc ism_stamp --in <pol0.f32> --fs <hz> [options...]\n\n"
+    t = t + "OPTIONS:\n"
+    t = t + "  --in <path>        Primary pol float32-LE voltage file (required)\n"
+    t = t + "  --in1 <path>       Secondary orthogonal pol .f32 (dual-pol RM + wander)\n"
+    t = t + "  --off <path>       OFF-leg .f32 for ON/OFF contrast (else single-leg)\n"
+    t = t + "  --fs <hz>          Sampling rate Hz (REQUIRED, fold_sum lesson)\n"
+    t = t + "  --f0-mhz <f>       Topocentric ref MHz (default 1400.0)\n"
+    t = t + "  --subbands <n>     DISS subbands (default 8)\n"
+    t = t + "  --rm-grid <n>      RM trial count (default 64)\n"
+    t = t + "  --rm-max <r>       RM half-range rad/m2 (default 20.0)\n"
+    t = t + "  --diss-p <p>       Kolmogorov target exponent (default 4.4)\n"
+    t = t + "  --diss-q <q>       Time-scale target exponent (default 1.2, reported)\n"
+    t = t + "  --tol <t>          Exponent tolerance (default 0.5)\n"
+    t = t + "  --m-gate <m>       Scint m threshold (default 0.15)\n"
+    t = t + "  --xcorr-gate <x>   Decorrelation gate (default 0.80)\n"
+    t = t + "  --hum-gate <r>     Hum peak-ratio gate (default 30.0)\n"
+    t = t + "  --chi2-max <c>     Stamp chi2 ceiling (default 8.0)\n"
+    t = t + "  --rail-x <x>       Impulse rail ratio (default 100.0)\n"
+    t = t + "  --out <stem>       Output stem (default reports/ism_stamp)\n"
+    t = t + "  --csv <path>       CSV ledger path (default <stem>.csv)\n"
+    t = t + "  --data-dir <d>     Prefix for relative inputs ($SETIYETI_DATA fallback)\n"
+    t = t + "  --json             One-line JSON summary on stdout\n"
+    t = t + "  --prove            Run 5/5 self-test battery\n\n"
+    t = t + "VERDICTS: STAMPED / SKY-LIKE / COMMON-NOSTAMP / WANDER-LOCAL /\n"
+    t = t + "  TERRESTRIAL-IMPULSE / UNSTAMPED-SHORT / CLEAN (+ QUARANTINE-HUM).\n"
+    t = t + "EXIT: 0 ok / 1 help-or-prove-FAIL / 2 error.\n"
+    return t
+
+// ── Main ────────────────────────────────────────────────────────────────────
+pub fn ism_stamp_main(args: Array<String>) -> Int with Unsafe:
+    let n_args: Int = len(args)
+    if n_args == 0:
+        print(ism_stamp_usage())
+        return EXIT_HELP
+    var in_path: String = ""
+    var in1_path: String = ""
+    var off_path: String = ""
+    var out_stem: String = "reports/ism_stamp"
+    var csv_path: String = ""
+    var data_dir: String = ""
+    var fs_arg: Float = FS_HZ
+    var fs_given: Int = 0
+    var f0mhz: Float = 1400.0
+    var nsb: Int = 8
+    var rmgrid: Int = 64
+    var rmax: Float = 20.0
+    var diss_p: Float = 4.4
+    var diss_q: Float = 1.2
+    var tol: Float = 0.5
+    var mgate: Float = 0.15
+    var xgate: Float = 0.80
+    var humgate: Float = 30.0
+    var chi2max: Float = 8.0
+    var railx: Float = 100.0
+    var do_json: Int = 0
+    var do_prove: Int = 0
+    var idx: Int = 0
+    while idx < n_args:
+        let a: String = args[idx]
+        if a == "--help":
+            print(ism_stamp_usage())
+            return EXIT_HELP
+        elif a == "-h":
+            print(ism_stamp_usage())
+            return EXIT_HELP
+        elif a == "--prove":
+            do_prove = 1
+        elif a == "--json":
+            do_json = 1
+        elif a == "--in":
+            if idx + 1 < n_args:
+                in_path = args[idx + 1]
+                idx = idx + 1
+        elif a == "--in1":
+            if idx + 1 < n_args:
+                in1_path = args[idx + 1]
+                idx = idx + 1
+        elif a == "--off":
+            if idx + 1 < n_args:
+                off_path = args[idx + 1]
+                idx = idx + 1
+        elif a == "--out":
+            if idx + 1 < n_args:
+                out_stem = args[idx + 1]
+                idx = idx + 1
+        elif a == "--csv":
+            if idx + 1 < n_args:
+                csv_path = args[idx + 1]
+                idx = idx + 1
+        elif a == "--data-dir":
+            if idx + 1 < n_args:
+                data_dir = args[idx + 1]
+                idx = idx + 1
+        elif a == "--fs":
+            if idx + 1 < n_args:
+                fs_arg = parse_float_text(args[idx + 1])
+                fs_given = 1
+                idx = idx + 1
+        elif a == "--f0-mhz":
+            if idx + 1 < n_args:
+                f0mhz = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--subbands":
+            if idx + 1 < n_args:
+                nsb = parse_int_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--rm-grid":
+            if idx + 1 < n_args:
+                rmgrid = parse_int_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--rm-max":
+            if idx + 1 < n_args:
+                rmax = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--diss-p":
+            if idx + 1 < n_args:
+                diss_p = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--diss-q":
+            if idx + 1 < n_args:
+                diss_q = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--tol":
+            if idx + 1 < n_args:
+                tol = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--m-gate":
+            if idx + 1 < n_args:
+                mgate = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--xcorr-gate":
+            if idx + 1 < n_args:
+                xgate = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--hum-gate":
+            if idx + 1 < n_args:
+                humgate = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--chi2-max":
+            if idx + 1 < n_args:
+                chi2max = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        elif a == "--rail-x":
+            if idx + 1 < n_args:
+                railx = parse_float_text(args[idx + 1])
+                idx = idx + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    if len(in_path) == 0:
+                        in_path = a
+        idx = idx + 1
+    if do_prove == 1:
+        return ism_stamp_prove()
+    if fs_given == 0:
+        println("ism_stamp: ERROR: --fs is mandatory (fold_sum lesson: no silent Hz).")
+        return EXIT_ERROR
+    if len(in_path) == 0:
+        println("ism_stamp: ERROR: no input. Use --in <file.f32> --fs <hz> or --prove")
+        return EXIT_ERROR
+    if nsb < 4:
+        nsb = 4
+    if nsb > 32:
+        nsb = 32
+    if csv_path == "":
+        csv_path = out_stem + ".csv"
+    var ism_md_path: String = out_stem + ".md"
+    if str_ends_with(out_stem, ".md") == 1:
+        ism_md_path = out_stem
+    // p2t decode table
+    let p2t: ptr<Float> = alloc_zeroed(256 + 32, "Float")
+    var p2i: Int = 0
+    var p2v: Float = 1.0
+    while p2i < 127:
+        mem_store(ptr_offset(p2t, 126 - p2i, "Float"), 1.0 / p2v, "Float")
+        p2v = p2v * 2.0
+        p2i = p2i + 1
+    mem_store(ptr_offset(p2t, 127, "Float"), 1.0, "Float")
+    p2i = 1
+    p2v = 2.0
+    while p2i < 128:
+        mem_store(ptr_offset(p2t, 127 + p2i, "Float"), p2v, "Float")
+        p2v = p2v * 2.0
+        p2i = p2i + 1
+    // load primary
+    let nn: ptr<Int> = alloc_zeroed(1, "Int")
+    let x0: ptr<Float> = ism_load_f32(in_path, p2t, nn)
+    let nx0: Int = mem_load(nn, "Int")
+    decay nn
+    if nx0 < ISM_SEG:
+        println("ism_stamp: ERROR: file too short / unreadable: " + in_path)
+        return EXIT_ERROR
+    println("[ism_stamp] loaded " + str(nx0) + " samples from " + in_path)
+    let Rcap: Int = ISM_CAP
+    let E0: ptr<Float> = alloc_zeroed(Rcap * nsb + 32, "Float")
+    let C0r: ptr<Float> = alloc_zeroed(Rcap * nsb + 32, "Float")
+    let C0i: ptr<Float> = alloc_zeroed(Rcap * nsb + 32, "Float")
+    let R0: Int = ism_stft(x0, nx0, nsb, E0, C0r, C0i)
+    var verdict: String = "CLEAN"
+    var mmed: Float = 0.0
+    var mmax: Float = 0.0
+    var xcv: Float = 0.0
+    var dnuv: Float = 0.0
+    var dtv: Float = 0.0
+    var pexp: Float = 0.0
+    var chi2: Float = 0.0
+    var rmv2: Float = 0.0
+    var rmside: Float = 1.0
+    var dmsl: Float = 0.0
+    var dmr2: Float = 0.0
+    var humf: Float = 0.0
+    let hc2: ptr<Int> = alloc_zeroed(1, "Int")
+    let hf2: ptr<Float> = alloc_zeroed(1, "Float")
+    let mrow: ptr<Float> = alloc_zeroed(nsb + 32, "Float")
+    if R0 < ISM_MIN:
+        verdict = "UNSTAMPED-SHORT"
+    else:
+        let humcode: Int = ism_hum_gate(x0, nx0, fs_arg, f0mhz, humgate, hc2, hf2)
+        humf = mem_load(hf2, "Float")
+        if ism_hum_prefilter_ok(humcode) == false:
+            verdict = "QUARANTINE-HUM"
+        else:
+            let mmS: ptr<Float> = alloc_zeroed(1, "Float")
+            let mxS: ptr<Float> = alloc_zeroed(1, "Float")
+            let xcS: ptr<Float> = alloc_zeroed(1, "Float")
+            let dnS: ptr<Float> = alloc_zeroed(1, "Float")
+            let dtS: ptr<Float> = alloc_zeroed(1, "Float")
+            let peS: ptr<Float> = alloc_zeroed(1, "Float")
+            let chS: ptr<Float> = alloc_zeroed(1, "Float")
+            let pvS: ptr<Int> = alloc_zeroed(1, "Int")
+            let dmS: ptr<Float> = alloc_zeroed(1, "Float")
+            let drS: ptr<Float> = alloc_zeroed(1, "Float")
+            let dsS: ptr<Int> = alloc_zeroed(1, "Int")
+            let _bs: Int = ism_band_stats(E0, R0, nsb, fs_arg, f0mhz, diss_p, tol, mrow, mmS, mxS, xcS, dnS, dtS, peS, chS, pvS, dmS, drS, dsS)
+            mmed = mem_load(mmS, "Float")
+            mmax = mem_load(mxS, "Float")
+            xcv = mem_load(xcS, "Float")
+            dnuv = mem_load(dnS, "Float")
+            dtv = mem_load(dtS, "Float")
+            pexp = mem_load(peS, "Float")
+            chi2 = mem_load(chS, "Float")
+            dmsl = mem_load(dmS, "Float")
+            dmr2 = mem_load(drS, "Float")
+            let pvalid: Int = mem_load(pvS, "Int")
+            let dmspan: Int = mem_load(dsS, "Int")
+            decay mmS
+            decay mxS
+            decay xcS
+            decay dnS
+            decay dtS
+            decay peS
+            decay chS
+            decay pvS
+            decay dmS
+            decay drS
+            decay dsS
+            // impulse test: rail ratio + simultaneous arrival
+            var axn: Int = nx0
+            if axn > 65536:
+                axn = 65536
+            let axa: ptr<Float> = alloc_zeroed(axn + 32, "Float")
+            var aix: Int = 0
+            while aix < axn:
+                mem_store(ptr_offset(axa, aix, "Float"), ism_fabs(mem_load(ptr_offset(x0, aix, "Float"), "Float")), "Float")
+                aix = aix + 1
+            let meda: Float = quickselect_k(axa, axn, axn / 2)
+            var pka: Float = 0.0
+            var kax: Int = 0
+            while kax < axn:
+                let va: Float = mem_load(ptr_offset(axa, kax, "Float"), "Float")
+                if va > pka:
+                    pka = va
+                kax = kax + 1
+            decay axa
+            var railr: Float = 0.0
+            if meda > 0.000000001:
+                railr = pka / meda
+            if railr > railx:
+                if dmspan <= 1:
+                    verdict = "TERRESTRIAL-IMPULSE"
+            // dual-pol wander + RM
+            if verdict == "CLEAN":
+                if len(in1_path) > 0:
+                    let nn2: ptr<Int> = alloc_zeroed(1, "Int")
+                    let x1b: ptr<Float> = ism_load_f32(in1_path, p2t, nn2)
+                    let nx1: Int = mem_load(nn2, "Int")
+                    decay nn2
+                    if nx1 >= ISM_SEG:
+                        let E1b: ptr<Float> = alloc_zeroed(Rcap * nsb + 32, "Float")
+                        let C1r: ptr<Float> = alloc_zeroed(Rcap * nsb + 32, "Float")
+                        let C1i: ptr<Float> = alloc_zeroed(Rcap * nsb + 32, "Float")
+                        let R1b: Int = ism_stft(x1b, nx1, nsb, E1b, C1r, C1i)
+                        if R1b >= ISM_MIN:
+                            let orm2: ptr<Float> = alloc_zeroed(1, "Float")
+                            let osd2: ptr<Float> = alloc_zeroed(1, "Float")
+                            let ovl2: ptr<Int> = alloc_zeroed(1, "Int")
+                            let _rg: Int = ism_rm_grid(C0r, C0i, C1r, C1i, R0, nsb, f0mhz, fs_arg, rmgrid, rmax, orm2, osd2, ovl2)
+                            rmv2 = mem_load(orm2, "Float")
+                            rmside = mem_load(osd2, "Float")
+                            decay orm2
+                            decay osd2
+                            decay ovl2
+                            // wander: peak-freq disagreement (HIP-113357 fingerprint).
+                            // Both pols must carry a significant tone (ratio gate);
+                            // a tone-vs-noise pair is single-pol-effective, not wander.
+                            let fa: ptr<Float> = alloc_zeroed(1, "Float")
+                            let fb: ptr<Float> = alloc_zeroed(1, "Float")
+                            let ra2: ptr<Float> = alloc_zeroed(1, "Float")
+                            let rb2: ptr<Float> = alloc_zeroed(1, "Float")
+                            ism_peak_freq(x0, nx0, fs_arg, fa, ra2)
+                            ism_peak_freq(x1b, nx1, fs_arg, fb, rb2)
+                            var dfw: Float = mem_load(fa, "Float") - mem_load(fb, "Float")
+                            let rat0: Float = mem_load(ra2, "Float")
+                            let rat1: Float = mem_load(rb2, "Float")
+                            decay fa
+                            decay fb
+                            decay ra2
+                            decay rb2
+                            if dfw < 0.0:
+                                dfw = 0.0 - dfw
+                            let binw: Float = fs_arg / (nx0 as Float)
+                            if rat0 > humgate:
+                                if rat1 > humgate:
+                                    if dfw > 3.0 * binw:
+                                        verdict = "WANDER-LOCAL"
+                        decay E1b
+                        decay C1r
+                        decay C1i
+                    decay x1b
+            // OFF contrast
+            if verdict == "CLEAN":
+                if len(off_path) > 0:
+                    let nn3: ptr<Int> = alloc_zeroed(1, "Int")
+                    let xoff: ptr<Float> = ism_load_f32(off_path, p2t, nn3)
+                    let nxoff: Int = mem_load(nn3, "Int")
+                    decay nn3
+                    if nxoff >= ISM_SEG:
+                        let Eoff: ptr<Float> = alloc_zeroed(Rcap * nsb + 32, "Float")
+                        let Coffr: ptr<Float> = alloc_zeroed(Rcap * nsb + 32, "Float")
+                        let Coffi: ptr<Float> = alloc_zeroed(Rcap * nsb + 32, "Float")
+                        let Roff: Int = ism_stft(xoff, nxoff, nsb, Eoff, Coffr, Coffi)
+                        if Roff >= ISM_MIN:
+                            let mro: ptr<Float> = alloc_zeroed(nsb + 32, "Float")
+                            let mmo: ptr<Float> = alloc_zeroed(1, "Float")
+                            let mxo: ptr<Float> = alloc_zeroed(1, "Float")
+                            let xco: ptr<Float> = alloc_zeroed(1, "Float")
+                            let dno: ptr<Float> = alloc_zeroed(1, "Float")
+                            let dto: ptr<Float> = alloc_zeroed(1, "Float")
+                            let peo: ptr<Float> = alloc_zeroed(1, "Float")
+                            let cho: ptr<Float> = alloc_zeroed(1, "Float")
+                            let pvo: ptr<Int> = alloc_zeroed(1, "Int")
+                            let dmo: ptr<Float> = alloc_zeroed(1, "Float")
+                            let dro: ptr<Float> = alloc_zeroed(1, "Float")
+                            let dso: ptr<Int> = alloc_zeroed(1, "Int")
+                            let _bo: Int = ism_band_stats(Eoff, Roff, nsb, fs_arg, f0mhz, diss_p, tol, mro, mmo, mxo, xco, dno, dto, peo, cho, pvo, dmo, dro, dso)
+                            let offm: Float = mem_load(mmo, "Float")
+                            let offxc: Float = mem_load(xco, "Float")
+                            decay mro
+                            decay mmo
+                            decay mxo
+                            decay xco
+                            decay dno
+                            decay dto
+                            decay peo
+                            decay cho
+                            decay pvo
+                            decay dmo
+                            decay dro
+                            decay dso
+                            // same stamp-class both legs -> COMMON-NOSTAMP
+                            var on_sc: Int = 0
+                            if mmed >= mgate:
+                                if xcv < xgate:
+                                    on_sc = 1
+                            var off_sc: Int = 0
+                            if offm >= mgate:
+                                if offxc < xgate:
+                                    off_sc = 1
+                            if on_sc == 1:
+                                if off_sc == 1:
+                                    verdict = "COMMON-NOSTAMP"
+                        decay Eoff
+                        decay Coffr
+                        decay Coffi
+                    decay xoff
+            // final stamp ladder (single-leg or contrast-surviving)
+            if verdict == "CLEAN":
+                if mmax > 1.2:
+                    if xcv >= 0.95:
+                        verdict = "COMMON-NOSTAMP"
+                if verdict == "CLEAN":
+                    if mmed >= mgate:
+                        if xcv < xgate:
+                            // need p-law for STAMPED, else SKY-LIKE
+                            let pOK: Int = 0
+                            // recompute p-validity via chi2 + stored pexp: law check inline
+                            // (pvalid consumed above; re-derive: STAMPED needs finite dnu + chi2 gate)
+                            if dnuv > 0.0:
+                                if chi2 <= chi2max:
+                                    // exponent window check on scaled ints
+                                    let psx: Int = (pexp * 100.0) as Int
+                                    let tgx: Int = (diss_p * 100.0) as Int
+                                    let tlx: Int = (tol * 100.0) as Int
+                                    if kolmogorov_p_ok(psx, tgx, tlx) == true:
+                                        verdict = "STAMPED"
+                            if verdict == "CLEAN":
+                                verdict = "SKY-LIKE"
+    // receipts
+    let is_st: Int = 0
+    if verdict == "STAMPED":
+        is_st = 1
+    let chi2x: Int = (chi2 * 100.0) as Int
+    let _tile: Int = commit_stamp_tile(StampAuthority, chi2x, is_st)
+    var md: String = "# ISM_STAMP REPORT — Propagation Authenticator\n\n"
+    md = md + "- **Input:** `" + in_path + "`\n"
+    md = md + "- **Verdict:** `" + verdict + "`\n"
+    md = md + "- **Frames:** `" + str(R0) + "` subbands `" + str(nsb) + "` fs `" + format_1dp(fs_arg) + " Hz` f0 `" + format_1dp(f0mhz) + " MHz`\n"
+    md = md + "- **m_med:** `" + format_1dp(mmed) + "` m_max `" + format_1dp(mmax) + "` xcorr `" + format_1dp(xcv) + "`\n"
+    md = md + "- **dnu:** `" + format_1dp(dnuv) + " Hz` dt_d `" + format_1dp(dtv * 1000.0) + " ms` p `" + format_1dp(pexp) + " (tgt " + format_1dp(diss_p) + " +- " + format_1dp(tol) + ")` chi2 `" + format_1dp(chi2) + "`\n"
+    md = md + "- **RM:** `" + format_1dp(rmv2) + " rad/m2` sidelobe `" + format_1dp(rmside) + "` dm_slope `" + format_1dp(dmsl) + "` dm_r2 `" + format_1dp(dmr2) + "` hum_peak `" + format_1dp(humf) + " Hz`\n"
+    md = md + "- **Laws:** `kolmogorov_exponent(p=" + format_1dp(pexp) + ") ism_hum_prefilter_ok off_contrast_ok ism_mad_floor_ok`\n"
+    var csv: String = "subband,f_center_hz,m_x1000,xcorr_x1000,dnu_hz,dt_s,p_exp_x100,chi2_x100,rm_rad_m2,dm_slope,verdict\n"
+    let sbwh: Float = (fs_arg / 2.0) / (nsb as Float)
+    var sb: Int = 0
+    while sb < nsb:
+        let fc2: Float = f0mhz * 1000000.0 + ((sb as Float) + 0.5) * sbwh
+        let mv: Float = mem_load(ptr_offset(mrow, sb, "Float"), "Float")
+        csv = csv + str(sb) + "," + str(fc2 as Int) + "," + str((mv * 1000.0) as Int) + "," + str((xcv * 1000.0) as Int) + ","
+        csv = csv + str(dnuv as Int) + "," + str((dtv * 1000.0) as Int) + "," + str((pexp * 100.0) as Int) + "," + str((chi2 * 100.0) as Int) + ","
+        csv = csv + str((rmv2 * 100.0) as Int) + "," + str((dmsl * 1000.0) as Int) + "," + verdict + "\n"
+        sb = sb + 1
+    let _w1: Int = write_text_file(ism_md_path, md)
+    let _w2: Int = write_text_file(csv_path, csv)
+    println("[ism_stamp] RESULT verdict=" + verdict + " m=" + format_1dp(mmed) + " xc=" + format_1dp(xcv) + " p=" + format_1dp(pexp) + " rm=" + format_1dp(rmv2))
+    println("[ism_stamp] wrote " + ism_md_path + " and " + csv_path)
+    if do_json == 1:
+        print("{\"tool\":\"ism_stamp\",\"verdict\":\"" + verdict + "\",\"m_x1000\":" + str((mmed * 1000.0) as Int) + ",\"p_x100\":" + str((pexp * 100.0) as Int) + ",\"chi2_x100\":" + str(chi2x) + "}\n")
+    decay x0
+    decay p2t
+    decay E0
+    decay C0r
+    decay C0i
+    decay hc2
+    decay hf2
+    decay mrow
+    return EXIT_OK

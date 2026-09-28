@@ -140,6 +140,26 @@ CREATE TABLE IF NOT EXISTS scint (
   row_id INTEGER PRIMARY KEY, scan_id INTEGER, source TEXT,
   class TEXT, m_med_x100 INTEGER, m_max_x100 INTEGER, tau_frames_x100 INTEGER,
   xcorr_x100 INTEGER, pol_verdict TEXT, dfreq_hz REAL, pol_env_corr_x100 INTEGER);
+CREATE TABLE IF NOT EXISTS stamp (
+  row_id INTEGER PRIMARY KEY, scan_id INTEGER, source TEXT,
+  subband INTEGER, f_center_hz REAL, m_x1000 INTEGER, xcorr_x1000 INTEGER,
+  dnu_hz REAL, dt_s REAL, p_exp_x100 INTEGER, chi2_x100 INTEGER,
+  rm_rad_m2 REAL, dm_slope TEXT, verdict TEXT);
+CREATE TABLE IF NOT EXISTS ghost (
+  row_id INTEGER PRIMARY KEY, scan_id INTEGER, source TEXT,
+  mask_id INTEGER, weight INTEGER, len INTEGER, block_idx INTEGER,
+  shift INTEGER, S_x10000 INTEGER, sigma_x100 INTEGER,
+  p_corr_log10 REAL, best INTEGER, verdict TEXT);
+CREATE TABLE IF NOT EXISTS gperf (
+  row_id INTEGER PRIMARY KEY, scan_id INTEGER, source TEXT,
+  tile INTEGER, sk_mean_x1000 INTEGER, sk_frac_pc REAL, h1_x1000 INTEGER,
+  lz_x1000 INTEGER, common_x100 INTEGER, q_x100 INTEGER, verdict TEXT);
+CREATE TABLE IF NOT EXISTS pclock (
+  row_id INTEGER PRIMARY KEY, scan_id INTEGER, source TEXT,
+  psr TEXT, coverage_pc REAL, hum_drop_db REAL, peak_bin INTEGER, verdict TEXT);
+CREATE TABLE IF NOT EXISTS pclock_fold (
+  row_id INTEGER PRIMARY KEY, scan_id INTEGER, source TEXT,
+  phase_bin INTEGER, power_x100 INTEGER, z_x100 INTEGER);
 CREATE TABLE IF NOT EXISTS evidence (
   row_id INTEGER PRIMARY KEY, scan_id INTEGER, source TEXT,
   tool TEXT, star TEXT, leg TEXT, chan INTEGER, kind TEXT,
@@ -347,6 +367,19 @@ _CSV_MAP = {
         ("fam", {"seg": None, "log10p_x100": None}),
     ("dm", "width", "sigma_x100", "t", "verdict"):
         ("pulse", None),
+    ("subband", "f_center_hz", "m_x1000", "xcorr_x1000", "dnu_hz", "dt_s",
+     "p_exp_x100", "chi2_x100", "rm_rad_m2", "dm_slope", "verdict"):
+        ("stamp", None),
+    ("mask_id", "weight", "len", "block_idx", "shift", "S_x10000",
+     "sigma_x100", "p_corr_log10", "best", "verdict"):
+        ("ghost", None),
+    ("tile", "sk_mean_x1000", "sk_frac_pc", "h1_x1000", "lz_x1000",
+     "common_x100", "q_x100", "verdict"):
+        ("gperf", None),
+    ("psr", "coverage_pc", "hum_drop_db", "peak_bin", "verdict"):
+        ("pclock", None),
+    ("phase_bin", "power_x100", "z_x100"):
+        ("pclock_fold", None),
     ("freq_hz", "drift_x100", "sigma_x100", "kind"):
         ("drift", None),
     _FRAME_A: ("framefold", None),
@@ -432,6 +465,20 @@ _PARSERS = {
     "scint": {"class": _text, "m_med_x100": _int, "m_max_x100": _int,
               "tau_frames_x100": _int, "xcorr_x100": _int, "pol_verdict": _text,
               "dfreq_hz": _float, "pol_env_corr_x100": _int},
+    "stamp": {"subband": _int, "f_center_hz": _float, "m_x1000": _int,
+              "xcorr_x1000": _int, "dnu_hz": _float, "dt_s": _float,
+              "p_exp_x100": _int, "chi2_x100": _int, "rm_rad_m2": _float,
+              "dm_slope": _text, "verdict": _text},
+    "ghost": {"mask_id": _int, "weight": _int, "len": _int,
+              "block_idx": _int, "shift": _int, "S_x10000": _int,
+              "sigma_x100": _int, "p_corr_log10": _float, "best": _int,
+              "verdict": _text},
+    "gperf": {"tile": _int, "sk_mean_x1000": _int, "sk_frac_pc": _float,
+              "h1_x1000": _int, "lz_x1000": _int, "common_x100": _int,
+              "q_x100": _int, "verdict": _text},
+    "pclock": {"psr": _text, "coverage_pc": _float, "hum_drop_db": _float,
+               "peak_bin": _int, "verdict": _text},
+    "pclock_fold": {"phase_bin": _int, "power_x100": _int, "z_x100": _int},
     "evidence": {"tool": _text, "star": _text, "leg": _text, "chan": _int,
                  "kind": _text, "freq_hz": _float, "alpha_hz": _float,
                  "period_ms": _float, "sigma": _float, "verdict": _text,
@@ -745,7 +792,8 @@ def ingest_reports(root, con, subpath="reports", full=False, progress=None):
         raise FileNotFoundError(f"ingest: not found: {base}")
     if full:
         for t in ("sk", "xeno", "fam", "pulse", "drift", "frame", "fold", "lag",
-                  "jerk", "scint", "evidence", "stack", "packet", "raster",
+                  "jerk", "scint", "stamp", "ghost", "gperf", "pclock",
+                  "pclock_fold", "evidence", "stack", "packet", "raster",
                   "bits", "xvm", "cadence", "ingest", "spectrum", "census",
                   "anomaly", "stage_runs", "lattice", "floors", "documents",
                   "raw_csv", "raw_tsv", "artifacts", "files", "scans"):
@@ -821,7 +869,8 @@ def ingest_reports(root, con, subpath="reports", full=False, progress=None):
             "SELECT COUNT(*) FROM artifacts WHERE scan_id=?", (scan_id,)).fetchone()[0]
         n_rows = 0
         for t in ("sk", "xeno", "fam", "pulse", "drift", "frame", "fold", "lag",
-                  "jerk", "scint", "evidence", "stack", "packet", "raster",
+                  "jerk", "scint", "stamp", "ghost", "gperf", "pclock",
+                  "pclock_fold", "evidence", "stack", "packet", "raster",
                   "bits", "xvm", "cadence", "ingest", "spectrum", "census",
                   "anomaly", "stage_runs", "lattice", "floors", "documents",
                   "raw_csv", "raw_tsv"):
@@ -1061,6 +1110,34 @@ _SEARCH_SPECS = {
              "text_cols": ["verdict", "file"],
              "extra_cols": ["file", "samples", "nseg", "skdev_x1e3",
                               "skfrac_x1e4", "skflag"]},
+    "stamp": {"score": "t.m_x1000 / 1000.0", "score_unit": "m",
+              "freq": "t.f_center_hz", "verdict": "verdict",
+              "text_cols": ["verdict", "dm_slope"],
+              "extra_cols": ["subband", "f_center_hz", "m_x1000",
+                               "xcorr_x1000", "dnu_hz", "dt_s",
+                               "p_exp_x100", "chi2_x100", "rm_rad_m2",
+                               "dm_slope"]},
+    "ghost": {"score": "-t.p_corr_log10", "score_unit": "neglog10p",
+              "freq": None, "verdict": "verdict",
+              "text_cols": ["verdict"],
+              "extra_cols": ["mask_id", "weight", "len", "block_idx",
+                               "shift", "S_x10000", "sigma_x100",
+                               "p_corr_log10", "best"]},
+    "gperf": {"score": "t.q_x100 / 100.0", "score_unit": "q",
+              "freq": None, "verdict": "verdict",
+              "text_cols": ["verdict"],
+              "extra_cols": ["tile", "sk_mean_x1000", "sk_frac_pc",
+                               "h1_x1000", "lz_x1000", "common_x100",
+                               "q_x100"]},
+    "pclock": {"score": "t.hum_drop_db", "score_unit": "hum_drop_db",
+               "freq": None, "verdict": "verdict",
+               "text_cols": ["verdict", "psr"],
+               "extra_cols": ["psr", "coverage_pc", "hum_drop_db",
+                                "peak_bin"]},
+    "pclock_fold": {"score": "t.z_x100 / 100.0", "score_unit": "sigma",
+               "freq": None, "verdict": None,
+               "text_cols": [],
+               "extra_cols": ["phase_bin", "power_x100", "z_x100"]},
     "stack": {"score": "t.sigma_x100", "score_unit": "sigma_x100",
                 "freq": "t.freq_hz", "verdict": "HITMAP:kind",
                 "text_cols": ["kind"],
@@ -1119,7 +1196,8 @@ SEARCHABLE_TABLES = sorted(_SEARCH_SPECS)
 
 # verdict aliases that map onto binary HITMAP pseudo-columns
 _HIT_WORDS = ("HIT", "DETECTED", "SHOT", "WATCH", "PERIODIC", "FLAG",
-              "STRONG", "CANDIDATE", "LOCKED", "FRAMED", "RASTER", "SPIKY")
+              "STRONG", "CANDIDATE", "LOCKED", "FRAMED", "RASTER", "SPIKY",
+              "STAMP", "GHOST", "PERFECT")
 _CLEAN_WORDS = ("CLEAN", "QUIET", "NOISE", "NO-PACKETS", "COMMON", "-", "")
 
 

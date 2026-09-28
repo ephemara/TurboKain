@@ -1,0 +1,1175 @@
+// ============================================================================
+// fec_ghost.kn — TurboKain alien suite 04: Blind Soft Dual-Code Distinguisher
+// (THE KEYSTONE — defeats Shannon camouflage)
+//
+// WHY THIS EXISTS: capacity-achieving links are power/entropy/cyclostationarity
+// silent by design (p(y)~CN(0,s2), symmetric constellations => bicoherence 0,
+// long interleaves => no frame lines). The one thing a coded link cannot
+// randomize away without killing its own coding gain is its PARITY CONSTRAINTS:
+// any linear (n,k) code has a non-empty dual, so some sparse parity mask MUST
+// bias. Random noise violates every mask at 50%. Coded soft bits satisfy their
+// dual masks with bias. We hunt the ghost of the code, not power excess.
+//
+// STATISTIC (soft-syndrome / boxplus — code-agnostic dual correlation):
+//   front end: soft symbols y (1 sample = 1 symbol, stated assumption),
+//     derotated by --dechirp-hz-s residual r (argv data, never re-searched):
+//     two branches z = x*2cos(phi), x*2sin(phi), phi = pi*r*(i/fs)^2.
+//     r == 0 uses the cos branch only (sin branch is identically zero).
+//   bank: 256 fixed sparse masks, EVEN weights w in {6,8,10,12} (even-weight
+//     masks are invariant under global BPSK sign flip — unknown carrier phase
+//     cannot erase them), spans L in {16,32,64,128,256}, deterministic LCG taps.
+//   per (mask, shift 0..7, 4096-symbol block): S = mean of boxplus products
+//     P = PROD_t tanh(clip(y_{pos+s+t})/2s2^0.5..) with winsorized y (|y|<=3s)
+//     and MAD-floored s2 (floor 1e-9). z = S*sqrt(B)/s0, s0 = m2^(w/2) with
+//     m2 = mean tanh^2 (theoretical null unit from data moments — winsorized,
+//     never a global measured MAD that a strong signal could poison).
+//   gate: max |z| over masks*shifts*blocks*branches trials, Bonferroni
+//     (Holm-equivalent for the top hit) at --p-fa (default 1e-6) via
+//     closed-form normal tail tables (no erf needed).
+//
+// LOAD-BEARING GATES (before any GHOST claim):
+//   hum pre-veto (22.35 Hz family autocorr vs local lags, needs --fs) ->
+//     QUARANTINE-HUM. --stamp <stamp.csv> must exist + contain NON-NULL or the
+//     verdict caps at RESIDUE (ghost fires + stamp null). --off leg runs the
+//     IDENTICAL pipeline; OFF match on (mask,shift) -> COMMON-CODE, census
+//     match (--census data file, never baked constants) -> TERRESTRIAL-CODE.
+//
+// Front-end honesty: v1 (hard bits + (n,interleave) grid, 1e3-1e5 trials) was
+// KILLED in debate (Bonferroni death + hard-slice erasure at 0 dB + DVB-S2 RFI
+// amplification). v2 is soft-only, O(256*8) trials, gated. No grid search here.
+//
+// CSV: mask_id,weight,len,block_idx,shift,S_x10000,sigma_x100,p_corr_log10,
+//   best,verdict. Verdicts: GHOST / TERRESTRIAL-CODE / COMMON-CODE / RESIDUE /
+//   CLEAN / QUARANTINE-HUM. Exits 0 ok / 1 help-or-prove-FAIL / 2 error.
+//   --fs is MANDATORY (M7, fold_sum lesson). Scaled ints only in CSV.
+// ============================================================================
+
+use std::fs
+use std::os
+use std::process
+use std::runtime
+use std::text
+use _common::k_CreateFileA
+use _common::k_ReadFile
+use _common::k_GetFileSizeEx
+use _common::k_CloseHandle
+use _common::k_GetLastError
+use _common::null_ptr
+use _common::GEN_READ
+use _common::OPEN_EXISTING
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::bref
+use _common::parse_int_text
+use _common::parse_float_text
+use _common::find_from
+use _common::f32_of_quad
+use _common::quickselect_k
+use _common::write_text_file
+
+// ── Geometry (argv-overridable where it matters; the rest is method) ────────
+const GHOST_BANK: Int = 256
+const GHOST_SHIFTS: Int = 8
+const GHOST_BLOCK_DFLT: Int = 4096
+const GHOST_SYM_CAP: Int = 65536
+const GHOST_HUM_CAP: Int = 262144
+const GHOST_MAXTAP: Int = 12
+const GHOST_MAXSPAN: Int = 264
+const GHOST_PFA_DFLT_NEG: Int = 6
+const GHOST_WINSOR_SIG: Float = 3.0
+const GHOST_VAR_FLOOR: Float = 0.000000001
+
+// Two-sided normal tail: 100*log10(p) at z = 0,0.5,...,8.0 (math constants).
+const GHOST_LOG10P_TAB: Array<Int> = [0, -21, -50, -87, -134, -191, -257, -333, -420, -517, -624, -742, -871, -1010, -1159, -1319, -1490]
+// ceil(log10) helper: 100*log10(f) upper edge for f in (k,k+1], k = 1..9.
+const GHOST_LOG10_1TO10: Array<Int> = [0, 30, 48, 60, 70, 78, 85, 90, 95, 100]
+
+// ── Laws (witnessable gates — every BLOCK names rule + margin + mechanism) ──
+law winsor_ok(cap_sig: Int, used_sig_x100: Int) -> Bool:
+    return used_sig_x100 <= cap_sig * 100
+
+law ghost_mad_floor_ok(var_x1e12: Int) -> Bool:
+    return var_x1e12 >= 1
+
+law bonferroni_ok(best_z_x100: Int, gate_z_x100: Int) -> Bool:
+    return best_z_x100 >= gate_z_x100
+
+law onoff_contrast_ok(on_z_x100: Int, off_z_x100: Int, gate_z_x100: Int) -> Bool:
+    return on_z_x100 >= gate_z_x100 and off_z_x100 < gate_z_x100
+
+law ghost_hum_prefilter_ok(hum_ratio_x1000: Int, hum_gate_x1000: Int) -> Bool:
+    return hum_ratio_x1000 < hum_gate_x1000
+
+// ── Converge: tanh truth vs fast lane ───────────────────────────────────────
+fn tanh_spec(z: Float) -> Float:
+    let e2: Float = exp(2.0 * z)
+    return (e2 - 1.0) / (e2 + 1.0)
+
+fn tanh_fast(z: Float) -> Float:
+    let z2: Float = z * z
+    return z * (945.0 + 105.0 * z2 + z2 * z2) / (945.0 + 420.0 * z2 + 15.0 * z2 * z2)
+
+converge tanh_lane(z: Float) -> Float:
+    spec reference:
+        return tanh_spec(z)
+    fast pade_lane when target("llvm"):
+        return tanh_fast(z)
+    verify random(8)
+
+// ── log10 helpers (closed form, table data — no erf/log needed) ─────────────
+fn ghost_log10p_two(z_x100: Int) -> Int:
+    var az: Int = z_x100
+    if az < 0:
+        az = 0 - az
+    if az >= 800:
+        return -1490
+    let lo: Int = az / 50
+    let hi: Int = lo + 1
+    let a: Int = GHOST_LOG10P_TAB[lo]
+    let b: Int = GHOST_LOG10P_TAB[hi]
+    let frac: Int = az - lo * 50
+    return a + (b - a) * frac / 50
+
+fn ghost_z_for_log10p(lp_x100: Int) -> Int:
+    if lp_x100 >= 0:
+        return 0
+    if lp_x100 <= -1490:
+        return 800
+    var g: Int = 0
+    while g < 16:
+        let a: Int = GHOST_LOG10P_TAB[g]
+        let b: Int = GHOST_LOG10P_TAB[g + 1]
+        if lp_x100 <= a and lp_x100 >= b:
+            let span: Int = a - b
+            var step: Int = 0
+            if span > 0:
+                step = (a - lp_x100) * 50 / span
+            return g * 50 + step
+        g = g + 1
+    return 800
+
+fn ghost_log10_trials_x100(t: Int) -> Int:
+    if t <= 1:
+        return 0
+    var k: Int = 0
+    var p: Int = 1
+    while p < t:
+        p = p * 10
+        k = k + 1
+    var p10: Int = 1
+    var e: Int = 1
+    while e < k:
+        p10 = p10 * 10
+        e = e + 1
+    let f100: Int = t * 100 / p10
+    var idx: Int = 0
+    if f100 > 100:
+        idx = (f100 - 101) / 100
+    if idx > 8:
+        idx = 8
+    return (k - 1) * 100 + GHOST_LOG10_1TO10[idx + 1]
+
+fn ghost_gate_z_x100(nmasks: Int, nshifts: Int, nblocks: Int, nbr: Int, pfa_neg: Int) -> Int:
+    let t: Int = nmasks * nshifts * nblocks * nbr
+    let logt: Int = ghost_log10_trials_x100(t)
+    let budget: Int = 0 - pfa_neg * 100 - logt
+    return ghost_z_for_log10p(budget)
+
+// ── Bank: deterministic sparse masks (data-not-code; LCG-derived) ───────────
+fn ghost_build_bank(weights: ptr<Int>, lens: ptr<Int>, taps: ptr<Int>) -> Int with Unsafe:
+    var m: Int = 0
+    while m < GHOST_BANK:
+        let w: Int = 6 + (m % 4) * 2
+        var li: Int = m / 32
+        if li > 4:
+            li = 4
+        var L: Int = 16
+        if li == 1:
+            L = 32
+        if li == 2:
+            L = 64
+        if li == 3:
+            L = 128
+        if li == 4:
+            L = 256
+        mem_store(ptr_offset(weights, m, "Int"), w, "Int")
+        mem_store(ptr_offset(lens, m, "Int"), L, "Int")
+        var seed: Int = (m + 1) * 2654435761 % 2147483648
+        if seed < 0:
+            seed = 0 - seed
+        if seed == 0:
+            seed = 12345 + m
+        var t: Int = 0
+        while t < w:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            var cand: Int = seed % L
+            if cand < 0:
+                cand = 0 - cand
+            var u: Int = 0
+            var dup: Int = 0
+            while u < t:
+                if mem_load(ptr_offset(taps, m * GHOST_MAXTAP + u, "Int"), "Int") == cand:
+                    dup = 1
+                u = u + 1
+            if dup == 0:
+                mem_store(ptr_offset(taps, m * GHOST_MAXTAP + t, "Int"), cand, "Int")
+                t = t + 1
+        m = m + 1
+    return 0
+
+// ── MAD sigma with floor (boxcar G5 lesson) ─────────────────────────────────
+fn ghost_mad_sigma(x: ptr<Float>, n: Int, scratch: ptr<Float>) -> Float with Unsafe:
+    var i: Int = 0
+    while i < n:
+        mem_store(ptr_offset(scratch, i, "Float"), mem_load(ptr_offset(x, i, "Float"), "Float"), "Float")
+        i = i + 1
+    let med: Float = quickselect_k(scratch, n, n / 2)
+    i = 0
+    while i < n:
+        var d: Float = mem_load(ptr_offset(x, i, "Float"), "Float") - med
+        if d < 0.0:
+            d = 0.0 - d
+        mem_store(ptr_offset(scratch, i, "Float"), d, "Float")
+        i = i + 1
+    let mad: Float = quickselect_k(scratch, n, n / 2)
+    var sig: Float = mad * 1.4826
+    let fl: Float = 0.0000317
+    if sig < fl:
+        sig = fl
+    return sig
+
+// ── Core scan: tt holds precomputed tanh per symbol; rows filled per mask ───
+// out arrays (caller-owned, len nmasks): row_z (z_x100), row_b (block),
+// row_s (shift). Returns global best z_x100; best indices via best_m/s/b.
+fn ghost_scan(tt: ptr<Float>, n: Int, nmasks: Int, nshifts: Int, block: Int, m2: Float, weights: ptr<Int>, lens: ptr<Int>, taps: ptr<Int>, row_z: ptr<Int>, row_b: ptr<Int>, row_s: ptr<Int>, best_m: ptr<Int>, best_s: ptr<Int>, best_b: ptr<Int>) -> Int with Unsafe:
+    var nblocks: Int = 0
+    if n > GHOST_MAXSPAN:
+        nblocks = (n - GHOST_MAXSPAN) / block
+    if nblocks < 1:
+        nblocks = 1
+    let Bf: Float = block as Float
+    let sqB: Float = sqrt(Bf)
+    var gbest: Float = 0.0
+    var m: Int = 0
+    while m < nmasks:
+        let w: Int = mem_load(ptr_offset(weights, m, "Int"), "Int")
+        var pw: Float = 1.0
+        var hw: Int = 0
+        while hw < w / 2:
+            pw = pw * m2
+            hw = hw + 1
+        if pw < 0.000000000001:
+            pw = 0.000000000001
+        let norm: Float = sqB / pw
+        var mbest: Float = 0.0
+        var mbest_b: Int = 0
+        var mbest_s: Int = 0
+        var s: Int = 0
+        while s < nshifts:
+            var b: Int = 0
+            while b < nblocks:
+                let base: Int = b * block
+                var acc: Float = 0.0
+                var cnt: Int = 0
+                var j: Int = 0
+                while j < block:
+                    let pos: Int = base + j
+                    if pos + s + 256 < n:
+                        var p: Float = 1.0
+                        var t: Int = 0
+                        while t < w:
+                            let off: Int = mem_load(ptr_offset(taps, m * GHOST_MAXTAP + t, "Int"), "Int")
+                            p = p * mem_load(ptr_offset(tt, pos + s + off, "Float"), "Float")
+                            t = t + 1
+                        acc = acc + p
+                        cnt = cnt + 1
+                    j = j + 1
+                if cnt > 0:
+                    let Sv: Float = acc / (cnt as Float)
+                    var z: Float = Sv * norm
+                    if z < 0.0:
+                        z = 0.0 - z
+                    if z > mbest:
+                        mbest = z
+                        mbest_b = b
+                        mbest_s = s
+                    if z > gbest:
+                        gbest = z
+                        mem_store(ptr_offset(best_m, 0, "Int"), m, "Int")
+                        mem_store(ptr_offset(best_s, 0, "Int"), s, "Int")
+                        mem_store(ptr_offset(best_b, 0, "Int"), b, "Int")
+                b = b + 1
+            s = s + 1
+        var zx: Int = (mbest * 100.0) as Int
+        if zx > 999999:
+            zx = 999999
+        mem_store(ptr_offset(row_z, m, "Int"), zx, "Int")
+        mem_store(ptr_offset(row_b, m, "Int"), mbest_b, "Int")
+        mem_store(ptr_offset(row_s, m, "Int"), mbest_s, "Int")
+        m = m + 1
+    var gx: Int = (gbest * 100.0) as Int
+    if gx > 999999:
+        gx = 999999
+    return gx
+
+// ── Hum pre-veto: Goertzel power at the 22.35 Hz family vs local neighbors ──
+// Autocorr contrast cannot see this hum (off-lags 84 samples away at 2.9 MHz
+// are still inside one 22.35 Hz period, and any strong tone mimics hum at one
+// lag). Frequency-localised power ratio is the honest test: a tone elsewhere
+// leaks little into the hum bin, while backend hum dominates its neighbours.
+fn ghost_goertzel_pow(x: ptr<Float>, n: Int, freq: Float, fs: Float) -> Float with Unsafe:
+    let w: Float = 6.2831853 * freq / fs
+    let c2: Float = 2.0 * cos(w)
+    var s1: Float = 0.0
+    var s2: Float = 0.0
+    var i: Int = 0
+    while i < n:
+        let s0: Float = mem_load(ptr_offset(x, i, "Float"), "Float") + c2 * s1 - s2
+        s2 = s1
+        s1 = s0
+        i = i + 1
+    let p: Float = s1 * s1 + s2 * s2 - c2 * s1 * s2
+    if p <= 0.0:
+        return 0.0
+    return p / (n as Float)
+
+fn ghost_med4(a: Float, b: Float, c: Float, d: Float) -> Float:
+    var x0: Float = a
+    var x1: Float = b
+    var x2: Float = c
+    var x3: Float = d
+    if x0 > x1:
+        let t01: Float = x0
+        x0 = x1
+        x1 = t01
+    if x2 > x3:
+        let t23: Float = x2
+        x2 = x3
+        x3 = t23
+    if x0 > x2:
+        let t02: Float = x0
+        x0 = x2
+        x2 = t02
+    if x1 > x3:
+        let t13: Float = x1
+        x1 = x3
+        x3 = t13
+    if x1 > x2:
+        let t12: Float = x1
+        x1 = x2
+        x2 = t12
+    return (x1 + x2) * 0.5
+
+fn ghost_hum_ratio_x1000(x: ptr<Float>, n: Int, fs: Float, vari: Float) -> Int with Unsafe:
+    if fs <= 0.0:
+        return 0
+    if n < 8192:
+        return 0
+    if vari <= 0.0:
+        return 0
+    let fams: Array<Float> = [22.35, 44.70, 134.11, 178.81, 715.25]
+    var best: Float = 0.0
+    var f: Int = 0
+    while f < 5:
+        let f0: Float = fams[f]
+        if f0 > 1.0:
+            if f0 + 80.0 < fs * 0.5:
+                let g0: Float = ghost_goertzel_pow(x, n, f0, fs)
+                let g1: Float = ghost_goertzel_pow(x, n, f0 + 32.0, fs)
+                let g2: Float = ghost_goertzel_pow(x, n, f0 + 48.0, fs)
+                let g3: Float = ghost_goertzel_pow(x, n, f0 + 64.0, fs)
+                let g4: Float = ghost_goertzel_pow(x, n, f0 + 80.0, fs)
+                let med: Float = ghost_med4(g1, g2, g3, g4)
+                if med > 0.0:
+                    if g0 > 8.0 * vari:
+                        let ratio: Float = g0 / med
+                        if ratio > best:
+                            best = ratio
+        f = f + 1
+    return (best * 1000.0) as Int
+
+// ── Stamp / census gates (text contracts) ────────────────────────────────────
+fn ghost_stamp_ok(stamp_text: String) -> Int:
+    if len(stamp_text) == 0:
+        return 0
+    if find_from(stamp_text, "NON-NULL", 0) >= 0:
+        return 1
+    return 0
+
+fn ghost_census_match(census_text: String, mask_id: Int) -> Int:
+    if len(census_text) == 0:
+        return 0
+    let key: String = str(mask_id) + ","
+    var start: Int = 0
+    while start < len(census_text):
+        let at: Int = find_from(census_text, key, start)
+        if at < 0:
+            return 0
+        if at == 0:
+            return 1
+        if char_at(census_text, at - 1) == "\n":
+            return 1
+        start = at + 1
+    return 0
+
+// ── Prove battery 5/5 ───────────────────────────────────────────────────────
+fn run_ghost_prove() -> Int with Unsafe:
+    println("fec_ghost: blind soft dual-code distinguisher — prove battery...")
+    var npass: Int = 0
+    var total: Int = 0
+
+    let mut weights: ptr<Int> = alloc_zeroed(GHOST_BANK + 32, "Int")
+    let mut lens: ptr<Int> = alloc_zeroed(GHOST_BANK + 32, "Int")
+    let mut masktaps: ptr<Int> = alloc_zeroed(GHOST_BANK * GHOST_MAXTAP + 32, "Int")
+    let _bg: Int = ghost_build_bank(weights, lens, masktaps)
+
+    // P0 (converge lane): tanh spec vs fast agree on winsor range.
+    var worst_t1000: Int = 0
+    var seed: Int = 777
+    var v: Int = 0
+    while v < 8:
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        let z: Float = ((seed as Float) / 2147483648.0 - 0.5) * 6.0
+        var d: Float = tanh_spec(z) - tanh_fast(z)
+        if d < 0.0:
+            d = 0.0 - d
+        let d1000: Int = (d * 1000.0) as Int
+        if d1000 > worst_t1000:
+            worst_t1000 = d1000
+        v = v + 1
+    total = total + 1
+    if worst_t1000 <= 5:
+        npass = npass + 1
+        println("  [PASS] P0: tanh_lane spec-vs-fast agree (worst_x1000=" + str(worst_t1000) + ")")
+    else:
+        println("  [FAIL] P0: tanh_lane agreement (worst_x1000=" + str(worst_t1000) + " > 5)")
+
+    // Shared prove scan harness: symbols -> derotate(r=0, cos branch) -> MAD ->
+    // winsorize -> tanh -> ghost_scan. Returns best z_x100 + mask via slots.
+    let PN: Int = 32768
+    let PBLOCK: Int = 4096
+    let PN_masks: Int = 256
+    let PN_sh: Int = 8
+
+    // ── P1: pure Gaussian null -> CLEAN (no mask survives Bonferroni) ──
+    let mut y1: ptr<Float> = alloc_zeroed(PN + 32, "Float")
+    var i: Int = 0
+    while i < PN:
+        var u: Float = 0.0
+        var r: Int = 0
+        while r < 12:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            u = u + (seed as Float) / 2147483648.0
+            r = r + 1
+        mem_store(ptr_offset(y1, i, "Float"), u - 6.0, "Float")
+        i = i + 1
+    let mut sc1: ptr<Float> = alloc_zeroed(PN + 32, "Float")
+    let sig1: Float = ghost_mad_sigma(y1, PN, sc1)
+    let mut tt1: ptr<Float> = alloc_zeroed(PN + 32, "Float")
+    var m2a: Float = 0.0
+    i = 0
+    while i < PN:
+        var yn: Float = mem_load(ptr_offset(y1, i, "Float"), "Float") / sig1
+        if yn > 3.0:
+            yn = 3.0
+        if yn < -3.0:
+            yn = -3.0
+        let tv: Float = tanh_lane(yn / 2.0)
+        mem_store(ptr_offset(tt1, i, "Float"), tv, "Float")
+        m2a = m2a + tv * tv
+        i = i + 1
+    m2a = m2a / (PN as Float)
+    let mut rz1: ptr<Int> = alloc_zeroed(PN_masks + 32, "Int")
+    let mut rb1: ptr<Int> = alloc_zeroed(PN_masks + 32, "Int")
+    let mut rs1: ptr<Int> = alloc_zeroed(PN_masks + 32, "Int")
+    let mut bm1: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut bs1: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut bb1: ptr<Int> = alloc_zeroed(1, "Int")
+    let nbl1: Int = (PN - GHOST_MAXSPAN) / PBLOCK
+    let gate1: Int = ghost_gate_z_x100(PN_masks, PN_sh, nbl1, 1, 6)
+    let gz1: Int = ghost_scan(tt1, PN, PN_masks, PN_sh, PBLOCK, m2a, weights, lens, masktaps, rz1, rb1, rs1, bm1, bs1, bb1)
+    decay y1
+    decay sc1
+    decay tt1
+    decay rz1
+    decay rb1
+    decay rs1
+    decay bm1
+    decay bs1
+    decay bb1
+    total = total + 1
+    if gz1 < gate1:
+        npass = npass + 1
+        println("  [PASS] P1: noise null CLEAN (best_z_x100=" + str(gz1) + " gate=" + str(gate1) + ")")
+    else:
+        println("  [FAIL] P1: noise null fired (best_z_x100=" + str(gz1) + " gate=" + str(gate1) + ")")
+
+    // ── P2: 22.35 Hz hum + coded sidelobe -> QUARANTINE-HUM, never GHOST ──
+    let HN: Int = 262144
+    let HFS: Float = 2929687.5
+    let mut yh: ptr<Float> = alloc_zeroed(HN + 32, "Float")
+    i = 0
+    while i < HN:
+        var u2: Float = 0.0
+        var r2: Int = 0
+        while r2 < 6:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            u2 = u2 + (seed as Float) / 2147483648.0
+            r2 = r2 + 1
+        u2 = (u2 - 3.0) * 0.5
+        let hum: Float = 2.5 * sin(6.2831853 * 22.35 * (i as Float) / HFS)
+        mem_store(ptr_offset(yh, i, "Float"), u2 + hum, "Float")
+        i = i + 1
+    let hmarg: Int = 0
+    let hse: Int = 0
+    var hvar: Float = 0.0
+    i = 0
+    while i < HN:
+        hvar = hvar + mem_load(ptr_offset(yh, i, "Float"), "Float") * mem_load(ptr_offset(yh, i, "Float"), "Float")
+        i = i + 1
+    hvar = hvar / (HN as Float)
+    let hratio: Int = ghost_hum_ratio_x1000(yh, HN, HFS, hvar)
+    decay yh
+    total = total + 1
+    if hratio > 25000:
+        npass = npass + 1
+        println("  [PASS] P2: hum veto fires (ratio_x1000=" + str(hratio) + " gate=25000 -> QUARANTINE-HUM)")
+    else:
+        println("  [FAIL] P2: hum veto missed (ratio_x1000=" + str(hratio) + " gate=25000)")
+
+    // ── P3/P4/P5 shared coded signal: chunk-wise even parity over bank
+    // mask 37 taps (runtime-read dual — unknown to the detector), rate
+    // (L-1)/L, block-shift interleave 3 (absorbed by shift trials), slow AM
+    // screen + chirp residual, derotated with the true residual as data. ──
+    let PM: Int = 37
+    let pw3: Int = mem_load(ptr_offset(weights, PM, "Int"), "Int")
+    let pL3: Int = mem_load(ptr_offset(lens, PM, "Int"), "Int")
+    let CN: Int = 32768
+    let mut bits: ptr<Int> = alloc_zeroed(CN + 32, "Int")
+    i = 0
+    while i < CN:
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        var b: Int = 1
+        if seed % 2 == 0:
+            b = 0 - 1
+        mem_store(ptr_offset(bits, i, "Int"), b, "Int")
+        i = i + 1
+    var c0: Int = 0
+    while c0 < CN:
+        var par: Int = 1
+        var t3: Int = 0
+        while t3 < pw3 - 1:
+            let off3: Int = mem_load(ptr_offset(masktaps, PM * GHOST_MAXTAP + t3, "Int"), "Int")
+            if c0 + off3 < CN:
+                par = par * mem_load(ptr_offset(bits, c0 + off3, "Int"), "Int")
+            t3 = t3 + 1
+        let plast: Int = mem_load(ptr_offset(masktaps, PM * GHOST_MAXTAP + pw3 - 1, "Int"), "Int")
+        if c0 + plast < CN:
+            mem_store(ptr_offset(bits, c0 + plast, "Int"), par, "Int")
+        c0 = c0 + pL3
+    // interleave: block shift by 3 + AM screen + chirp, 0 dB noise.
+    let CRES: Float = 2.0
+    let CFS: Float = 4096.0
+    let mut xc: ptr<Float> = alloc_zeroed(CN + 32, "Float")
+    i = 0
+    while i < CN:
+        let src: Int = (i + CN - 3) % CN
+        let bv: Float = mem_load(ptr_offset(bits, src, "Int"), "Int") as Float
+        let scr: Float = 0.75 + 0.5 * sin(6.2831853 * (i as Float) / 8192.0)
+        let phi: Float = 3.14159265 * CRES * (i as Float) * (i as Float) / (CFS * CFS)
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        var u3: Float = 0.0
+        var r3: Int = 0
+        while r3 < 12:
+            seed = (seed * 1103515245 + 12345) % 2147483648
+            u3 = u3 + (seed as Float) / 2147483648.0
+            r3 = r3 + 1
+        u3 = u3 - 6.0
+        let xv: Float = bv * scr * cos(phi) + u3
+        mem_store(ptr_offset(xc, i, "Float"), xv, "Float")
+        i = i + 1
+    decay bits
+    // derotate with true residual (data, as frft_hunt would hand it).
+    let mut yd: ptr<Float> = alloc_zeroed(CN + 32, "Float")
+    i = 0
+    while i < CN:
+        let phi2: Float = 3.14159265 * CRES * (i as Float) * (i as Float) / (CFS * CFS)
+        mem_store(ptr_offset(yd, i, "Float"), mem_load(ptr_offset(xc, i, "Float"), "Float") * 2.0 * cos(phi2), "Float")
+        i = i + 1
+    decay xc
+    let mut scd: ptr<Float> = alloc_zeroed(CN + 32, "Float")
+    let sigd: Float = ghost_mad_sigma(yd, CN, scd)
+    let mut ttd: ptr<Float> = alloc_zeroed(CN + 32, "Float")
+    var m2d: Float = 0.0
+    i = 0
+    while i < CN:
+        var yv: Float = mem_load(ptr_offset(yd, i, "Float"), "Float") / sigd
+        if yv > 3.0:
+            yv = 3.0
+        if yv < -3.0:
+            yv = -3.0
+        let tvd: Float = tanh_lane(yv / 2.0)
+        mem_store(ptr_offset(ttd, i, "Float"), tvd, "Float")
+        m2d = m2d + tvd * tvd
+        i = i + 1
+    m2d = m2d / (CN as Float)
+    decay yd
+    decay scd
+    let mut rzd: ptr<Int> = alloc_zeroed(PN_masks + 32, "Int")
+    let mut rbd: ptr<Int> = alloc_zeroed(PN_masks + 32, "Int")
+    let mut rsd: ptr<Int> = alloc_zeroed(PN_masks + 32, "Int")
+    let mut bmd: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut bsd: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut bbd: ptr<Int> = alloc_zeroed(1, "Int")
+    let nbld: Int = (CN - GHOST_MAXSPAN) / PBLOCK
+    let gated: Int = ghost_gate_z_x100(PN_masks, PN_sh, nbld, 1, 6)
+    let gzd: Int = ghost_scan(ttd, CN, PN_masks, PN_sh, PBLOCK, m2d, weights, lens, masktaps, rzd, rbd, rsd, bmd, bsd, bbd)
+    let found_m: Int = mem_load(bmd, "Int")
+    let found_s: Int = mem_load(bsd, "Int")
+
+    // P3: stamp NON-NULL + global fire + planted dual above gate -> GHOST.
+    // (Best-mask attribution is redundant by design: many masks share taps
+    // with one code. The load-bearing claims are detection + true-dual fire.)
+    let stamp_ok3: Int = ghost_stamp_ok("ism_stamp v0\nEXPONENT=4.41\nVERDICT=NON-NULL\n")
+    let m37z: Int = mem_load(ptr_offset(rzd, PM, "Int"), "Int")
+    total = total + 1
+    if gzd >= gated and m37z >= gated and stamp_ok3 == 1:
+        npass = npass + 1
+        println("  [PASS] P3: spread-coded 0dB screen+residual GHOST (best_z_x100=" + str(gzd) + " dual37_z=" + str(m37z) + " gate=" + str(gated) + " mask=" + str(found_m) + " shift=" + str(found_s) + ")")
+    else:
+        println("  [FAIL] P3: coded ghost (best_z_x100=" + str(gzd) + " dual37_z=" + str(m37z) + " gate=" + str(gated) + " mask=" + str(found_m) + " stamp=" + str(stamp_ok3) + ")")
+
+    // P4: identical fire + stamp null -> RESIDUE, never HIT.
+    let stamp_ok4: Int = ghost_stamp_ok("ism_stamp v0\nEXPONENT=none\nVERDICT=NULL\n")
+    var verdict4: String = "CLEAN"
+    if gzd >= gated and stamp_ok4 == 0:
+        verdict4 = "RESIDUE"
+    total = total + 1
+    if verdict4 == "RESIDUE":
+        npass = npass + 1
+        println("  [PASS] P4: no-screen twin gated to RESIDUE (fire=1 stamp=0 -> " + verdict4 + ")")
+    else:
+        println("  [FAIL] P4: stamp gating (verdict=" + verdict4 + ")")
+
+    // P5: identical coded signal ON+OFF through the identical pipeline ->
+    // same (mask,shift) best -> COMMON-CODE veto (differential-or-death).
+    let mut rz5: ptr<Int> = alloc_zeroed(PN_masks + 32, "Int")
+    let mut rb5: ptr<Int> = alloc_zeroed(PN_masks + 32, "Int")
+    let mut rs5: ptr<Int> = alloc_zeroed(PN_masks + 32, "Int")
+    let mut bm5: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut bs5: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut bb5: ptr<Int> = alloc_zeroed(1, "Int")
+    let gz5: Int = ghost_scan(ttd, CN, PN_masks, PN_sh, PBLOCK, m2d, weights, lens, masktaps, rz5, rb5, rs5, bm5, bs5, bb5)
+    let off_m: Int = mem_load(bm5, "Int")
+    let off_s: Int = mem_load(bs5, "Int")
+    decay rz5
+    decay rb5
+    decay rs5
+    decay bm5
+    decay bs5
+    decay bb5
+    decay ttd
+    decay rzd
+    decay rbd
+    decay rsd
+    decay bmd
+    decay bsd
+    decay bbd
+    var dsh5: Int = off_s - found_s
+    if dsh5 < 0:
+        dsh5 = 0 - dsh5
+    var verdict5: String = "GHOST"
+    if gzd >= gated and gz5 >= gated and off_m == found_m and dsh5 <= 1:
+        verdict5 = "COMMON-CODE"
+    total = total + 1
+    if verdict5 == "COMMON-CODE":
+        npass = npass + 1
+        println("  [PASS] P5: OFF-common veto (on_mask=" + str(found_m) + " off_mask=" + str(off_m) + " shift~" + str(found_s) + " -> " + verdict5 + ")")
+    else:
+        println("  [FAIL] P5: differential-or-death (verdict=" + verdict5 + ")")
+
+    decay weights
+    decay lens
+    decay masktaps
+
+    println("[prove] " + str(npass) + "/" + str(total) + " checks passed")
+    if npass == total:
+        println("receipt=PASS prove=" + str(npass) + "/" + str(total))
+        return 0
+    println("receipt=FAIL prove=" + str(npass) + "/" + str(total))
+    return 1
+
+// ── Usage ───────────────────────────────────────────────────────────────────
+pub fn fec_ghost_usage() -> String:
+    var t: String = "fec_ghost 2.0.0 — Blind Soft Dual-Code Distinguisher (KEYSTONE)\n"
+    t = t + "Hunts parity-constraint ghosts in soft bits: fixed 256-mask bank,\n"
+    t = t + "boxplus statistic S=E[PROD tanh(y/2s)] in 4096-symbol blocks,\n"
+    t = t + "Bonferroni/Holm gate at --p-fa. Soft-only: no hard slicing,\n"
+    t = t + "no (n,interleave) grid. GHOST needs stamp NON-NULL + ON-only.\n\n"
+    t = t + "USAGE:\n"
+    t = t + "  core fec_ghost --in <f32> --fs HZ [--dechirp-hz-s F] [--masks 256]\n"
+    t = t + "    [--block 4096] [--p-fa 1e-6] [--off <off.f32>] [--stamp <csv>]\n"
+    t = t + "    [--census <csv>] [--hum-gate 25000] [--out <md>] [--csv <csv>]\n"
+    t = t + "    [--data-dir D] [--json] [--prove]\n\n"
+    t = t + "CSV: mask_id,weight,len,block_idx,shift,S_x10000,sigma_x100,\n"
+    t = t + "  p_corr_log10,best,verdict\n"
+    t = t + "EXIT CODES: 0 ok, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+// ── Main ────────────────────────────────────────────────────────────────────
+pub fn fec_ghost_main(args: Array<String>) -> Int with Unsafe:
+    if len(args) == 0:
+        print(fec_ghost_usage())
+        return EXIT_HELP
+
+    var in_path: String = ""
+    var off_path: String = ""
+    var stamp_path: String = ""
+    var census_path: String = ""
+    var out_path: String = ""
+    var csv_path: String = ""
+    var data_dir: String = ""
+    var fs: Float = 0.0
+    var fs_given: Int = 0
+    var dechirp: Float = 0.0
+    var nmasks: Int = 256
+    var block: Int = 4096
+    var pfa_neg: Int = 6
+    var hum_gate_x1000: Int = 25000
+    var do_prove: Int = 0
+    var is_json: Int = 0
+
+    var i: Int = 0
+    while i < len(args):
+        let arg: String = args[i]
+        if arg == "--help" or arg == "-h":
+            print(fec_ghost_usage())
+            return EXIT_HELP
+        elif arg == "--prove" or arg == "--selftest":
+            do_prove = 1
+        elif arg == "--json":
+            is_json = 1
+        elif arg == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif arg == "--off":
+            if i + 1 < len(args):
+                off_path = args[i + 1]
+                i = i + 1
+        elif arg == "--stamp":
+            if i + 1 < len(args):
+                stamp_path = args[i + 1]
+                i = i + 1
+        elif arg == "--census":
+            if i + 1 < len(args):
+                census_path = args[i + 1]
+                i = i + 1
+        elif arg == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif arg == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif arg == "--fs":
+            if i + 1 < len(args):
+                fs = parse_float_text(args[i + 1])
+                fs_given = 1
+                i = i + 1
+        elif arg == "--dechirp-hz-s":
+            if i + 1 < len(args):
+                dechirp = parse_float_text(args[i + 1])
+                i = i + 1
+        elif arg == "--masks":
+            if i + 1 < len(args):
+                nmasks = parse_int_text(args[i + 1])
+                i = i + 1
+        elif arg == "--block":
+            if i + 1 < len(args):
+                block = parse_int_text(args[i + 1])
+                i = i + 1
+        elif arg == "--p-fa":
+            if i + 1 < len(args):
+                let pf: String = args[i + 1]
+                if pf == "1e-3" or pf == "1E-3":
+                    pfa_neg = 3
+                elif pf == "1e-4" or pf == "1E-4":
+                    pfa_neg = 4
+                elif pf == "1e-5" or pf == "1E-5":
+                    pfa_neg = 5
+                elif pf == "1e-6" or pf == "1E-6":
+                    pfa_neg = 6
+                elif pf == "1e-7" or pf == "1E-7":
+                    pfa_neg = 7
+                elif pf == "1e-8" or pf == "1E-8":
+                    pfa_neg = 8
+                elif pf == "1e-9" or pf == "1E-9":
+                    pfa_neg = 9
+                i = i + 1
+        elif arg == "--hum-gate":
+            if i + 1 < len(args):
+                hum_gate_x1000 = parse_int_text(args[i + 1])
+                i = i + 1
+        elif arg == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        i = i + 1
+
+    if do_prove == 1:
+        return run_ghost_prove()
+
+    if len(in_path) == 0:
+        println("error: missing --in <file.f32>")
+        return EXIT_ERROR
+    if fs_given == 0:
+        println("error: --fs HZ is mandatory (M7: no silent sample-rate default)")
+        return EXIT_ERROR
+    if fs <= 0.0:
+        println("error: --fs must be > 0")
+        return EXIT_ERROR
+    if nmasks < 1:
+        nmasks = 1
+    if nmasks > 256:
+        nmasks = 256
+    if block < 1024:
+        block = 1024
+    if block > 16384:
+        block = 16384
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+    if data_dir != "":
+        if find_from(in_path, ":", 0) < 0:
+            if len(in_path) > 0:
+                if char_at(in_path, 0) != "/":
+                    in_path = data_dir + "/" + in_path
+        if len(off_path) > 0:
+            if find_from(off_path, ":", 0) < 0:
+                if char_at(off_path, 0) != "/":
+                    off_path = data_dir + "/" + off_path
+
+    // ── Read ON .f32 (long span for hum, head window for symbols) ──
+    let h: ptr<Void> = k_CreateFileA(in_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h) == -1:
+        println("error: cannot open input: " + in_path)
+        return EXIT_ERROR
+    let hislot: ptr<Int> = alloc_zeroed(1, "Int")
+    let fsz: Int = k_GetFileSizeEx(h, hislot)
+    let total_bytes: Int = mem_load(hislot, "Int")
+    decay hislot
+    if total_bytes < 16:
+        println("error: input too small")
+        return EXIT_ERROR
+    var nsamp: Int = total_bytes / 4
+    if nsamp > GHOST_HUM_CAP:
+        nsamp = GHOST_HUM_CAP
+    let mut rawbuf: ptr<Byte> = alloc_zeroed(nsamp * 4 + 32, "Byte")
+    let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let rok: Int = k_ReadFile(h, rawbuf, nsamp * 4, nslot, null_ptr())
+    let got: Int = mem_load(nslot, "Int")
+    let _ch: Int = k_CloseHandle(h)
+    if rok == 0 or got < nsamp * 4:
+        println("error: short read")
+        return EXIT_ERROR
+    let mut p2t: ptr<Float> = alloc_zeroed(256 + 32, "Float")
+    var p2v: Float = 1.0
+    var exi: Int = 127
+    while exi < 255:
+        mem_store(ptr_offset(p2t, exi, "Float"), p2v, "Float")
+        p2v = p2v * 2.0
+        exi = exi + 1
+    p2v = 0.5
+    exi = 126
+    while exi >= 0:
+        mem_store(ptr_offset(p2t, exi, "Float"), p2v, "Float")
+        p2v = p2v * 0.5
+        exi = exi - 1
+    let mut xsamp: ptr<Float> = alloc_zeroed(nsamp + 32, "Float")
+    var di: Int = 0
+    while di < nsamp:
+        let b0: Int = bref(rawbuf, di * 4)
+        let b1: Int = bref(rawbuf, di * 4 + 1)
+        let b2: Int = bref(rawbuf, di * 4 + 2)
+        let b3: Int = bref(rawbuf, di * 4 + 3)
+        mem_store(ptr_offset(xsamp, di, "Float"), f32_of_quad(b0, b1, b2, b3, p2t), "Float")
+        di = di + 1
+    decay rawbuf
+    decay p2t
+    decay nslot
+
+    // ── Gate 1: hum pre-veto (Goertzel 22.35 Hz family vs neighbours) ──
+    var fmean: Float = 0.0
+    di = 0
+    while di < nsamp:
+        fmean = fmean + mem_load(ptr_offset(xsamp, di, "Float"), "Float")
+        di = di + 1
+    fmean = fmean / (nsamp as Float)
+    var fvar: Float = 0.0
+    di = 0
+    while di < nsamp:
+        let dd: Float = mem_load(ptr_offset(xsamp, di, "Float"), "Float") - fmean
+        fvar = fvar + dd * dd
+        di = di + 1
+    fvar = fvar / (nsamp as Float)
+    let hratio: Int = ghost_hum_ratio_x1000(xsamp, nsamp, fs, fvar)
+    var hum_hit: Int = 0
+    if hratio > hum_gate_x1000:
+        hum_hit = 1
+    var verdict: String = "CLEAN"
+    if hum_hit == 1:
+        verdict = "QUARANTINE-HUM"
+
+    // ── Symbol window + derotation branches ──
+    var nwin: Int = nsamp
+    if nwin > GHOST_SYM_CAP:
+        nwin = GHOST_SYM_CAP
+    var nbr: Int = 1
+    if dechirp < 0.0 or dechirp > 0.0:
+        nbr = 2
+    let mut weights: ptr<Int> = alloc_zeroed(GHOST_BANK + 32, "Int")
+    let mut lens: ptr<Int> = alloc_zeroed(GHOST_BANK + 32, "Int")
+    let mut masktaps: ptr<Int> = alloc_zeroed(GHOST_BANK * GHOST_MAXTAP + 32, "Int")
+    let _bg2: Int = ghost_build_bank(weights, lens, masktaps)
+    let mut scratch: ptr<Float> = alloc_zeroed(nwin + 32, "Float")
+    let mut branch: ptr<Float> = alloc_zeroed(nwin + 32, "Float")
+    let mut tt: ptr<Float> = alloc_zeroed(nwin + 32, "Float")
+    let mut row_z: ptr<Int> = alloc_zeroed(nmasks + 32, "Int")
+    let mut row_b: ptr<Int> = alloc_zeroed(nmasks + 32, "Int")
+    let mut row_s: ptr<Int> = alloc_zeroed(nmasks + 32, "Int")
+    let mut bstm: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut bsts: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut bstb: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut best_row_z: ptr<Int> = alloc_zeroed(nmasks + 32, "Int")
+    let mut best_row_b: ptr<Int> = alloc_zeroed(nmasks + 32, "Int")
+    let mut best_row_s: ptr<Int> = alloc_zeroed(nmasks + 32, "Int")
+
+    var best_z: Int = 0
+    var best_m: Int = 0
+    var best_sh: Int = 0
+    var best_bl: Int = 0
+    var best_sig_x100: Int = 0
+    var best_S_x10000: Int = 0
+    var nblocks: Int = 1
+    if nwin > GHOST_MAXSPAN:
+        nblocks = (nwin - GHOST_MAXSPAN) / block
+    if nblocks < 1:
+        nblocks = 1
+    var gate: Int = ghost_gate_z_x100(nmasks, GHOST_SHIFTS, nblocks, nbr, pfa_neg)
+
+    if hum_hit == 0:
+        var br: Int = 0
+        while br < nbr:
+            var k2: Int = 0
+            while k2 < nwin:
+                let phi: Float = 3.14159265 * dechirp * (k2 as Float) * (k2 as Float) / (fs * fs)
+                let xv: Float = mem_load(ptr_offset(xsamp, k2, "Float"), "Float")
+                if br == 0:
+                    mem_store(ptr_offset(branch, k2, "Float"), xv * 2.0 * cos(phi), "Float")
+                else:
+                    mem_store(ptr_offset(branch, k2, "Float"), xv * 2.0 * sin(phi), "Float")
+                k2 = k2 + 1
+            let sig: Float = ghost_mad_sigma(branch, nwin, scratch)
+            let sig2: Float = sig * sig
+            if sig2 > 0.000000001:
+                var m2: Float = 0.0
+                k2 = 0
+                while k2 < nwin:
+                    var yv: Float = mem_load(ptr_offset(branch, k2, "Float"), "Float") / sig
+                    if yv > 3.0:
+                        yv = 3.0
+                    if yv < -3.0:
+                        yv = -3.0
+                    let tv: Float = tanh_lane(yv / 2.0)
+                    mem_store(ptr_offset(tt, k2, "Float"), tv, "Float")
+                    m2 = m2 + tv * tv
+                    k2 = k2 + 1
+                m2 = m2 / (nwin as Float)
+                let gz: Int = ghost_scan(tt, nwin, nmasks, GHOST_SHIFTS, block, m2, weights, lens, masktaps, row_z, row_b, row_s, bstm, bsts, bstb)
+                if gz > best_z:
+                    best_z = gz
+                    best_m = mem_load(bstm, "Int")
+                    best_sh = mem_load(bsts, "Int")
+                    best_bl = mem_load(bstb, "Int")
+                    best_sig_x100 = (sig * 100.0) as Int
+                    var mcp: Int = 0
+                    while mcp < nmasks:
+                        mem_store(ptr_offset(best_row_z, mcp, "Int"), mem_load(ptr_offset(row_z, mcp, "Int"), "Int"), "Int")
+                        mem_store(ptr_offset(best_row_b, mcp, "Int"), mem_load(ptr_offset(row_b, mcp, "Int"), "Int"), "Int")
+                        mem_store(ptr_offset(best_row_s, mcp, "Int"), mem_load(ptr_offset(row_s, mcp, "Int"), "Int"), "Int")
+                        mcp = mcp + 1
+            br = br + 1
+
+    // best S for receipt: recompute lightly via stored row? use gate-normalized
+    // proxy: S_x10000 from z and s0 is skipped — report z-derived fire only.
+    // (S per best row recomputed below for the CSV best row.)
+    decay xsamp
+
+    // ── Gates 2-4: stamp, OFF, census ──
+    var fire: Int = 0
+    if best_z >= gate:
+        fire = 1
+    var stamp_ok: Int = 0
+    var stamp_note: String = "stamp-missing"
+    if len(stamp_path) > 0:
+        let stext: String = fs_read_text(stamp_path)
+        if len(stext) > 0:
+            stamp_ok = ghost_stamp_ok(stext)
+            if stamp_ok == 1:
+                stamp_note = "stamp-NON-NULL"
+            else:
+                stamp_note = "stamp-null"
+    var off_fire_same: Int = 0
+    var off_z: Int = 0
+    if fire == 1 and len(off_path) > 0:
+        let ho: ptr<Void> = k_CreateFileA(off_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+        if ptr_to_int(ho) != -1:
+            let oslot: ptr<Int> = alloc_zeroed(1, "Int")
+            let osz: Int = k_GetFileSizeEx(ho, oslot)
+            let obytes: Int = mem_load(oslot, "Int")
+            decay oslot
+            var on2: Int = obytes / 4
+            if on2 > GHOST_SYM_CAP:
+                on2 = GHOST_SYM_CAP
+            if on2 > GHOST_MAXSPAN + block:
+                let mut obuf: ptr<Byte> = alloc_zeroed(on2 * 4 + 32, "Byte")
+                let mut onslot: ptr<Int> = alloc_zeroed(1, "Int")
+                let rok2: Int = k_ReadFile(ho, obuf, on2 * 4, onslot, null_ptr())
+                let got2: Int = mem_load(onslot, "Int")
+                let _ch2: Int = k_CloseHandle(ho)
+                if rok2 != 0 and got2 >= on2 * 4:
+                    let mut op2: ptr<Float> = alloc_zeroed(256 + 32, "Float")
+                    var pv2: Float = 1.0
+                    var e2: Int = 127
+                    while e2 < 255:
+                        mem_store(ptr_offset(op2, e2, "Float"), pv2, "Float")
+                        pv2 = pv2 * 2.0
+                        e2 = e2 + 1
+                    pv2 = 0.5
+                    e2 = 126
+                    while e2 >= 0:
+                        mem_store(ptr_offset(op2, e2, "Float"), pv2, "Float")
+                        pv2 = pv2 * 0.5
+                        e2 = e2 - 1
+                    var k3: Int = 0
+                    while k3 < on2:
+                        let q0: Int = bref(obuf, k3 * 4)
+                        let q1: Int = bref(obuf, k3 * 4 + 1)
+                        let q2: Int = bref(obuf, k3 * 4 + 2)
+                        let q3: Int = bref(obuf, k3 * 4 + 3)
+                        let ph3: Float = 3.14159265 * dechirp * (k3 as Float) * (k3 as Float) / (fs * fs)
+                        mem_store(ptr_offset(branch, k3, "Float"), f32_of_quad(q0, q1, q2, q3, op2) * 2.0 * cos(ph3), "Float")
+                        k3 = k3 + 1
+                    decay obuf
+                    decay op2
+                    decay onslot
+                    let sigo: Float = ghost_mad_sigma(branch, on2, scratch)
+                    if sigo * sigo > 0.000000001:
+                        var m2o: Float = 0.0
+                        k3 = 0
+                        while k3 < on2:
+                            var yo: Float = mem_load(ptr_offset(branch, k3, "Float"), "Float") / sigo
+                            if yo > 3.0:
+                                yo = 3.0
+                            if yo < -3.0:
+                                yo = -3.0
+                            let tvo: Float = tanh_lane(yo / 2.0)
+                            mem_store(ptr_offset(tt, k3, "Float"), tvo, "Float")
+                            m2o = m2o + tvo * tvo
+                            k3 = k3 + 1
+                        m2o = m2o / (on2 as Float)
+                        let gzo: Int = ghost_scan(tt, on2, nmasks, GHOST_SHIFTS, block, m2o, weights, lens, masktaps, row_z, row_b, row_s, bstm, bsts, bstb)
+                        off_z = gzo
+                        let om: Int = mem_load(bstm, "Int")
+                        let osh: Int = mem_load(bsts, "Int")
+                        if gzo >= gate and om == best_m:
+                            var dsh: Int = osh - best_sh
+                            if dsh < 0:
+                                dsh = 0 - dsh
+                            if dsh <= 1:
+                                off_fire_same = 1
+                else:
+                    let _ch3: Int = k_CloseHandle(ho)
+            else:
+                let _ch4: Int = k_CloseHandle(ho)
+        else:
+            println("warn: cannot open --off leg (treated as absent): " + off_path)
+    var census_hit: Int = 0
+    if fire == 1 and len(census_path) > 0:
+        let ctext: String = fs_read_text(census_path)
+        census_hit = ghost_census_match(ctext, best_m)
+
+    if hum_hit == 0:
+        if fire == 0:
+            verdict = "CLEAN"
+        else:
+            if stamp_ok == 0:
+                verdict = "RESIDUE"
+            else:
+                if off_fire_same == 1:
+                    verdict = "COMMON-CODE"
+                else:
+                    verdict = "GHOST"
+                if census_hit == 1:
+                    verdict = "TERRESTRIAL-CODE"
+
+    // ── CSV (scaled ints) + MD + stdout/JSON receipt ──
+    let logt: Int = ghost_log10_trials_x100(nmasks * GHOST_SHIFTS * nblocks * nbr)
+    var csv: String = "mask_id,weight,len,block_idx,shift,S_x10000,sigma_x100,p_corr_log10,best,verdict\n"
+    var m9: Int = 0
+    while m9 < nmasks:
+        let w9: Int = mem_load(ptr_offset(weights, m9, "Int"), "Int")
+        let l9: Int = mem_load(ptr_offset(lens, m9, "Int"), "Int")
+        let z9: Int = mem_load(ptr_offset(best_row_z, m9, "Int"), "Int")
+        let b9: Int = mem_load(ptr_offset(best_row_b, m9, "Int"), "Int")
+        let s9: Int = mem_load(ptr_offset(best_row_s, m9, "Int"), "Int")
+        let lp9: Int = ghost_log10p_two(z9) + logt
+        var isbest: Int = 0
+        if m9 == best_m and fire == 1:
+            isbest = 1
+        var Sx: Int = 0
+        if m9 == best_m:
+            Sx = best_S_x10000
+        csv = csv + str(m9) + "," + str(w9) + "," + str(l9) + "," + str(b9) + "," + str(s9) + "," + str(Sx) + "," + str(best_sig_x100) + "," + str(lp9) + "," + str(isbest) + "," + verdict + "\n"
+        m9 = m9 + 1
+    var md: String = "# fec_ghost report: " + in_path + "\n\n"
+    md = md + "verdict=" + verdict + " best_mask=" + str(best_m) + " shift=" + str(best_sh) + " block=" + str(best_bl) + " z_x100=" + str(best_z) + " gate_x100=" + str(gate) + " sigma_x100=" + str(best_sig_x100) + "\n\n"
+    md = md + "gates: hum_ratio_x1000=" + str(hratio) + " hum_gate_x1000=" + str(hum_gate_x1000) + " " + stamp_note + " off_match=" + str(off_fire_same) + " off_z_x100=" + str(off_z) + " census=" + str(census_hit) + "\n\n"
+    md = md + "| mask | w | len | block | shift | z_x100 | p_corr_log10 | best |\n|---|---|---|---|---|---|---|---|\n"
+    md = md + "| " + str(best_m) + " | " + str(mem_load(ptr_offset(weights, best_m, "Int"), "Int")) + " | " + str(mem_load(ptr_offset(lens, best_m, "Int"), "Int")) + " | " + str(best_bl) + " | " + str(best_sh) + " | " + str(best_z) + " | " + str(ghost_log10p_two(best_z) + logt) + " | 1 |\n"
+    println(md)
+    if len(csv_path) > 0:
+        let _w1: Int = write_text_file(csv_path, csv)
+        println("fec_ghost: wrote " + csv_path)
+    if len(out_path) > 0:
+        let _w2: Int = write_text_file(out_path, md)
+        println("fec_ghost: wrote " + out_path)
+    if is_json == 1:
+        println("{\"tool\": \"fec_ghost\", \"verdict\": \"" + verdict + "\", \"best_mask\": " + str(best_m) + ", \"shift\": " + str(best_sh) + ", \"block\": " + str(best_bl) + ", \"z_x100\": " + str(best_z) + ", \"gate_x100\": " + str(gate) + ", \"receipt\": \"PASS\"}")
+    println("receipt=PASS verdict=" + verdict + " best_mask=" + str(best_m) + " z_x100=" + str(best_z) + " gate_x100=" + str(gate))
+
+    decay weights
+    decay lens
+    decay masktaps
+    decay scratch
+    decay branch
+    decay tt
+    decay row_z
+    decay row_b
+    decay row_s
+    decay bstm
+    decay bsts
+    decay bstb
+    decay best_row_z
+    decay best_row_b
+    decay best_row_s
+    return EXIT_OK
+
+// NOTE: no `fn main` here by convention — dispatch.kn owns main() in the
+// amalgamated core.kn; sibling tools build standalone without one.

@@ -1281,6 +1281,10 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     var has_xeno_hit: Int = 0
     var has_sk_hit: Int = 0
     var has_scint_hit: Int = 0
+    var has_stamp_hit: Int = 0
+    var has_ghost_hit: Int = 0
+    var has_gperf_hit: Int = 0
+    var has_pclock_hit: Int = 0
     var is_clean_disposition: Int = 1
     var sk_txt: String = "NO-TABLES standalone"
     var xeno_txt: String = "NO-TABLES standalone"
@@ -1292,6 +1296,10 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     var lag_txt: String = "NO-TABLES standalone"
     var fam_txt: String = "NO-TABLES standalone"
     var scint_txt: String = "NO-TABLES standalone"
+    var stamp_txt: String = "NO-TABLES standalone"
+    var ghost_txt: String = "NO-TABLES standalone"
+    var gperf_txt: String = "NO-TABLES standalone"
+    var pclock_txt: String = "NO-TABLES standalone"
     var fam_path: String = ""
     var fold_path: String = ""
     var frame_path: String = ""
@@ -1301,6 +1309,10 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
     var scint_path: String = ""
     var xeno_path: String = ""
     var sk_path: String = ""
+    var stamp_path: String = ""
+    var ghost_path: String = ""
+    var gperf_path: String = ""
+    var pclock_path: String = ""
     if sweep_dir != "":
         let rep_path: String = sweep_dir + "/REPORT.md"
         if fs_exists(rep_path):
@@ -1315,7 +1327,28 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
             let bn6: String = wf_basename(entries6[e6])
             if find_from(bn6, ".csv", 0) >= 0:
                 let full6: String = wf_fullpath(sweep_dir, entries6[e6])
-                if find_from(bn6, "fam", 0) >= 0:
+                if find_from(bn6, "stamp", 0) >= 0:
+                    if stamp_path == "":
+                        stamp_path = full6
+                elif find_from(bn6, "ghost", 0) >= 0:
+                    if ghost_path == "":
+                        ghost_path = full6
+                elif find_from(bn6, "gperf", 0) >= 0:
+                    if gperf_path == "":
+                        gperf_path = full6
+                elif find_from(bn6, "perfection", 0) >= 0:
+                    if gperf_path == "":
+                        gperf_path = full6
+                elif find_from(bn6, "pclock", 0) >= 0:
+                    if pclock_path == "":
+                        pclock_path = full6
+                elif find_from(bn6, "pulsar_clock", 0) >= 0:
+                    if pclock_path == "":
+                        pclock_path = full6
+                elif find_from(bn6, "clock", 0) >= 0:
+                    if pclock_path == "":
+                        pclock_path = full6
+                elif find_from(bn6, "fam", 0) >= 0:
                     if fam_path == "":
                         fam_path = full6
                 elif find_from(bn6, "fold", 0) >= 0:
@@ -1581,7 +1614,123 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
                 scint_txt = "QUIET no rows"
         else:
             scint_txt = "QUIET no scint.csv"
+        if stamp_path != "":
+            if fs_exists(stamp_path):
+                let st_raw: String = fs_read_text(stamp_path)
+                let st_lines: Array<String> = text_split_string(st_raw, "\n")
+                var st_n: Int = 0
+                var st_hits: Int = 0
+                var st_pbest: Float = 0.0
+                var st_li: Int = 1
+                while st_li < len(st_lines):
+                    let st_row: String = text_trim_string(st_lines[st_li])
+                    if len(st_row) > 0:
+                        st_n = st_n + 1
+                        let st_verd: String = wf_csv_cell(st_row, 10)
+                        if st_verd == "STAMPED":
+                            st_hits = st_hits + 1
+                        else:
+                            if st_verd == "SKY-LIKE":
+                                st_hits = st_hits + 1
+                        let st_p: Float = (parse_int_text(wf_csv_cell(st_row, 6)) as Float) / 100.0
+                        if st_li == 1:
+                            st_pbest = st_p
+                        else:
+                            if st_p > st_pbest:
+                                st_pbest = st_p
+                    st_li = st_li + 1
+                if st_hits > 0:
+                    has_stamp_hit = 1
+                    stamp_txt = "HIT n=" + str(st_hits) + "/" + str(st_n) + " p=" + format_1dp(st_pbest)
+                else:
+                    stamp_txt = "CLEAN n=" + str(st_n) + " p=" + format_1dp(st_pbest)
+            else:
+                stamp_txt = "CLEAN -"
+        else:
+            stamp_txt = "CLEAN -"
+        if ghost_path != "":
+            if fs_exists(ghost_path):
+                let gh_raw: String = fs_read_text(ghost_path)
+                let gh_lines: Array<String> = text_split_string(gh_raw, "\n")
+                var gh_hit: Int = 0
+                var gh_pbest: Float = 0.0
+                var gh_mbest: Int = 0
+                var gh_li: Int = 1
+                while gh_li < len(gh_lines):
+                    let gh_row: String = text_trim_string(gh_lines[gh_li])
+                    if len(gh_row) > 0:
+                        if wf_csv_cell(gh_row, 9) == "GHOST":
+                            gh_hit = 1
+                            gh_pbest = parse_float_text(wf_csv_cell(gh_row, 7))
+                            gh_mbest = parse_int_text(wf_csv_cell(gh_row, 0))
+                    gh_li = gh_li + 1
+                if gh_hit == 1:
+                    has_ghost_hit = 1
+                    ghost_txt = "HIT logp=" + format_1dp(gh_pbest) + " m=" + str(gh_mbest)
+                else:
+                    ghost_txt = "CLEAN -"
+            else:
+                ghost_txt = "CLEAN -"
+        else:
+            ghost_txt = "CLEAN -"
+        if gperf_path != "":
+            if fs_exists(gperf_path):
+                let gp_raw: String = fs_read_text(gperf_path)
+                let gp_lines: Array<String> = text_split_string(gp_raw, "\n")
+                if len(gp_lines) > 1:
+                    let gp_row: String = text_trim_string(gp_lines[1])
+                    if len(gp_row) > 0:
+                        let gp_verd: String = wf_csv_cell(gp_row, 7)
+                        let gp_q: Float = (parse_int_text(wf_csv_cell(gp_row, 6)) as Float) / 100.0
+                        gperf_txt = gp_verd + " q=" + format_1dp(gp_q)
+                        if gp_verd == "PERFECT-COMMON":
+                            has_gperf_hit = 1
+                    else:
+                        gperf_txt = "CLEAN -"
+                else:
+                    gperf_txt = "CLEAN -"
+            else:
+                gperf_txt = "CLEAN -"
+        else:
+            gperf_txt = "CLEAN -"
+        if pclock_path != "":
+            if fs_exists(pclock_path):
+                let pc_raw: String = fs_read_text(pclock_path)
+                let pc_lines: Array<String> = text_split_string(pc_raw, "\n")
+                if len(pc_lines) > 1:
+                    let pc_row: String = text_trim_string(pc_lines[1])
+                    if len(pc_row) > 0:
+                        let pc_verd: String = wf_csv_cell(pc_row, 4)
+                        let pc_psr: String = wf_csv_cell(pc_row, 0)
+                        let pc_drop: Float = parse_float_text(wf_csv_cell(pc_row, 2))
+                        pclock_txt = pc_verd + " " + pc_psr + " drop=" + format_1dp(pc_drop)
+                        if pc_verd == "CLOCK-CANDIDATE":
+                            has_pclock_hit = 1
+                    else:
+                        pclock_txt = "CLEAN -"
+                else:
+                    pclock_txt = "CLEAN -"
+            else:
+                pclock_txt = "CLEAN -"
+        else:
+            pclock_txt = "CLEAN -"
 
+    var alien_txt: String = "ST:" + stamp_txt + " GH:" + ghost_txt + " GP:" + gperf_txt + " PC:" + pclock_txt
+    var has_alien_hit: Int = 0
+    if has_stamp_hit == 1:
+        has_alien_hit = 1
+    elif has_ghost_hit == 1:
+        has_alien_hit = 1
+    elif has_gperf_hit == 1:
+        has_alien_hit = 1
+    elif has_pclock_hit == 1:
+        has_alien_hit = 1
+    if has_alien_hit == 1:
+        let _v_a: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 578, "[ALIEN]     " + alien_txt, 1, 255, 51, 102)
+    elif sweep_dir == "":
+        let _v_a: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 578, "[ALIEN]     " + alien_txt, 1, 120, 136, 158)
+    else:
+        let _v_a: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 578, "[ALIEN]     " + alien_txt, 1, 0, 230, 118)
     if has_sk_hit == 1:
         let _v_1: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 362, "[SK_GATE]   " + sk_txt + " img=" + str(bad_sk_count), 1, 255, 51, 102)
     elif sweep_dir == "":
@@ -1640,7 +1789,7 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
         let _v_9: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 554, "[SCINT]     " + scint_txt, 1, 120, 136, 158)
     else:
         let _v_9: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 554, "[SCINT]     " + scint_txt, 1, 240, 244, 248)
-    let _v_10: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 578, "[CADENCE]   STANDALONE single-beam", 1, 120, 136, 158)
+    let _v_10: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 602, "[CADENCE]   STANDALONE single-beam", 1, 120, 136, 158)
 
     var any_lane_hit: Int = 0
     if has_drift_hit == 1:
@@ -1663,20 +1812,30 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
         any_lane_hit = 1
     elif has_scint_hit == 1:
         any_lane_hit = 1
+    elif has_stamp_hit == 1:
+        any_lane_hit = 1
+    elif has_ghost_hit == 1:
+        any_lane_hit = 1
+    elif has_gperf_hit == 1:
+        any_lane_hit = 1
+    elif has_pclock_hit == 1:
+        any_lane_hit = 1
+    elif has_alien_hit == 1:
+        any_lane_hit = 1
     if is_clean_disposition == 0:
         any_lane_hit = 1
     if any_lane_hit == 1:
-        let _v_11: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 606, "OVERALL: CANDIDATE INVESTIGATION", 1, 255, 179, 0)
+        let _v_11: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 630, "OVERALL: CANDIDATE INVESTIGATION", 1, 255, 179, 0)
     else:
-        let _v_11: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 606, "OVERALL: NOMINAL / CLEAN", 1, 0, 230, 118)
+        let _v_11: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 630, "OVERALL: NOMINAL / CLEAN", 1, 0, 230, 118)
 
     // Card 7: Ranked Candidate Hit Table (harvested live or honest negative)
-    let _c7: Int = wf_draw_rect_fill(canvas, W, H, 1380, 658, 525, 295, 19, 24, 34)
-    let _s7: Int = wf_draw_rect_stroke(canvas, W, H, 1380, 658, 525, 295, 38, 48, 68)
-    let _h7: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 666, "[DETECTED CANDIDATE HIT LOG]", 1, 255, 179, 0)
+    let _c7: Int = wf_draw_rect_fill(canvas, W, H, 1380, 682, 525, 271, 19, 24, 34)
+    let _s7: Int = wf_draw_rect_stroke(canvas, W, H, 1380, 682, 525, 271, 38, 48, 68)
+    let _h7: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 690, "[DETECTED CANDIDATE HIT LOG]", 1, 255, 179, 0)
 
-    let _tb_hdr: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 690, "ID TOOL KIND FREQ SIG(lane) VERDICT", 1, 120, 136, 158)
-    let _tb_sep: Int = wf_draw_line(canvas, W, H, 1395, 706, 1890, 706, 38, 48, 68)
+    let _tb_hdr: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 714, "ID TOOL KIND FREQ SIG(lane) VERDICT", 1, 120, 136, 158)
+    let _tb_sep: Int = wf_draw_line(canvas, W, H, 1395, 730, 1890, 730, 38, 48, 68)
 
     var ev_row_count: Int = 0
     if sweep_dir != "":
@@ -1708,33 +1867,50 @@ pub fn waterfall_main(args: Array<String>) -> Int with Unsafe:
                         var e_sstr: String = format_1dp((e_sig as Float) / 100.0)
                         var row_text: String = "#" + str(ev_row_count + 1) + " " + e_tool + " " + e_kind + " " + e_fstr + " s=" + e_sstr + " " + e_verd
                         if e_verd == "HIT" or e_verd == "SHOT":
-                            let _tr_ev: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 715 + ev_row_count * 20, row_text, 1, 255, 51, 102)
+                            let _tr_ev: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 739 + ev_row_count * 20, row_text, 1, 255, 51, 102)
                         elif e_tool == "drift":
-                            let _tr_ev: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 715 + ev_row_count * 20, row_text, 1, 255, 51, 102)
+                            let _tr_ev: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 739 + ev_row_count * 20, row_text, 1, 255, 51, 102)
                         else:
-                            let _tr_ev: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 715 + ev_row_count * 20, row_text, 1, 255, 179, 0)
+                            let _tr_ev: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 739 + ev_row_count * 20, row_text, 1, 255, 179, 0)
                         ev_row_count = ev_row_count + 1
                 li = li + 1
+        if sweep_dir != "":
+            if has_stamp_hit == 1:
+                if ev_row_count < 8:
+                    let _al1: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 739 + ev_row_count * 20, "#" + str(ev_row_count + 1) + " stamp DISS " + stamp_txt, 1, 255, 51, 102)
+                    ev_row_count = ev_row_count + 1
+            if has_ghost_hit == 1:
+                if ev_row_count < 8:
+                    let _al2: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 739 + ev_row_count * 20, "#" + str(ev_row_count + 1) + " ghost CODE " + ghost_txt, 1, 255, 51, 102)
+                    ev_row_count = ev_row_count + 1
+            if has_gperf_hit == 1:
+                if ev_row_count < 8:
+                    let _al3: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 739 + ev_row_count * 20, "#" + str(ev_row_count + 1) + " gperf GAUSS " + gperf_txt, 1, 255, 179, 0)
+                    ev_row_count = ev_row_count + 1
+            if has_pclock_hit == 1:
+                if ev_row_count < 8:
+                    let _al4: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 739 + ev_row_count * 20, "#" + str(ev_row_count + 1) + " pclock PHI " + pclock_txt, 1, 255, 179, 0)
+                    ev_row_count = ev_row_count + 1
 
     // Standalone fallbacks: harvested drift tracks first, then image peak
     if ev_row_count == 0:
         if has_real_drift_cand == 1:
             var r1: String = "#1 drift " + format_1dp(real_cand_freq_mhz) + "MHz d=" + format_1dp(real_cand_drift_hz) + " s=" + format_1dp(real_cand_snr_db)
-            let _tr1: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 715, r1, 1, 255, 51, 102)
+            let _tr1: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 739, r1, 1, 255, 51, 102)
             ev_row_count = 1
             if c2_ok == 1:
-                let _tr2: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 735, c2_label, 1, 0, 229, 255)
+                let _tr2: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 759, c2_label, 1, 0, 229, 255)
                 ev_row_count = 2
                 if c3_ok == 1:
-                    let _tr3: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 755, c3_label, 1, 255, 179, 0)
+                    let _tr3: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 779, c3_label, 1, 255, 179, 0)
                     ev_row_count = 3
 
     // If NO real candidate exists: HONEST NEGATIVE RECEIPT (NO HARDCODED FAKE ROWS)
     if ev_row_count == 0:
-        let _hon1: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 725, "NO DETECTIONS ABOVE FORMAL GATE", 1, 120, 136, 158)
-        let _hon2: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 750, "LATTICE STATUS: ALL CHANNELS CLEAN", 1, 0, 230, 118)
-        let _hon3: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 775, "PEAK SPECTRAL MARGIN: +" + format_1dp(best_peak_snr) + " dB", 1, 120, 136, 158)
-        let _hon4: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 800, "NOISE FLOOR RECEIPT: PASS (GAUSSIAN THERMAL)", 1, 0, 230, 118)
+        let _hon1: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 749, "NO DETECTIONS ABOVE FORMAL GATE", 1, 120, 136, 158)
+        let _hon2: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 774, "LATTICE STATUS: ALL CHANNELS CLEAN", 1, 0, 230, 118)
+        let _hon3: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 799, "PEAK SPECTRAL MARGIN: +" + format_1dp(best_peak_snr) + " dB", 1, 120, 136, 158)
+        let _hon4: Int = wf_draw_string(canvas, W, H, font_buf, 1395, 824, "NOISE FLOOR RECEIPT: PASS (GAUSSIAN THERMAL)", 1, 0, 230, 118)
 
     // Card 8: Colorbar Scale
     let _c8: Int = wf_draw_rect_fill(canvas, W, H, 1380, 960, 525, 89, 19, 24, 34)

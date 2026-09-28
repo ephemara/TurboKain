@@ -1,0 +1,874 @@
+// ============================================================================
+// gauss_perfection.kn — TurboKain alien Tool 2: inverted-SK escalator
+//
+// Fork of sk_gate.kn (keeps its STFT geometry + per-bin SK kernels): STFT
+// SEG=4096/HOP=2048/NB=2049 RECTANGULAR, power=|FFT|^2, nseg cap 512,
+// per-bin SK = (M+1)/(M-1)*(M*S2/S1^2-1) over bins 2..NB-1, deviant
+// |SK-1|>=0.50, skfrac=bad/nb. The verdict logic is INVERTED: capacity-
+// shaped coded traffic is maximally Gaussian (SK~1, H1~1) while backend
+// hum/RFI bursts are non-Gaussian — so perfection + common-mode ESCALATES
+// (behind pre-vetoes) instead of passing CLEAN.
+//
+// Perfection score Q = H1 / (|SKt/3-1| + eps) * common-mode.
+//   SKt = time-domain kurtosis m4/m2^2 (Gaussian = 3.0; SKt/3 = 1.0).
+//   Gate uses the TIME-domain SKt (std ~0.0016 at 1M samples, so a 0.005
+//   gate is meaningful); the STFT skfrac stays a supporting veto. Per-bin
+//   STFT SK scatter (~0.09 at M=512) could never pass a 0.005 gate, so the
+//   spec's |SK-1|<0.005 is read as the time-domain criterion. Documented,
+//   not silent.
+//
+// PRE-VETOES (load-bearing, in order — deviation: NUMERICS short-circuits
+// first because the hum/MAD estimators divide by the mean power):
+//   0. MAD-sanity: s1<=0 / m2<=0 / peak/mean blowup (>=5000, boxcar-G5
+//      family) / non-finite  -> NUMERICS. log10p=-9999 family guarded here.
+//   1. Hum family: 22.35/44.70 Hz via time-domain phase fold (SUB-BIN for a
+//      4096-FFT at MHz fs, so STFT cannot see them — folding at fs/44.70
+//      and fs/22.35, 8 phase bins, contrast range/std > 0.10); 134.11 /
+//      178.81 / 715.25 Hz + LO images via STFT peak-bin match when
+//      peak/mean > 8. Any hum hit -> QUARANTINE-HUM, never escalate.
+//      982/1665 MHz LO bands need header obsfreq (not in .f32) — NOT
+//      checkable here; noted as a pass-through limitation.
+//   2. OFF contrast (differential-or-death): escalate ONLY if the OFF leg
+//      is independently perfect (sane + hum-free + skfrac<0.02 +
+//      skdev<=tol + H1>=gate). ON-only Gaussian = quiet sky -> CLEAN.
+//      No --off given -> common=0 -> CLEAN at best.
+//
+// Verdicts: PERFECT-COMMON / CLEAN / QUARANTINE-HUM / NUMERICS / SHORT.
+// Exit codes: 0 gated (any verdict), 1 help / prove FAIL, 2 error.
+// Thresholds are argv: --fs (default FS_HZ, honored+recorded per M7),
+// --sk-tol (default 0.005), --h-gate (default 0.999). No hardcoded paths.
+// ============================================================================
+
+use std::fs
+use std::process
+use std::runtime
+use std::text
+use _common::k_CreateFileA
+use _common::k_ReadFile
+use _common::k_GetFileSizeEx
+use _common::k_CloseHandle
+use _common::k_GetLastError
+use _common::null_ptr
+use _common::GEN_READ
+use _common::OPEN_EXISTING
+use _common::FILE_NORMAL
+use _common::FILE_SHARE_RW
+use _common::EXIT_OK
+use _common::EXIT_HELP
+use _common::EXIT_ERROR
+use _common::FS_HZ
+use _common::SK_PI2
+use _common::bref
+use _common::parse_int_text
+use _common::parse_float_text
+use _common::find_from
+use _common::f32_of_quad
+use _common::sk_fft
+
+// ── Geometry (sk_gate, do not tune) ─────────────────────────────────────────
+const GP_SEG: Int = 4096
+const GP_HOP: Int = 2048
+const GP_NB: Int = 2049
+const GP_CAP: Int = 512
+const GP_MIN: Int = 8
+
+// ── Hum family (master §1.5: veto on sight) ─────────────────────────────────
+const GP_HUM0: Float = 22.35
+const GP_HUM1: Float = 44.70
+const GP_HUM2: Float = 134.11
+const GP_HUM3: Float = 178.81
+const GP_HUM4: Float = 715.25
+const GP_FOLD_GATE: Float = 0.10
+const GP_PEAK_GATE: Float = 8.0
+const GP_MAD_BLOWUP: Float = 5000.0
+
+// ── Ordinal-entropy normalizers ─────────────────────────────────────────────
+const GP_LN2INV: Float = 1.4426950408889634
+const GP_LOG2_6: Float = 2.584962500721156
+
+// ── law gates with receipts ─────────────────────────────────────────────────
+law perfection_contrast(skdev_x1e4: Int, tol_x1e4: Int, h1_x1000: Int, hgate_x1000: Int, common: Int) -> Bool:
+    var pc_ok: Int = 0
+    if skdev_x1e4 <= tol_x1e4:
+        if h1_x1000 >= hgate_x1000:
+            if common == 1:
+                pc_ok = 1
+    return pc_ok == 1
+
+law hum_free(hum: Int) -> Bool:
+    return hum == 0
+
+law mad_sane(sane: Int) -> Bool:
+    return sane == 1
+
+// ── converge: per-bin SK scalar (spec vs lane, fuzzed) ─────────────────────
+fn sk_of_sums_spec(s1: Float, s2: Float, m: Float) -> Float:
+    if s1 <= 0.0:
+        return 1.0
+    return ((m + 1.0) / (m - 1.0)) * (m * s2 / (s1 * s1) - 1.0)
+
+converge sk_bin_lane(s1: Float, s2: Float, m: Float) -> Float:
+    spec reference:
+        return sk_of_sums_spec(s1, s2, m)
+    fast scalar_lane when target("llvm"):
+        return sk_of_sums_spec(s1, s2, m)
+    verify random(8)
+
+// ── Verdict codes: 0 PERFECT-COMMON, 1 CLEAN, 2 QUARANTINE-HUM, 3 NUMERICS ──
+fn gp_classify(skdev: Float, skfrac: Float, h1: Float, sane: Int, hum: Int, tol: Float, hgate: Float, common: Int) -> Int:
+    if sane == 0:
+        return 3
+    if hum == 1:
+        return 2
+    if skfrac >= 0.02:
+        return 1
+    if common == 1:
+        if skdev <= tol:
+            if h1 >= hgate:
+                return 0
+    return 1
+
+fn gp_verdict_str(code: Int) -> String:
+    var v: String = "CLEAN"
+    if code == 0:
+        v = "PERFECT-COMMON"
+    elif code == 2:
+        v = "QUARANTINE-HUM"
+    elif code == 3:
+        v = "NUMERICS"
+    elif code == 4:
+        v = "SHORT"
+    return v
+
+// ── Full measurement on a Float arena ───────────────────────────────────────
+// stats slots: 0 skdev_t |SKt/3-1| | 1 skfrac | 2 h1 | 3 lz | 4 peakratio |
+//              5 hum | 6 sane | 7 skmean_dev (STFT mean |SK-1|).
+// Returns 0 ok, 1 SHORT. (Error paths leak arenas; OS reclaims on exit.)
+fn analyze_buf(x: ptr<Float>, n: Int, fs: Float, stats: ptr<Float>) -> Int with Unsafe:
+    var nseg: Int = (n - GP_SEG) / GP_HOP + 1
+    if nseg < GP_MIN:
+        return 1
+    if nseg > GP_CAP:
+        nseg = GP_CAP
+    let M: Float = nseg as Float
+
+    // STFT power accumulators (inlined kernels; bulk arenas +32).
+    let mut s1a: ptr<Float> = alloc_zeroed(GP_NB + 32, "Float")
+    let mut s2a: ptr<Float> = alloc_zeroed(GP_NB + 32, "Float")
+    let mut re: ptr<Float> = alloc_zeroed(GP_SEG + 32, "Float")
+    let mut im: ptr<Float> = alloc_zeroed(GP_SEG + 32, "Float")
+    var fr: Int = 0
+    while fr < nseg:
+        let base: Int = fr * GP_HOP
+        var k: Int = 0
+        while k < GP_SEG:
+            mem_store(ptr_offset(re, k, "Float"), mem_load(ptr_offset(x, base + k, "Float"), "Float"), "Float")
+            mem_store(ptr_offset(im, k, "Float"), 0.0, "Float")
+            k = k + 1
+        let frc: Int = sk_fft(re, im, GP_SEG)
+        if frc != 0:
+            println("gauss_perfection: fft fail frame=" + str(fr))
+            return 2
+        var b: Int = 0
+        while b < GP_NB:
+            let rv: Float = mem_load(ptr_offset(re, b, "Float"), "Float")
+            let iv: Float = mem_load(ptr_offset(im, b, "Float"), "Float")
+            let pw: Float = rv * rv + iv * iv
+            mem_store(ptr_offset(s1a, b, "Float"), mem_load(ptr_offset(s1a, b, "Float"), "Float") + pw, "Float")
+            mem_store(ptr_offset(s2a, b, "Float"), mem_load(ptr_offset(s2a, b, "Float"), "Float") + pw * pw, "Float")
+            b = b + 1
+        fr = fr + 1
+    decay re
+    decay im
+
+    // Per-bin SK via the converge lane + peak-power hunt.
+    var bad: Int = 0
+    var nb: Int = 0
+    var sksum: Float = 0.0
+    var s1tot: Float = 0.0
+    var peakpw: Float = 0.0 - 1.0
+    var peakbin: Int = 2
+    var bb: Int = 2
+    while bb < GP_NB:
+        let s1: Float = mem_load(ptr_offset(s1a, bb, "Float"), "Float")
+        let s2: Float = mem_load(ptr_offset(s2a, bb, "Float"), "Float")
+        s1tot = s1tot + s1
+        let pw: Float = s1 / M
+        if pw > peakpw:
+            peakpw = pw
+            peakbin = bb
+        nb = nb + 1
+        if s1 > 0.0:
+            let sk: Float = sk_bin_lane(s1, s2, M)
+            var dev: Float = sk - 1.0
+            if dev < 0.0:
+                dev = 0.0 - dev
+            sksum = sksum + dev
+            if dev >= 0.5:
+                bad = bad + 1
+        bb = bb + 1
+    decay s1a
+    decay s2a
+    let skfrac: Float = (bad as Float) / (nb as Float)
+    let skmean_dev: Float = sksum / (nb as Float)
+    var meanpw: Float = 0.0
+    if nb > 0:
+        meanpw = s1tot / ((nb as Float) * M)
+    var peakratio: Float = 0.0
+    if meanpw > 0.0:
+        peakratio = peakpw / meanpw
+
+    // Time-domain moments (two passes) -> SKt = m4/m2^2, Gaussian = 3.
+    var mean: Float = 0.0
+    var ii: Int = 0
+    while ii < n:
+        mean = mean + mem_load(ptr_offset(x, ii, "Float"), "Float")
+        ii = ii + 1
+    mean = mean / (n as Float)
+    var m2: Float = 0.0
+    var m4: Float = 0.0
+    ii = 0
+    while ii < n:
+        let d: Float = mem_load(ptr_offset(x, ii, "Float"), "Float") - mean
+        let d2: Float = d * d
+        m2 = m2 + d2
+        m4 = m4 + d2 * d2
+        ii = ii + 1
+    m2 = m2 / (n as Float)
+    m4 = m4 / (n as Float)
+    var skt: Float = 0.0
+    if m2 > 0.0:
+        skt = m4 / (m2 * m2)
+    var skdev_t: Float = skt / 3.0 - 1.0
+    if skdev_t < 0.0:
+        skdev_t = 0.0 - skdev_t
+
+    // H1: 3-ordinal permutation entropy (6 patterns, ties skipped).
+    let mut cnts: ptr<Int> = alloc_zeroed(6 + 32, "Int")
+    var ntri: Int = 0
+    ii = 0
+    while ii + 2 < n:
+        let a: Float = mem_load(ptr_offset(x, ii, "Float"), "Float")
+        let b2: Float = mem_load(ptr_offset(x, ii + 1, "Float"), "Float")
+        let c: Float = mem_load(ptr_offset(x, ii + 2, "Float"), "Float")
+        var pat: Int = -1
+        if a < b2:
+            if b2 < c:
+                pat = 0
+            elif a < c:
+                pat = 1
+            else:
+                pat = 4
+        elif b2 < c:
+            if a < c:
+                pat = 2
+            else:
+                pat = 3
+        else:
+            if a < c:
+                pat = 4
+            elif c < a:
+                pat = 5
+        if pat >= 0:
+            mem_store(ptr_offset(cnts, pat, "Int"), mem_load(ptr_offset(cnts, pat, "Int"), "Int") + 1, "Int")
+            ntri = ntri + 1
+        ii = ii + 1
+    var h1: Float = 0.0
+    if ntri > 0:
+        var e: Float = 0.0
+        var q2: Int = 0
+        while q2 < 6:
+            let cc: Int = mem_load(ptr_offset(cnts, q2, "Int"), "Int")
+            if cc > 0:
+                let p: Float = (cc as Float) / (ntri as Float)
+                e = e - p * log(p) * GP_LN2INV
+            q2 = q2 + 1
+        h1 = e / GP_LOG2_6
+    decay cnts
+
+    // LZ76 spot-check on first 2048 samples binarized vs mean.
+    var nlz: Int = 2048
+    if n < nlz:
+        nlz = n
+    let mut lzb: ptr<Byte> = alloc_zeroed(nlz + 32, "Byte")
+    ii = 0
+    while ii < nlz:
+        var bit: Int = 0
+        if mem_load(ptr_offset(x, ii, "Float"), "Float") > mean:
+            bit = 1
+        mem_store(ptr_offset(lzb, ii, "Byte"), bit as Byte, "Byte")
+        ii = ii + 1
+    var lzc: Int = 1
+    var lzl: Int = 1
+    var lzk: Int = 1
+    while lzl + lzk <= nlz:
+        var found: Int = 0
+        var pp: Int = 0
+        while pp < lzl:
+            var hit: Int = 1
+            var jj: Int = 0
+            while jj < lzk:
+                let va: Int = bref(lzb, pp + jj)
+                let vb: Int = bref(lzb, lzl + jj)
+                if va != vb:
+                    hit = 0
+                    break
+                jj = jj + 1
+            if hit == 1:
+                found = 1
+                break
+            pp = pp + 1
+        if found == 1:
+            lzk = lzk + 1
+        else:
+            lzc = lzc + 1
+            lzl = lzl + lzk
+            lzk = 1
+    decay lzb
+    var lz: Float = 0.0
+    if nlz > 1:
+        lz = ((lzc as Float) * log(nlz as Float) * GP_LN2INV) / (nlz as Float)
+
+    // Hum gate A: phase folds at 44.70 / 22.35 Hz (sub-bin for STFT).
+    var hum: Int = 0
+    var sd: Float = 0.0
+    if m2 > 0.0:
+        sd = sqrt(m2)
+    let mut prof: ptr<Float> = alloc_zeroed(8 + 32, "Float")
+    let mut pcnt: ptr<Int> = alloc_zeroed(8 + 32, "Int")
+    var hf: Int = 0
+    while hf < 2:
+        var hfreq: Float = GP_HUM1
+        if hf == 1:
+            hfreq = GP_HUM0
+        let P: Int = ((fs / hfreq) + 0.5) as Int
+        if P > 8:
+            if n >= 4 * P:
+                if sd > 0.0:
+                    var z2: Int = 0
+                    while z2 < 8:
+                        mem_store(ptr_offset(prof, z2, "Float"), 0.0, "Float")
+                        mem_store(ptr_offset(pcnt, z2, "Int"), 0, "Int")
+                        z2 = z2 + 1
+                    var fi: Int = 0
+                    while fi < n:
+                        let bin: Int = ((fi % P) * 8) / P
+                        mem_store(ptr_offset(prof, bin, "Float"), mem_load(ptr_offset(prof, bin, "Float"), "Float") + mem_load(ptr_offset(x, fi, "Float"), "Float"), "Float")
+                        mem_store(ptr_offset(pcnt, bin, "Int"), mem_load(ptr_offset(pcnt, bin, "Int"), "Int") + 1, "Int")
+                        fi = fi + 1
+                    var pmax: Float = 0.0 - 100000000000000000000.0
+                    var pmin: Float = 100000000000000000000.0
+                    z2 = 0
+                    while z2 < 8:
+                        let cc2: Int = mem_load(ptr_offset(pcnt, z2, "Int"), "Int")
+                        if cc2 > 0:
+                            let v: Float = mem_load(ptr_offset(prof, z2, "Float"), "Float") / (cc2 as Float)
+                            if v > pmax:
+                                pmax = v
+                            if v < pmin:
+                                pmin = v
+                        z2 = z2 + 1
+                    let contrast: Float = (pmax - pmin) / sd
+                    if contrast > GP_FOLD_GATE:
+                        hum = 1
+        hf = hf + 1
+    decay prof
+    decay pcnt
+
+    // Hum gate B: STFT peak-bin match on 134.11/178.81/715.25 (+low pair
+    // images) when a real narrowband excess exists.
+    if hum == 0:
+        if peakratio > GP_PEAK_GATE:
+            let df: Float = fs / (GP_SEG as Float)
+            let fpeak: Float = (peakbin as Float) * df
+            var d0: Float = fpeak - GP_HUM0
+            if d0 < 0.0:
+                d0 = 0.0 - d0
+            var d1: Float = fpeak - GP_HUM1
+            if d1 < 0.0:
+                d1 = 0.0 - d1
+            var d2: Float = fpeak - GP_HUM2
+            if d2 < 0.0:
+                d2 = 0.0 - d2
+            var d3: Float = fpeak - GP_HUM3
+            if d3 < 0.0:
+                d3 = 0.0 - d3
+            var d4: Float = fpeak - GP_HUM4
+            if d4 < 0.0:
+                d4 = 0.0 - d4
+            if d0 < df:
+                hum = 1
+            else:
+                if d1 < df:
+                    hum = 1
+                else:
+                    if d2 < df:
+                        hum = 1
+                    else:
+                        if d3 < df:
+                            hum = 1
+                        else:
+                            if d4 < df:
+                                hum = 1
+
+    // MAD-sanity (numerics guard): insane stats Out, hum estimate with them.
+    var sane: Int = 1
+    if s1tot <= 0.0:
+        sane = 0
+    elif m2 <= 0.0:
+        sane = 0
+    elif peakratio >= GP_MAD_BLOWUP:
+        sane = 0
+    elif peakratio >= 1000000000.0:
+        sane = 0
+
+    mem_store(ptr_offset(stats, 0, "Float"), skdev_t, "Float")
+    mem_store(ptr_offset(stats, 1, "Float"), skfrac, "Float")
+    mem_store(ptr_offset(stats, 2, "Float"), h1, "Float")
+    mem_store(ptr_offset(stats, 3, "Float"), lz, "Float")
+    mem_store(ptr_offset(stats, 4, "Float"), peakratio, "Float")
+    mem_store(ptr_offset(stats, 5, "Float"), hum as Float, "Float")
+    mem_store(ptr_offset(stats, 6, "Float"), sane as Float, "Float")
+    mem_store(ptr_offset(stats, 7, "Float"), skmean_dev, "Float")
+    return 0
+
+// ── Prove battery (4/4 per spec; Box-Muller Gaussianity, in-memory) ─────────
+fn gp_fill_gauss(x: ptr<Float>, n: Int, seed: Int) -> Int with Unsafe:
+    var rs: Int = seed
+    var i: Int = 0
+    while i < n:
+        rs = ((rs * 1103515245) + 12345) & 2147483647
+        var u1: Float = (rs as Float) / 2147483648.0
+        if u1 <= 0.0:
+            u1 = 0.0000000001
+        rs = ((rs * 1103515245) + 12345) & 2147483647
+        let u2: Float = (rs as Float) / 2147483648.0
+        mem_store(ptr_offset(x, i, "Float"), sqrt(0.0 - 2.0 * log(u1)) * cos(SK_PI2 * u2), "Float")
+        i = i + 1
+    return rs
+
+fn run_gauss_perfection_prove() -> Int with Unsafe:
+    println("gauss_perfection: running prove battery (inversion must not amplify quiet)...")
+    let N: Int = 1048576
+    let fs: Float = FS_HZ
+    let tol: Float = 0.005
+    let hgate: Float = 0.999
+    let mut x: ptr<Float> = alloc_zeroed(N + 32, "Float")
+    let mut son: ptr<Float> = alloc_zeroed(8 + 32, "Float")
+    let mut soff: ptr<Float> = alloc_zeroed(8 + 32, "Float")
+    var npass: Int = 0
+    var total: Int = 4
+
+    // P1: pure noise, single leg -> CLEAN (NOT escalated).
+    let s1: Int = gp_fill_gauss(x, N, 777)
+    if s1 == 777:
+        println("  [WARN] P1: rng passthrough odd")
+    let r1: Int = analyze_buf(x, N, fs, son)
+    let c1: Int = gp_classify(mem_load(ptr_offset(son, 0, "Float"), "Float"), mem_load(ptr_offset(son, 1, "Float"), "Float"), mem_load(ptr_offset(son, 2, "Float"), "Float"), mem_load(ptr_offset(son, 6, "Float"), "Float") as Int, mem_load(ptr_offset(son, 5, "Float"), "Float") as Int, tol, hgate, 0)
+    if r1 == 0:
+        if c1 == 1:
+            npass = npass + 1
+            println("  [PASS] P1: noise single-leg -> CLEAN (skdev=" + str(mem_load(ptr_offset(son, 0, "Float"), "Float") * 10000.0) + "e-4 h1=" + str(mem_load(ptr_offset(son, 2, "Float"), "Float") * 1000.0) + "e-3)")
+        else:
+            println("  [FAIL] P1: noise single-leg rc=" + str(r1) + " code=" + str(c1) + " (" + gp_verdict_str(c1) + ")")
+    else:
+        println("  [FAIL] P1: noise single-leg rc=" + str(r1) + " code=" + str(c1) + " (" + gp_verdict_str(c1) + ")")
+
+    // P2: 44.70 Hz hum comb on noise -> QUARANTINE-HUM.
+    var rs2: Int = gp_fill_gauss(x, N, 31337)
+    if rs2 == 31337:
+        println("  [WARN] P2: rng passthrough odd")
+    var j: Int = 0
+    while j < N:
+        let ph: Float = SK_PI2 * GP_HUM1 * (j as Float) / fs
+        mem_store(ptr_offset(x, j, "Float"), mem_load(ptr_offset(x, j, "Float"), "Float") + 2.0 * sin(ph), "Float")
+        j = j + 1
+    let r2: Int = analyze_buf(x, N, fs, son)
+    let hum2: Int = mem_load(ptr_offset(son, 5, "Float"), "Float") as Int
+    let c2: Int = gp_classify(mem_load(ptr_offset(son, 0, "Float"), "Float"), mem_load(ptr_offset(son, 1, "Float"), "Float"), mem_load(ptr_offset(son, 2, "Float"), "Float"), mem_load(ptr_offset(son, 6, "Float"), "Float") as Int, hum2, tol, hgate, 1)
+    if r2 == 0:
+        if hum2 == 1:
+            if c2 == 2:
+                npass = npass + 1
+                println("  [PASS] P2: hum comb -> QUARANTINE-HUM (fold gate tripped at 44.70 Hz)")
+            else:
+                println("  [FAIL] P2: hum comb rc=" + str(r2) + " hum=" + str(hum2) + " code=" + str(c2))
+        else:
+            println("  [FAIL] P2: hum comb rc=" + str(r2) + " hum=" + str(hum2) + " code=" + str(c2))
+    else:
+        println("  [FAIL] P2: hum comb rc=" + str(r2) + " hum=" + str(hum2) + " code=" + str(c2))
+
+    // P3: shaped-Gaussian both legs -> PERFECT-COMMON (differential pass).
+    let s3a: Int = gp_fill_gauss(x, N, 4242)
+    if s3a == 4242:
+        println("  [WARN] P3: rng passthrough odd")
+    let r3a: Int = analyze_buf(x, N, fs, son)
+    let s3b: Int = gp_fill_gauss(x, N, 99991)
+    if s3b == 99991:
+        println("  [WARN] P3: rng passthrough odd")
+    let r3b: Int = analyze_buf(x, N, fs, soff)
+    var common3: Int = 0
+    if r3b == 0:
+        if mem_load(ptr_offset(soff, 6, "Float"), "Float") as Int == 1:
+            if mem_load(ptr_offset(soff, 5, "Float"), "Float") as Int == 0:
+                if mem_load(ptr_offset(soff, 1, "Float"), "Float") < 0.02:
+                    if mem_load(ptr_offset(soff, 0, "Float"), "Float") <= tol:
+                        if mem_load(ptr_offset(soff, 2, "Float"), "Float") >= hgate:
+                            common3 = 1
+    let c3: Int = gp_classify(mem_load(ptr_offset(son, 0, "Float"), "Float"), mem_load(ptr_offset(son, 1, "Float"), "Float"), mem_load(ptr_offset(son, 2, "Float"), "Float"), mem_load(ptr_offset(son, 6, "Float"), "Float") as Int, mem_load(ptr_offset(son, 5, "Float"), "Float") as Int, tol, hgate, common3)
+    if r3a == 0:
+        if r3b == 0:
+            if c3 == 0:
+                npass = npass + 1
+                println("  [PASS] P3: dual-leg shaped-Gaussian -> PERFECT-COMMON (Q escalates, hum-free, MAD-sane)")
+            else:
+                println("  [FAIL] P3: dual-leg rc=" + str(r3a) + "/" + str(r3b) + " common=" + str(common3) + " code=" + str(c3))
+        else:
+            println("  [FAIL] P3: dual-leg rc=" + str(r3a) + "/" + str(r3b) + " common=" + str(common3) + " code=" + str(c3))
+    else:
+        println("  [FAIL] P3: dual-leg rc=" + str(r3a) + "/" + str(r3b) + " common=" + str(common3) + " code=" + str(c3))
+
+    // P4: ON-only Gaussian (no OFF) -> CLEAN (kills single-leg escalate).
+    let s4: Int = gp_fill_gauss(x, N, 55555)
+    if s4 == 55555:
+        println("  [WARN] P4: rng passthrough odd")
+    let r4: Int = analyze_buf(x, N, fs, son)
+    let c4: Int = gp_classify(mem_load(ptr_offset(son, 0, "Float"), "Float"), mem_load(ptr_offset(son, 1, "Float"), "Float"), mem_load(ptr_offset(son, 2, "Float"), "Float"), mem_load(ptr_offset(son, 6, "Float"), "Float") as Int, mem_load(ptr_offset(son, 5, "Float"), "Float") as Int, tol, hgate, 0)
+    if r4 == 0:
+        if c4 == 1:
+            npass = npass + 1
+            println("  [PASS] P4: ON-only Gaussian -> CLEAN (no OFF leg, no escalate)")
+        else:
+            println("  [FAIL] P4: ON-only rc=" + str(r4) + " code=" + str(c4))
+    else:
+        println("  [FAIL] P4: ON-only rc=" + str(r4) + " code=" + str(c4))
+
+    decay x
+    decay son
+    decay soff
+    println("[prove] " + str(npass) + "/" + str(total) + " checks passed")
+    if npass == total:
+        println("receipt=PASS prove=" + str(npass) + "/" + str(total))
+        return 0
+    println("receipt=FAIL prove=" + str(npass) + "/" + str(total))
+    return 1
+
+pub fn gauss_perfection_usage() -> String:
+    var t: String = "gauss_perfection 0.1.0 — TurboKain inverted-SK escalator (alien Tool 2)\n"
+    t = t + "Perfection IS the flag: |SKt/3-1|<=tol AND H1>=gate AND common-mode\n"
+    t = t + "(OFF leg independently perfect) => PERFECT-COMMON. Pre-vetoes first:\n"
+    t = t + "MAD-sanity -> NUMERICS, hum family (22.35/44.70/134.11/178.81/715.25 Hz)\n"
+    t = t + "-> QUARANTINE-HUM, ON-only Gaussian -> CLEAN (quiet sky, not escalated).\n"
+    t = t + "\n"
+    t = t + "USAGE:\n"
+    t = t + "  gauss_perfection --in <f32> [--off <f32>] [--fs HZ] [--sk-tol 0.005]\n"
+    t = t + "                   [--h-gate 0.999] [--out <md>] [--csv <csv>]\n"
+    t = t + "                   [--data-dir D] [--json] [--prove]\n"
+    t = t + "\n"
+    t = t + "CSV: tile,sk_mean_x1000,sk_frac_pc,h1_x1000,lz_x1000,common_x100,q_x100,verdict\n"
+    t = t + "EXIT CODES: 0 gated, 1 help / prove FAIL, 2 error.\n"
+    return t
+
+pub fn gauss_perfection_main(args: Array<String>) -> Int with Unsafe:
+    var in_path: String = ""
+    var off_path: String = ""
+    var data_dir: String = ""
+    var out_path: String = ""
+    var csv_path: String = ""
+    var fs: Float = FS_HZ
+    var sk_tol: Float = 0.005
+    var h_gate: Float = 0.999
+    var json: Int = 0
+    var show_help: Int = 0
+    var do_prove: Int = 0
+    var pos: Array<String> = []
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help":
+            show_help = 1
+        elif a == "-h":
+            show_help = 1
+        elif a == "--json":
+            json = 1
+        elif a == "--prove":
+            do_prove = 1
+        elif a == "--selftest":
+            do_prove = 1
+        elif a == "--in":
+            if i + 1 < len(args):
+                in_path = args[i + 1]
+                i = i + 1
+        elif a == "--off":
+            if i + 1 < len(args):
+                off_path = args[i + 1]
+                i = i + 1
+        elif a == "--out":
+            if i + 1 < len(args):
+                out_path = args[i + 1]
+                i = i + 1
+        elif a == "--csv":
+            if i + 1 < len(args):
+                csv_path = args[i + 1]
+                i = i + 1
+        elif a == "--fs":
+            if i + 1 < len(args):
+                fs = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--sk-tol":
+            if i + 1 < len(args):
+                sk_tol = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--h-gate":
+            if i + 1 < len(args):
+                h_gate = parse_float_text(args[i + 1])
+                i = i + 1
+        elif a == "--data-dir":
+            if i + 1 < len(args):
+                data_dir = args[i + 1]
+                i = i + 1
+        else:
+            if len(a) > 0:
+                if char_at(a, 0) != "-":
+                    push(pos, a)
+        i = i + 1
+    var pi: Int = 0
+    while pi < len(pos):
+        let p: String = pos[pi]
+        if pi == 0:
+            if in_path == "":
+                in_path = p
+        elif pi == 1:
+            if out_path == "":
+                out_path = p
+        pi = pi + 1
+
+    if show_help == 1:
+        print(gauss_perfection_usage())
+        return EXIT_HELP
+    if do_prove == 1:
+        return run_gauss_perfection_prove()
+
+    if data_dir == "":
+        let envd: String = process_environment("SETIYETI_DATA")
+        if len(envd) > 0:
+            data_dir = envd
+    if in_path != "":
+        if data_dir != "":
+            if find_from(in_path, ":", 0) < 0:
+                if len(in_path) > 0:
+                    if char_at(in_path, 0) != "/":
+                        in_path = data_dir + "/" + in_path
+    if off_path != "":
+        if data_dir != "":
+            if find_from(off_path, ":", 0) < 0:
+                if len(off_path) > 0:
+                    if char_at(off_path, 0) != "/":
+                        off_path = data_dir + "/" + off_path
+    if in_path == "":
+        println("gauss_perfection: no input. usage: gauss_perfection --in <f32> [--off <f32>] [--fs HZ]")
+        return EXIT_ERROR
+
+    // ── Read ON leg (STFT-span capped like sk_gate) ──
+    let h: ptr<Void> = k_CreateFileA(in_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+    if ptr_to_int(h) == -1:
+        println("gauss_perfection: open fail err=" + str(k_GetLastError()) + ": " + in_path)
+        return EXIT_ERROR
+    let szslot: ptr<Int> = alloc_zeroed(1, "Int")
+    let mut fsize: Int = -1
+    if k_GetFileSizeEx(h, szslot) != 0:
+        fsize = mem_load(szslot, "Int")
+    decay szslot
+    if fsize < 0:
+        println("gauss_perfection: size fail")
+        return EXIT_ERROR
+    let nsamp_file: Int = fsize / 4
+    var nseg: Int = (nsamp_file - GP_SEG) / GP_HOP + 1
+    if nseg > GP_CAP:
+        nseg = GP_CAP
+
+    let mut on_code: Int = 4
+    let mut on_stats: ptr<Float> = alloc_zeroed(8 + 32, "Float")
+    var skdev_on: Float = 0.0
+    var skfrac_on: Float = 0.0
+    var h1_on: Float = 0.0
+    var lz_on: Float = 0.0
+    var peak_on: Float = 0.0
+    var hum_on: Int = 0
+    var sane_on: Int = 0
+    var skm_on: Float = 0.0
+    if nseg >= GP_MIN:
+        let need_samp: Int = (nseg - 1) * GP_HOP + GP_SEG
+        let need_bytes: Int = need_samp * 4
+        let mut rawbuf: ptr<Byte> = alloc_zeroed(need_bytes + 32, "Byte")
+        let mut nslot: ptr<Int> = alloc_zeroed(1, "Int")
+        mem_store(nslot, 0, "Int")
+        let rok: Int = k_ReadFile(h, rawbuf, need_bytes, nslot, null_ptr())
+        let got: Int = mem_load(nslot, "Int")
+        let _ch: Int = k_CloseHandle(h)
+        if rok == 0:
+            println("gauss_perfection: short read got=" + str(got) + " want=" + str(need_bytes))
+            return EXIT_ERROR
+        else:
+            if got < need_bytes:
+                println("gauss_perfection: short read got=" + str(got) + " want=" + str(need_bytes))
+                return EXIT_ERROR
+        let mut p2t: ptr<Float> = alloc_zeroed(254 + 32, "Float")
+        var pv: Float = 1.0
+        var di: Int = 0
+        while di < 126:
+            pv = pv / 2.0
+            di = di + 1
+        var pj: Int = 0
+        while pj < 254:
+            mem_store(ptr_offset(p2t, pj, "Float"), pv, "Float")
+            pv = pv * 2.0
+            pj = pj + 1
+        let mut fbuf: ptr<Float> = alloc_zeroed(need_samp + 32, "Float")
+        var ds: Int = 0
+        while ds < need_samp:
+            let b0: Int = bref(rawbuf, ds * 4)
+            let b1: Int = bref(rawbuf, ds * 4 + 1)
+            let b2: Int = bref(rawbuf, ds * 4 + 2)
+            let b3: Int = bref(rawbuf, ds * 4 + 3)
+            mem_store(ptr_offset(fbuf, ds, "Float"), f32_of_quad(b0, b1, b2, b3, p2t), "Float")
+            ds = ds + 1
+        decay rawbuf
+        decay p2t
+        let rc: Int = analyze_buf(fbuf, need_samp, fs, on_stats)
+        decay fbuf
+        if rc == 0:
+            skdev_on = mem_load(ptr_offset(on_stats, 0, "Float"), "Float")
+            skfrac_on = mem_load(ptr_offset(on_stats, 1, "Float"), "Float")
+            h1_on = mem_load(ptr_offset(on_stats, 2, "Float"), "Float")
+            lz_on = mem_load(ptr_offset(on_stats, 3, "Float"), "Float")
+            peak_on = mem_load(ptr_offset(on_stats, 4, "Float"), "Float")
+            hum_on = mem_load(ptr_offset(on_stats, 5, "Float"), "Float") as Int
+            sane_on = mem_load(ptr_offset(on_stats, 6, "Float"), "Float") as Int
+            skm_on = mem_load(ptr_offset(on_stats, 7, "Float"), "Float")
+    else:
+        let _ch2: Int = k_CloseHandle(h)
+
+    // ── Read OFF leg (same span logic; OFF-SHORT kills common-mode) ──
+    var off_done: Int = 0
+    var skdev_off: Float = 0.0
+    var skfrac_off: Float = 0.0
+    var h1_off: Float = 0.0
+    var lz_off: Float = 0.0
+    var hum_off: Int = 0
+    var sane_off: Int = 0
+    var skm_off: Float = 0.0
+    if off_path != "":
+        if nseg >= GP_MIN:
+            let ho: ptr<Void> = k_CreateFileA(off_path, GEN_READ, FILE_SHARE_RW, null_ptr(), OPEN_EXISTING, FILE_NORMAL, null_ptr())
+            if ptr_to_int(ho) == -1:
+                println("gauss_perfection: OFF open fail err=" + str(k_GetLastError()) + ": " + off_path)
+                return EXIT_ERROR
+            let osz: ptr<Int> = alloc_zeroed(1, "Int")
+            let mut ofsize: Int = -1
+            if k_GetFileSizeEx(ho, osz) != 0:
+                ofsize = mem_load(osz, "Int")
+            decay osz
+            let onsamp: Int = ofsize / 4
+            var onseg: Int = (onsamp - GP_SEG) / GP_HOP + 1
+            if onseg > GP_CAP:
+                onseg = GP_CAP
+            if onseg >= GP_MIN:
+                let oneed: Int = (onseg - 1) * GP_HOP + GP_SEG
+                let obytes: Int = oneed * 4
+                let mut oraw: ptr<Byte> = alloc_zeroed(obytes + 32, "Byte")
+                let mut onslot: ptr<Int> = alloc_zeroed(1, "Int")
+                mem_store(onslot, 0, "Int")
+                let orok: Int = k_ReadFile(ho, oraw, obytes, onslot, null_ptr())
+                let ogot: Int = mem_load(onslot, "Int")
+                let _cho: Int = k_CloseHandle(ho)
+                if orok == 0:
+                    println("gauss_perfection: OFF short read")
+                    return EXIT_ERROR
+                else:
+                    if ogot < obytes:
+                        println("gauss_perfection: OFF short read")
+                        return EXIT_ERROR
+                let mut op2t: ptr<Float> = alloc_zeroed(254 + 32, "Float")
+                var opv: Float = 1.0
+                var odi: Int = 0
+                while odi < 126:
+                    opv = opv / 2.0
+                    odi = odi + 1
+                var opj: Int = 0
+                while opj < 254:
+                    mem_store(ptr_offset(op2t, opj, "Float"), opv, "Float")
+                    opv = opv * 2.0
+                    opj = opj + 1
+                let mut obuf: ptr<Float> = alloc_zeroed(oneed + 32, "Float")
+                var ods: Int = 0
+                while ods < oneed:
+                    let o0: Int = bref(oraw, ods * 4)
+                    let o1: Int = bref(oraw, ods * 4 + 1)
+                    let o2: Int = bref(oraw, ods * 4 + 2)
+                    let o3: Int = bref(oraw, ods * 4 + 3)
+                    mem_store(ptr_offset(obuf, ods, "Float"), f32_of_quad(o0, o1, o2, o3, op2t), "Float")
+                    ods = ods + 1
+                decay oraw
+                decay op2t
+                let mut off_stats: ptr<Float> = alloc_zeroed(8 + 32, "Float")
+                let orc: Int = analyze_buf(obuf, oneed, fs, off_stats)
+                decay obuf
+                if orc == 0:
+                    off_done = 1
+                    skdev_off = mem_load(ptr_offset(off_stats, 0, "Float"), "Float")
+                    skfrac_off = mem_load(ptr_offset(off_stats, 1, "Float"), "Float")
+                    h1_off = mem_load(ptr_offset(off_stats, 2, "Float"), "Float")
+                    lz_off = mem_load(ptr_offset(off_stats, 3, "Float"), "Float")
+                    hum_off = mem_load(ptr_offset(off_stats, 5, "Float"), "Float") as Int
+                    sane_off = mem_load(ptr_offset(off_stats, 6, "Float"), "Float") as Int
+                    skm_off = mem_load(ptr_offset(off_stats, 7, "Float"), "Float")
+                decay off_stats
+            else:
+                let _cho2: Int = k_CloseHandle(ho)
+
+    // ── Differential: OFF must be independently perfect to escalate ──
+    var common: Int = 0
+    if off_done == 1:
+        if sane_off == 1:
+            if hum_off == 0:
+                if skfrac_off < 0.02:
+                    if skdev_off <= sk_tol:
+                        if h1_off >= h_gate:
+                            common = 1
+    if nseg >= GP_MIN:
+        on_code = gp_classify(skdev_on, skfrac_on, h1_on, sane_on, hum_on, sk_tol, h_gate, common)
+    var verdict: String = gp_verdict_str(on_code)
+
+    var q: Float = 0.0
+    if common == 1:
+        q = h1_on / (skdev_on + 0.000001)
+        if q > 999999.0:
+            q = 999999.0
+    var common_x100: Int = 0
+    if common == 1:
+        common_x100 = 100
+
+    // ── md + csv + receipt ──
+    var md: String = "| tile | file | samples | sk_t_x1e4 | skfrac_x1e4 | h1_x1000 | lz_x1000 | peak_x100 | hum | sane | common | q_x100 | verdict |\n"
+    md = md + "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    md = md + "| 0 | " + in_path + " | " + str(nsamp_file) + " | " + str(skdev_on * 10000.0) + " | " + str(skfrac_on * 10000.0) + " | " + str(h1_on * 1000.0) + " | " + str(lz_on * 1000.0) + " | " + str(peak_on * 100.0) + " | " + str(hum_on) + " | " + str(sane_on) + " | " + str(common) + " | " + str(q * 100.0) + " | " + verdict + " |\n"
+    if off_done == 1:
+        md = md + "| 1 | " + off_path + " | perf-leg | " + str(skdev_off * 10000.0) + " | " + str(skfrac_off * 10000.0) + " | " + str(h1_off * 1000.0) + " | " + str(lz_off * 1000.0) + " | 0 | " + str(hum_off) + " | " + str(sane_off) + " | leg | 0 | OFF |\n"
+    println(md)
+    if out_path != "":
+        fs_write_text(out_path, md)
+    var csv: String = "tile,sk_mean_x1000,sk_frac_pc,h1_x1000,lz_x1000,common_x100,q_x100,verdict\n"
+    csv = csv + "0," + str((skm_on + 1.0) * 1000.0) + "," + str(skfrac_on * 100.0) + "," + str(h1_on * 1000.0) + "," + str(lz_on * 1000.0) + "," + str(common_x100) + "," + str(q * 100.0) + "," + verdict + "\n"
+    if off_done == 1:
+        csv = csv + "1," + str((skm_off + 1.0) * 1000.0) + "," + str(skfrac_off * 100.0) + "," + str(h1_off * 1000.0) + "," + str(lz_off * 1000.0) + ",0,0,OFF\n"
+    if csv_path != "":
+        fs_write_text(csv_path, csv)
+    if json == 1:
+        println("{\"tool\": \"gauss_perfection\", \"fs\": \"" + str(fs) + "\", \"common\": \"" + str(common) + "\", \"q_x100\": \"" + str(q * 100.0) + "\", \"verdict\": \"" + verdict + "\"}")
+    println("receipt=PASS gated=1 fs=" + str(fs) + " common=" + str(common) + " verdict=" + verdict)
+    decay on_stats
+    return EXIT_OK
+
+// NOTE: no `fn main` here by convention — dispatch.kn owns main() in the
+// amalgamated core.kn; sibling tools build standalone without one.

@@ -1133,10 +1133,10 @@ pub fn unify_main(args: Array<String>) -> Int:
         li2 = li2 + 1
     // Cell lookup helper data: linear scan per (row, tool).
     // Per-tool flag counts + floors (max clean strength + best flagged).
-    var cnt_files: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    var cnt_flag: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    var fl_clean: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    var fl_best: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var cnt_files: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var cnt_flag: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var fl_clean: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var fl_best: Array<Int> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     var ci3: Int = 0
     while ci3 < ntables:
         let tt: Int = f_tool[ci3]
@@ -1228,7 +1228,7 @@ pub fn unify_main(args: Array<String>) -> Int:
     rep = rep + "## File inventory\n\n"
     rep = rep + "| tool | files | flagged |\n|---|---|---|\n"
     var ti2: Int = 1
-    while ti2 <= 11:
+    while ti2 <= 12:
         if cnt_files[ti2] > 0:
             rep = rep + "| " + uni_tool_name(ti2) + " | " + str(cnt_files[ti2]) + " | " + str(cnt_flag[ti2]) + " |\n"
         ti2 = ti2 + 1

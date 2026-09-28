@@ -28,10 +28,12 @@
 
 use std::process
 use std::text
+use std::fs
 use _common::EXIT_OK
 use _common::EXIT_HELP
 use _common::EXIT_ERROR
 use _common::bref
+use _common::find_from
 use _common::str_ends_with
 
 @extern @link_name("GetCommandLineA")
@@ -59,8 +61,12 @@ fn usage() -> String:
     t = t + "  scint_pol    -> scint, pol        sk_gate      -> sk\n"
     t = t + "  slice        -> slice             stack        -> stk\n"
     t = t + "  xeno_scan    -> xeno              xvm_sandbox  -> xvm\n"
-    t = t + "  bispectrum   -> bisp\n\n"
-    t = t + "INSTRUMENTS (22 total):\n"
+    t = t + "  bispectrum   -> bisp\n"
+    t = t + "  ism_stamp    -> stamp\n"
+    t = t + "  fec_ghost    -> ghost\n"
+    t = t + "  gauss_perfection -> gperf\n"
+    t = t + "  pulsar_clock -> pclock\n\n"
+    t = t + "INSTRUMENTS (26 total):\n"
     t = t + "  [Ingest / Calibration]\n"
     t = t + "    slice         GUPPI .raw -> .f32 channel/pol voltage slice (2/8-bit)\n"
     t = t + "    fil_reader    Sigproc .fil -> .f32 voltage slice (8/16/32-bit)\n"
@@ -72,7 +78,11 @@ fn usage() -> String:
     t = t + "    bispectrum    3D Bispectrum & Normalized Bicoherence (b^2) QPC estimator (IRPD O(N^2) / diag O(N))\n"
     t = t + "    xeno_scan     Microscopic battery (SK, coherence, comb ladder, DM, tail)\n"
     t = t + "    perm_entropy  Model-free Permutation Entropy & LZW Complexity screener (O(N))\n"
-    t = t + "    scint_pol     Interstellar scintillation decorrelation & pol coherence (I2->I3)\n\n"
+    t = t + "    scint_pol     Interstellar scintillation decorrelation & pol coherence (I2->I3)\n"
+    t = t + "    ism_stamp     Propagation authenticator (Kolmogorov DISS exponent + RM + DM + OFF contrast)\n"
+    t = t + "    gauss_perfection Inverted-SK escalator (perfection-behind-vetoes flag)\n"
+    t = t + "    pulsar_clock  Galactic re-timer (UTC -> pulsar-phase retime + phi-fold)\n"
+    t = t + "    fec_ghost     Blind soft dual-code distinguisher (256-mask boxplus, gated)\n\n"
     t = t + "  [Coherent / Periodic Detectors]\n"
     t = t + "    boxcar_bank   Fast DM sweep + boxcar single-pulse matched filters\n"
     t = t + "    fold_sum      Sub-band Hann/FFT harmonic folder (pulsar/periodic)\n"
@@ -155,6 +165,14 @@ fn tool_help(tool: String) -> Int:
         print(waterfall_usage())
     elif tool == "bispectrum" or tool == "bisp":
         print(bispectrum_usage())
+    elif tool == "ism_stamp" or tool == "stamp":
+        print(ism_stamp_usage())
+    elif tool == "fec_ghost" or tool == "ghost":
+        print(fec_ghost_usage())
+    elif tool == "gauss_perfection" or tool == "gperf":
+        print(gauss_perfection_usage())
+    elif tool == "pulsar_clock" or tool == "pclock":
+        print(pulsar_clock_usage())
     else:
         println("core: unknown tool '" + tool + "'")
         print(usage())
@@ -263,6 +281,14 @@ fn run_tool_named(tool: String, sub: Array<String>) -> Int with Unsafe:
         return waterfall_main(sub)
     elif tool == "bispectrum" or tool == "bisp":
         return bispectrum_main(sub)
+    elif tool == "ism_stamp" or tool == "stamp":
+        return ism_stamp_main(sub)
+    elif tool == "fec_ghost" or tool == "ghost":
+        return fec_ghost_main(sub)
+    elif tool == "gauss_perfection" or tool == "gperf":
+        return gauss_perfection_main(sub)
+    elif tool == "pulsar_clock" or tool == "pclock":
+        return pulsar_clock_main(sub)
     else:
         return -999
 
@@ -344,9 +370,21 @@ fn run_prove_all() -> Int with Unsafe:
     println("\n[21/21] bispectrum --prove")
     if bispectrum_main(["--prove"]) != 0: failed = failed + 1
 
+    println("\n[22/25] ism_stamp --prove")
+    if ism_stamp_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[23/25] gauss_perfection --prove")
+    if gauss_perfection_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[24/25] pulsar_clock --prove")
+    if pulsar_clock_main(["--prove"]) != 0: failed = failed + 1
+
+    println("\n[25/25] fec_ghost --prove")
+    if fec_ghost_main(["--prove"]) != 0: failed = failed + 1
+
     println("\n================================================================================")
     if failed == 0:
-        println(" Core Battery Receipt: ALL 21 PROVE BATTERIES PASSED (receipt=PASS)")
+        println(" Core Battery Receipt: ALL 25 PROVE BATTERIES PASSED (receipt=PASS)")
         println("================================================================================")
         return EXIT_OK
     else:
@@ -448,6 +486,34 @@ fn run_sweep(sub: Array<String>) -> Int with Unsafe:
     else:
         println("\n[Stage 3/17] subspace_null (spatial RFI nuller: bypassed for single-pol stream)")
 
+    println("\n[Stage 3b/17] ism_stamp (propagation authenticator: DISS exponent + RM + DM + OFF contrast)")
+    var stamp_csv: String = out_dir + "/stamp.csv"
+    var _st: Int = 1
+    if in1_path != "":
+        _st = ism_stamp_main(["--in", f32_path, "--in1", in1_path, "--fs", fs_hz, "--out", out_dir + "/stamp.md", "--csv", stamp_csv])
+    else:
+        _st = ism_stamp_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/stamp.md", "--csv", stamp_csv])
+    var stamp_gate: Int = 0
+    if _st == 0:
+        let stamp_text: String = fs_read_text(stamp_csv)
+        if find_from(stamp_text, ",STAMPED", 0) >= 0:
+            stamp_gate = 1
+        else:
+            if find_from(stamp_text, ",SKY-LIKE", 0) >= 0:
+                stamp_gate = 1
+
+    println("\n[Stage 3c/17] gauss_perfection (inverted-SK escalator, behind hum/MAD gates)")
+    let _gp: Int = gauss_perfection_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/gperf.md", "--csv", out_dir + "/gperf.csv"])
+
+    println("\n[Stage 3d/17] pulsar_clock (galactic re-timer: UTC -> pulsar-phase)")
+    let _pc: Int = pulsar_clock_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/pclock", "--csv", out_dir + "/pclock.csv"])
+
+    if stamp_gate == 1:
+        println("\n[Stage 3e/17] fec_ghost (blind soft dual-code distinguisher, stamp-gated)")
+        let _gh: Int = fec_ghost_main(["--in", f32_path, "--fs", fs_hz, "--stamp", stamp_csv, "--out", out_dir + "/ghost.md", "--csv", out_dir + "/ghost.csv"])
+    else:
+        println("\n[Stage 3e/17] fec_ghost SKIPPED (stamp gate null or stamp failed: ghost forbidden without parsecs)")
+
     println("\n[Stage 4/17] perm_entropy (Permutation Entropy & LZW Complexity)")
     let _pe: Int = perm_entropy_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/perm.md", "--csv", out_dir + "/perm.csv"])
 
@@ -458,7 +524,7 @@ fn run_sweep(sub: Array<String>) -> Int with Unsafe:
     let _fd: Int = fold_sum_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/fold.md", "--csv", out_dir + "/fold.csv"])
 
     println("\n[Stage 7/17] frft_hunt (Coherent Fractional Fourier Transform chirp matched filter)")
-    let _frf: Int = frft_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/frft.md", "--csv", out_dir + "/frft.csv"])
+    let _frf: Int = frft_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/frft.md", "--csv", out_dir + "/frft.csv", "--max-n", "131072", "--alpha-steps", "25"])
 
     println("\n[Stage 8/17] drift_hunt (Linear Doppler drifter search)")
     let _dh: Int = drift_hunt_main(["--in", f32_path, "--fs", fs_hz, "--out", out_dir + "/drift.md", "--csv", out_dir + "/drift.csv"])
