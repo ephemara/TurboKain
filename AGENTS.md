@@ -400,36 +400,50 @@ change, and a `catalog.tsv` row with its status and receipt.
 ## Where the data is
 
 The bulk raw firehose lives on **`D:/data/`** — an external ~1 TB tier
-**outside this repo**, gitignored by definition. As of now it holds roughly
-**492 GB**: **93 GUPPI `.raw` files in `D:/data/raw/`** (about 17 GB each),
-plus `D:/data/gc/` (7.6 GB), `D:/data/gt.bin` (7.9 GB), derived/slice tiers,
-and `D:/data/runs/` campaign output. There is a **metric fuck ton** of raw
-data there — this is the archive, not a sample.
+**outside this repo**, gitignored by definition. **Authoritative layout lives
+in `D:/data/README.md` — read it before touching the drive.** It is the
+single source of truth for the monolithic campaign directory blueprint
+(`campaigns/`, `raw/`, `slices/`, `cache/`, `logs/`) and the operating
+protocol. This section is a summary; the README wins on any conflict.
 
 ```
 D:/data/
-  raw/       GUPPI .raw files as downloaded (~476 GB, 93 files)
-  slices/    per-channel .f32 extractions (seti_slice output)
-  derived/   .npz / .npy / .csv intermediates
-  runs/      campaign + scan output
-  gc/  tmp/  aria logs, manifests, misc bulk
+  campaigns/   ACTIVE monolithic target (e.g. campaigns/trappist1/ — 500-820 GB saturation)
+  raw/         staging tier for incoming multi-connection aria2c baseband downloads
+  slices/      per-channel .f32 voltage extractions for the current campaign
+  cache/       ephemeral scratch buffers for deep transforms (FrFT, bispectrum tensors)
+  logs/        download telemetry, bandwidth metrics, aria2c operational logs
 ```
+
+**Monolithic campaign doctrine (2026-09-28):** one star system at a time,
+~820 GB saturation per target (leave ~100 GB free on `D:`), full ABACAD
+cadence + all nodes/bands before any pipeline runs. No more $1-scratch-ticket
+single-file scans — dwell time is sensitivity, and a 5-minute snapshot
+cannot catch duty-cycled, occulted, or scintillated transmitters. Download
+the whole system, sweep it with the full 22-instrument suite, seal receipts
+into `reports.db` + `sky_catalog.tsv`, purge raw scratch, then hop to the
+next target in the queue (TRAPPIST-1 → Proxima → HD 139139 → Tabby's Star).
 
 Rules: **never hardcode `D:/` in committed code** — take `--data-dir` /
 `$SETIYETI_DATA` so the repo still runs when the drive is unplugged. Never
 commit raw data. Check `D:/data/download_manifest.csv` and the SetiYeti
 `catalog.tsv` before downloading or rescanning anything — most files are
-already accounted for. Raw downloads land on `D:/data/`; only the current
-working set lives beside the code.
+already accounted for. Raw downloads stage in `D:/data/raw/` or
+`D:/data/campaigns/<target>/`; only the current working set lives beside
+the code.
 
 ## Downloading — permitted, encouraged, and fast
 
 This box is a **VPS with ~5000 Mbps (5 Gbps) download**. Bandwidth is not a
 constraint here — **agents are cleared to download whatever the search needs,
-whenever they need it**, straight into `D:/data/`. Do not ask first for data;
-do ask before anything destructive. Pull the whole scan. Pull the cadence OFF
-leg. Pull the other polarisations. Pull the deeper coverage. Dwell time is
-sensitivity, and we have the pipe to buy it.
+whenever they need it**, straight into `D:/data/campaigns/<target>/` (see
+`D:/data/README.md` for the layout). Do not ask first for data;
+do ask before anything destructive (especially `clean` / purges of the bulk
+tier). Pull the whole system saturation (~820 GB): the whole scan, the full
+cadence OFF legs, the other polarisations, all nodes/bands. Dwell time is
+sensitivity, and we have the pipe to buy it. Single-file spot scans are
+banned as campaign strategy — they are $1 lottery tickets with <8% duty-cycle
+coverage and no cadence proof.
 
 Use the SetiYeti tooling (public BL archive, **no AWS credentials needed**):
 
@@ -639,6 +653,40 @@ Gotchas (bled for, don't rediscover):
   <~10 with real p-values.
 - **Worth-checking bar:** unique + sane stats + ON-only *in the same pair* +
   2+ detectors. Global freq matching across stars lies (L-band is all shared RFI).
+
+---
+
+## Journal — `journal/` (search memory before re-triaging)
+
+Measurements live in `reports.db`; the **journey** lives in `journal/` — one
+folder per star system (`journal/trappist-1/`, `journal/lhs-1140/`, ...),
+markdown entries with YAML frontmatter. This is the agent memory layer:
+*what was seen, why it was ruled out, what to check next time.*
+A spike you can't place in 30 seconds of journal search is a spike you
+re-triage for hours. **Search first, sweep second.**
+
+```bash
+python python/turbokain/journal.py list [--target T] [--tag G] [--disposition D]
+python python/turbokain/journal.py search [--text Q] [--target T] [--tag G] [--disposition D] [--instrument I]
+python python/turbokain/journal.py read journal/<target>/<entry>.md
+python python/turbokain/journal.py write --target <slug> --title <slug> --body "..." --disposition D [--tags a,b] [--campaign C] [--instruments x,y] [--eirp-floor-w N] [--verdict V] [--sky-row ROW] [--reports dir] [--related path]
+python python/turbokain/journal.py ingest --full   # rebuild journal/_index.db (FTS5, gitignored, regenerable)
+```
+
+`.pi/extensions/turbokain-journal/` exposes the same engine to agents:
+`journal_write` (record findings after any triage — body carries
+What-I-saw / Why-ruled-out / Next-time), `journal_search` (free text +
+`target`/`tag`/`disposition`/`instrument` filters — the "have we seen
+anything like this?" tool), `journal_read`, `journal_list`, plus
+`/journal <text>`. Same binary-wrapping pattern as `turbokain-db`.
+
+Schema (frontmatter): `target`, `date`, `author` required; optional
+`campaign`, `disposition`, `coverage`, `instruments[]`, `eirp_floor_w`,
+`tags[]`, `verdict`, `sky_row`, `reports[]`, `related[]` (cross-links to
+sibling entries — e.g. two ON-only spikes with opposite physics). Markdown
+is source of truth (tracked); `_index.db` is derived (never hand-edit).
+Rule: every campaign that updates `sky_catalog.tsv` also writes a journal
+entry linking the report dir + sky row.
 
 ---
 
