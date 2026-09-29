@@ -7,7 +7,7 @@ $^1$*The TurboKain Project, Independent Research* (`taylor@kainlang.com`)
 **Telescope:** Robert C. Byrd Green Bank Telescope (100 m), GUPPI baseband backend
 **Data:** Breakthrough Listen Open Data Archive, project `AGBT17A_999_12` (MJD 57807, 2017-02-23)
 **Campaign:** `reports/trappist1_overnight_20260928_094823/` (1,024 channel-sweeps, 732.1 GB)
-**Status:** Pilot survey + methods demonstration. Honest negative. Injection validation deferred (see §7).
+**Status:** Pilot survey + methods demonstration. Honest negative. Injection first-light measured 2026-09-28 (§5.4); coded sensitivity not yet established (§7).
 
 ---
 
@@ -158,10 +158,10 @@ $$\Delta f_{\rm hum}=f_s/131{,}072=22.35174\ {\rm Hz}\,,\qquad 64\times\Delta f_
 
 Agreement to 7 mHz (5 ppm), ON+OFF-common, all four bands → GUPPI ADC-clock harmonic intermodulation ($64^{\rm th}$ sub-comb of the $2^{17}$-scaled sampling clock). Vetoed as instrumental; nominated once to the receiver RFI catalog, not per-target. Representative storm channel (S Ep2 Ck0 Ch36, Fig. 2): 8 baud lines on this ladder, SK flagged 99.8%, time envelope +13.1 dB impulse train, zero-dispersion broadband flashes — terrestrial ingress, `stamp`/`ghost` both CLEAN.
 
-![Figure 1: X-band Channel 49 diagnostic (7959.0 MHz, Epoch 2 Chunk 1) — flat thermal bandpass (+0.1 dB margin), featureless dynamic spectrum, P(t) <0.3 dB, SK(f)≈1.000, honest-negative HUD.](figures/figure1_xband_thermal_waterfall.png)
+![Figure 1: X-band Channel 49 diagnostic (7959.0 MHz, Epoch 2 Chunk 1) — flat thermal bandpass (+0.1 dB margin), featureless dynamic spectrum, P(t) <0.3 dB, SK(f)≈1.000, honest-negative HUD.](figures/figure1_xband_thermal_waterfall_paper.png)
 *Figure 1 — Pristine-noise archetype. Mean bandpass, 512-bin dynamic spectrum (7959.0–7960.4 MHz), total-power envelope, and spectral kurtosis for X-band Ch49. Telemetry HUD reports no threshold crossings. The `[CADENCE] STANDALONE` tag in the HUD refers to the single-beam rendering pass; ON−OFF comparison is performed at the lattice stage (Table 2, E1), not inside the renderer.*
 
-![Figure 2: S-band Channel 36 burst train (2170.9 MHz, Epoch 2 Chunk 0) — DC edge spike, broadband zero-dispersion flashes, +13.1 dB microsecond impulse train, SK flagged 99.8%, 8 comb-matched baud lines, alien-suite veto (ST:CLEAN/GH:CLEAN).](figures/figure2_sband_impulse_storm.png)
+![Figure 2: S-band Channel 36 burst train (2170.9 MHz, Epoch 2 Chunk 0) — DC edge spike, broadband zero-dispersion flashes, +13.1 dB microsecond impulse train, SK flagged 99.8%, 8 comb-matched baud lines, alien-suite veto (ST:CLEAN/GH:CLEAN).](figures/figure2_sband_impulse_storm_paper.png)
 *Figure 2 — Terrestrial-impulse archetype. Same layout as Fig. 1 for S-band Ch36. Horizontal flash stripes span the full 1.4-MHz slice with no dispersion sweep; the hit log ladder matches $64\times22.3517$ Hz. Propagation and parity stages concur on terrestrial origin.*
 
 ### 4.2 The 11 pilot-escalated channels — full ledger
@@ -226,6 +226,49 @@ Reading: no continuous narrowband transmitter above 41.8 (S) – 83.6 (Ku) GW, a
 
 ---
 
+
+### 5.4 Injection calibration — first light (2026-09-28)
+
+A stdlib-only harness (`python/inject_cal.py`) injects simplified stand-ins into unit-variance
+Gaussian baseband (N = 1,048,576, $f_s = 2.9296875$ MHz) and runs all four keystones behind
+`core.exe`: BPSK with chunk-64 weight-7 even parity (simplified proxy, not full LDPC) at
+$-6/-3/0/+3$ dB, uncoded-BPSK and sine-tone controls, shared independent-noise OFF leg.
+Campaign: `reports/2026-09-28_injection_cal/` (summary.csv + per-case receipts).
+
+```
+Table 6: Injection recovery (ghost gate 6.66σ; drift gate 8σ; z in σ units)
+------------------------------------------------------------------------------------------
+Case          gperf (Q)        stamp   ghost gated (z)   ghost open (z)   drift
+------------------------------------------------------------------------------------------
+noise         PERFECT-COMMON   CLEAN   CLEAN (3.83)      CLEAN (3.83)     0 hits
+              (q=63,134!)
+coded -6 dB   CLEAN            CLEAN   RESIDUE (9.15)    GHOST (9.15)     0 hits
+coded -3 dB   CLEAN            CLEAN   RESIDUE (8.70)    GHOST (8.70)     0 hits
+coded 0 dB    CLEAN            CLEAN   CLEAN (5.74)      CLEAN (5.74)     0 hits
+coded +3 dB   CLEAN            CLEAN   CLEAN (4.23)      CLEAN (4.23)     0 hits
+uncoded 0 dB  CLEAN            CLEAN   CLEAN (4.68)      CLEAN (4.68)     0 hits
+tone 0 dB     CLEAN            CLEAN   RESIDUE (15.06)   GHOST (15.06)    1 hit (166σ)
+------------------------------------------------------------------------------------------
+```
+
+Findings (all reproduced across re-seeds unless noted):
+1. **Null is clean:** noise ghost 3.83σ both legs, drift silent. No false-alarm pathology at 1M samples.
+2. **Parity detectable in principle, marginal in practice:** $-6/-3$ dB fire through the gate
+   (gated verdicts correctly cap at `RESIDUE` — promotion needs stamp context), but $-6$ dB is
+   seed-unstable across re-seeds (9.15 vs 5.93σ) and response fades non-monotonically with
+   amplitude (0 dB: 5.74/4.30/4.00 all CLEAN; +3 dB: 4.23) — saturation/normalization behavior
+   under the boxplus statistic, to be characterized, not assumed away.
+3. **Block-max does not integrate:** $-6$ dB at N=4M returns byte-identical z=9.15 (same seed
+   prefix; max + trials penalty cancel). Per-block SNR is what matters — longer dwell will not
+   save weak codes under this statistic; a sum-across-blocks upgrade is queued future work.
+4. **Q confirmed as cleanliness meter:** pure noise escalates `PERFECT-COMMON` at q=63,134 —
+   the §4.3 X-band triage reproduced in vitro.
+5. **Energy control validated:** drift silent on noise and all coded cases, 166σ on the tone —
+   coded signals are drift-silent exactly as theory predicts.
+
+Bottom line: §5 wideband EIRP figures remain **energy bounds**; coded-traffic sensitivity at
+flight SNRs is not established. The limitation is now measured, not merely disclosed.
+
 ## 6. Discussion
 
 The pilot demonstrates that baseband parity/propagation/Gaussianity/timing tests can run end-to-end on archival voltages at 732-GB scale with per-channel receipts — and that each currently fails in an instructive, fixable way (uncalibrated $Q$, quantization floor above the absolute ghost gate, DC-folding without demeaning, weak-regime stamp with no DISS lever). Publishing those failure modes is the point of a pilot.
@@ -236,7 +279,7 @@ Astrophysically, the honest reading is narrow: one epoch, four windows, minutes 
 
 ## 7. Limitations and path to a full survey paper (explicit)
 
-1. **No injection recovery.** Sensitivity to live coded traffic is unmeasured. Required: synthetic LDPC/convolutional/QPSK/OQPSK/DSSS injections at 3–4 SNRs into baseband, detection probability vs. false alarm per keystone, plus measured $Q$/ghost/stamp nulls on OFF−OFF controls. Until then, §5 wideband figures are energy bounds only.
+1. **Injection recovery: first light done, sensitivity not established.** §5.4 measures the null (clean), marginal seed-dependent parity response (fires at $-6/-3$ dB, fades by 0 dB), non-integrating block-max behavior, and validated drift control — using a simplified weight-7 parity proxy. Still required for a claim-grade coded limit: full LDPC/convolutional/QPSK/DSSS families, detection probability vs. false alarm per keystone, OFF−OFF null distributions. Until then, §5 wideband figures are energy bounds only.
 2. **Single epoch, short dwell.** No variability, rotation-phase, orbital-phase, or conjunction coverage. Re-observation or multi-epoch archival stacking (with proper incoherent-gain bookkeeping) needed.
 3. **Contrast statistics uncalibrated.** ON−OFF $\Delta z$ (ghost), $\Delta$RM/$\Delta p$ (stamp), $z_\phi-z_{\rm UTC}$ nulls need control distributions before any promotion threshold is claim-grade.
 4. **Known pipeline bugs held as triage, not fixes:** missing pre-fold demean (Ch00), uncalibrated $Q$ operating point, quantization-bias revision of the ghost variance model.

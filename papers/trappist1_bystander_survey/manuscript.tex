@@ -103,14 +103,14 @@ Barycentric $\phi$-fold vs.\ UTC control; flag requires $z_\phi\ge6\sigma$ and $
 
 \begin{figure*}[t]
 \centering
-\includegraphics[width=\textwidth]{figures/figure1_xband_thermal_waterfall.png}
+\includegraphics[width=\textwidth]{figures/figure1_xband_thermal_waterfall_paper.png}
 \caption{Pristine-noise archetype: X-band Ch49 (7959.0~MHz, Ep2 Ck1). Flat bandpass, featureless spectrum, $P(t)<0.3$~dB, $SK\approx1.000$. The \texttt{STANDALONE} HUD tag denotes the single-beam render pass; ON--OFF comparison lives in the lattice stage.}
 \label{fig:waterfall}
 \end{figure*}
 
 \begin{figure*}[t]
 \centering
-\includegraphics[width=\textwidth]{figures/figure2_sband_impulse_storm.png}
+\includegraphics[width=\textwidth]{figures/figure2_sband_impulse_storm_paper.png}
 \caption{Terrestrial-impulse archetype: S-band Ch36 (2170.9~MHz, Ep2 Ck0). Broadband zero-dispersion flashes, +13.1~dB impulse train, SK 99.8\% flagged, 8 comb-matched baud lines; propagation/parity concur terrestrial.}
 \label{fig:storm}
 \end{figure*}
@@ -190,6 +190,10 @@ Ku  & 11.982 & 20.0 & 35.46 Jy & 625.2 GW & 1070.2 TW & 4.74 Jy & 83.6 GW & 143.
 \end{table*}
 
 Narrowband matches \citet{pinchuk2019} ($\sim$47~GW L-band). Wideband sits above Arecibo ($\sim$20~TW) and Goldstone ($\sim$10~TW): continuously-beamed radar-class links across our line of sight are bounded during the dwell; leakage, intermittent, or off-axis traffic is not. Wideband figures are energy bounds pending injection calibration.
+
+\subsection{Injection calibration (first light)}
+\label{sec:inject}
+A harness (	exttt{python/inject\_cal.py}; 	exttt{reports/2026-09-28\_injection\_cal/}) injects BPSK with chunk-64 weight-7 even parity (simplified proxy, not full LDPC) at $-6/-3/0/+3$~dB plus uncoded/tone controls ($N=1{,}048{,}576$) through all four keystones. Null is clean (noise ghost $3.83\sigma$, drift 0 hits). Parity fires at $-6/-3$~dB (gated verdicts cap at 	exttt{RESIDUE} as designed) but is seed-unstable ($9.15$ vs $5.93\sigma$ re-seeds) and fades non-monotonically ($0$~dB: $5.74/4.30/4.00$, all CLEAN; $+3$~dB: $4.23$). At $N=4$M the $-6$~dB statistic returns byte-identical $z=9.15$: the block-max does not integrate across blocks. Pure noise escalates 	exttt{PERFECT-COMMON} ($q=63{,}134$), confirming $Q$ as a cleanliness meter; drift is silent on coded signals and $166\sigma$ on the tone. Wideband EIRP figures remain energy bounds; coded sensitivity is not established.
 
 \section{Discussion and limitations}
 \label{sec:limits-caveats}

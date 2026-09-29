@@ -6,7 +6,7 @@
 **Telescope:** Robert C. Byrd Green Bank Telescope (100 m)  
 **Survey Volume:** 732.1 GB raw GUPPI baseband voltages across 4 microwave bands (2.1 to 12.0 GHz)  
 **Total Channels Swept:** 1,024 dual-polarization observations  
-**Status:** Revised pilot draft (2026-09-28) — honest negative, methods pilot. Peer-review pass complete; injection calibration + DOI bundle deferred (see manuscript §7). Suitable for RNAAS / methods note now; AJ-track after §7 punch list.
+**Status:** Revised pilot draft (2026-09-28) — honest negative, methods pilot. Peer-review pass complete; injection first-light DONE 2026-09-28 (reports/2026-09-28_injection_cal/, §5.4/§sec:inject); coded sensitivity not established; DOI bundle still deferred (see §7). Suitable for RNAAS / methods note now; AJ-track after §7 punch list.
 
 ---
 
