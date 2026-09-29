@@ -1,11 +1,11 @@
 # TurboKain
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v0.3.0--alpha-blue.svg?style=for-the-badge&logo=github" alt="Release v0.3.0-alpha">
+  <img src="https://img.shields.io/badge/Release-v0.4.0--alpha-blue.svg?style=for-the-badge&logo=github" alt="Release v0.4.0-alpha">
   <img src="https://img.shields.io/badge/Language-Kain%20Native-00e5ff.svg?style=for-the-badge" alt="Kain Native">
   <img src="https://img.shields.io/badge/Compiler-LLVM%20WPO-ff6d00.svg?style=for-the-badge" alt="LLVM WPO">
-  <img src="https://img.shields.io/badge/Formal%20Prove-21%2F21%20PASS-00e676.svg?style=for-the-badge" alt="Prove 21/21 Pass">
-  <img src="https://img.shields.io/badge/Instruments-22%20Total-d500f9.svg?style=for-the-badge" alt="22 Instruments">
+  <img src="https://img.shields.io/badge/Formal%20Prove-25%2F25%20PASS-00e676.svg?style=for-the-badge" alt="Prove 25/25 Pass">
+  <img src="https://img.shields.io/badge/Instruments-26%20Total-d500f9.svg?style=for-the-badge" alt="26 Instruments">
   <img src="https://img.shields.io/badge/Dependencies-Zero%20(kernel32)-7c4dff.svg?style=for-the-badge" alt="Zero Dependencies">
 </p>
 
