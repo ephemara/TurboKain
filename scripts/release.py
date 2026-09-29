@@ -64,7 +64,7 @@ def sha256_file(path: Path) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="TurboKain automated release packager")
-    parser.add_argument("--version", default="v0.3.0-alpha", help="Release version tag")
+    parser.add_argument("--version", default="v0.4.0-alpha", help="Release version tag")
     parser.add_argument("--title", help="Release title")
     parser.add_argument("--draft", action="store_true", help="Create as draft")
     parser.add_argument("--prerelease", action="store_true", help="Mark as prerelease")
@@ -72,7 +72,7 @@ def main():
     args = parser.parse_args()
 
     tag = args.version
-    title = args.title or f"TurboKain {tag} — Higher-Order Bispectrum, Spatial Subspace & 22-Instrument Engine (21 prove batteries)"
+    title = args.title or f"TurboKain {tag} — Alien Keystones, TRAPPIST-1 Paper & 26-Instrument Engine (25 prove batteries)"
     
     print(f"================================================================================")
     print(f" TurboKain Automated Release Pipeline -> {tag}")
@@ -95,9 +95,9 @@ def main():
     shutil.copy2(ROOT / "core.exe", ROOT / "turbokain_core.exe")
 
     if not args.skip_prove:
-        print("\n[Step 2/6] Running 21-instrument formal prove battery...")
+        print("\n[Step 2/6] Running 25-instrument formal prove battery...")
         res = run_cmd([str(ROOT / "tkc.exe"), "prove"], check=True)
-        print("All 21 prove batteries verified in-memory!")
+        print("All 25 prove batteries verified in-memory!")
 
     # 3. Create Package Staging
     print("\n[Step 3/6] Packaging release artifacts...")
@@ -163,7 +163,7 @@ def main():
     # Check if there are staged changes to commit
     diff_res = subprocess.run(["git", "diff", "--staged", "--quiet"])
     if diff_res.returncode != 0:
-        run_cmd(["git", "commit", "-m", f"release: {tag} — 3D bispectrum, spatial subspace & 22-instrument suite (21 prove batteries)"])
+        run_cmd(["git", "commit", "-m", f"release: {tag} — alien keystones, TRAPPIST-1 paper & 26-instrument suite (25 prove batteries)"])
         run_cmd(["git", "push", "origin", "main"], env=env)
     
     # Tag
@@ -176,35 +176,38 @@ def main():
     sha1 = sha_lines[1]
     sha2 = sha_lines[2]
 
-    notes = f"""# TurboKain {tag} — Higher-Order Bispectrum, Spatial Subspace & 22-Instrument Engine
+    notes = f"""# TurboKain {tag} — Alien Keystones, TRAPPIST-1 Survey Paper & 26-Instrument Engine
 
 **High-Throughput Coherent Radio Technosignature & Bystander Traffic Pipeline**
-*Native, whole-program optimized, formally verified digital signal processing suite for astronomical radio telescope baseband recordings.*
+*Native, whole-program optimized, formally verified DSP suite for telescope baseband. One ~2 MB exe, zero dependencies.*
 
 ---
 
-## What's New in {tag}
+## What's New in {tag} (since v0.3.0-alpha, 14 commits)
 
-### 1. `bispectrum.kn` (Tool 25) — 3D Bispectrum & Normalized Bicoherence (b^2) QPC Estimator
-- **Higher-Order Spectral Analysis (HOSA):** Direct bispectrum B(f1, f2) = E[X(f1) X(f2) X*(f1+f2)] and Kim & Powers (1979) normalized bicoherence b^2(f1, f2).
-- **Gaussian Thermal Null:** Complete suppression of Gaussian thermal noise (b^2 ~ 1/M), isolating non-linear phase-locked features with near-infinite contrast.
-- **Irreducible Principal Domain (IRPD):** Restricts matrix evaluation strictly to Omega = {{ (f1, f2) | 0 <= f2 <= f1, f1+f2 <= fs/2 }}, slashing search space by 83.3%.
-- **1D Diagonal Fast Lane:** Evaluates second-harmonic self-coupling (f, f, 2f) in O(N) time per block (<1 ms).
-- **'Oumuamua Empirical Diagnosis:** Executed on Breakthrough Listen 'Oumuamua (1I/2017 U1) GBT S-band outlier slices (Channels 7 & 11), isolating an anti-phase (phi_B = 178 deg) phase-locked comb (f2 = 2861.0 Hz) identified as balanced mixer / ADC sub-band intermodulation (RFI-INTERMOD), corroborating the sky ledger's HONEST-NEGATIVE.
+### 1. Four alien keystone lanes (the gated detection stack)
+- **`ism_stamp.kn`** — propagation authenticator. Sub-band scintillation screen + RM fit + ON/OFF contrast. Verdicts CLEAN / QUARANTINE / STAMPED / TERRESTRIAL-IMPULSE. Gates everything below it.
+- **`fec_ghost.kn`** — keystone spread-coded ghost hunter. Boxplus soft dual-code distinguisher, gated-only (needs a stamp + ON-only). Catches 0 dB coded ghosts power detectors miss.
+- **`gauss_perfection.kn`** — inverted-SK escalator. Flags too-perfect Gaussian tiles vs honest sky.
+- **`pulsar_clock.kn`** — galactic re-timer. Barycentric retime + phi-fold bridge to fold_sum, smeared-hum veto included.
+- All four proven (5/5, 6/6, 4/4, 4/4) and wired into `core sweep` gating: stamp null → ghost correctly skipped, never forced.
 
-### 2. `subspace_null.kn` (Tool 24) — Baseband Spatial Subspace Projection & Coherent RFI Nuller
-- **Orthogonal Subspace Projection:** Decomposes the 2x2 spatial covariance matrix R_xx of dual-polarization baseband voltages via closed-form Hermitian eigensolver.
-- **Phase-Preserving Nulls:** Projects deep orthogonal nulls (>30 dB) directly along the interference eigenvector, eradicating directional RFI while preserving the continuous phase, timing, and Stokes parameters of the astronomical signal.
+### 2. TRAPPIST-1 bystander survey paper
+- **`papers/trappist1_bystander_survey/`** — 732 GB raw GUPPI across 2–12 GHz, 1,024 dual-pol channels swept. Honest-negative pilot draft (manuscript.md + aastex .tex + .bib + 1920x1080 figures). Covers the 1430.51 Hz ROACH digitizer ghost (fs/2048) now an auto-veto rule.
+- Injection first-light calibration DONE (reports/2026-09-28_injection_cal). Journal + sky_catalog rows sealed.
 
-### 3. `perm_entropy.kn` (Tool 23) — Model-Free Permutation Entropy & LZW Complexity Screener
-- **Ordinal Trajectory Mapping:** 5D delay embedding mapped via Lehmer factoradic code to 120 factorial bins in O(N) time.
-- **Rosso Complexity-Entropy Plane:** Evaluates Jensen-Shannon statistical complexity (C_JS) and Kaspar-Schuster algorithmic complexity (K_LZ) directly on baseband voltages without spectral assumptions.
+### 3. Journal memory layer + campaign scripts
+- **`python/turbokain/journal.py`** — per-system journal (what was seen / why ruled out / what next), FTS index, backs the agent tools. Every campaign now writes a journal entry with its sky row.
+- New drivers: 128-comb deep campaign, LHS-1140 cadence search, TIC 458478250 scan, TRAPPIST-1 overnight master, manuscript validator.
 
-### 4. `frft_hunt.kn` (Tool 22) — Coherent Fractional Fourier Transform Chirp Matched Filter
-- **Coherent Time-Frequency Rotation:** Fast 3-stage Ozaktas / Pei-Ding FrFT algorithm in O(N_alpha * N log N) collapsing chirped Doppler carriers into Dirac-delta impulse tones with O(sqrt(N)) amplitude gain over incoherent dedoppler methods.
+### 4. Waterfall paper theme + dispatch fixes
+- `--theme paper` (white page, black ink, viridis heatmap) for publications, dark Turbo/Inferno default untouched. Re-prove green.
+- dispatch.kn multi-call fixes, unify tweaks, registry/scan/db updates.
 
-### 5. `packet_hunt.kn` (Tool 20) — Telemetry Framing & Interstellar Packet Hunter
-- Autonomous sync-word detector supporting CCSDS, Barker-13, and SGLS protocols with bit-slip and frame tracking.
+### 5. Measured speed (docs/BENCHMARK.md, 2026-09-28, 4-core EPYC)
+- 17.18 GB GUPPI → 268 MB channel .f32 in **2.74 s cold / 2.46 s warm** (seek-and-pluck, not streaming)
+- Full **22-stage sweep in 54.4 s warm**, **25/25 prove in 6.43 s**, 4 channels parallel in 99.7 s wall (2.18x, ~telescope rate)
+- Binary **~2.0 MB**, zero deps. No per-stage regressions vs v0.3.0.
 
 ---
 
@@ -241,31 +244,11 @@ def main():
 
 ## Verification
 
-`tkc prove` — **All 21 mathematical self-test batteries PASS in ~3.2 s**:
+`tkc prove` — **All 25 mathematical self-test batteries PASS in ~6.4 s**:
 ```text
-[1/21]  bitslice --prove      -> receipt=PASS prove=4/4
-[2/21]  boxcar_bank --prove   -> receipt=PASS prove=4/4
-[3/21]  config --prove        -> receipt=PASS prove=6/6
-[4/21]  drift_hunt --prove    -> receipt=PASS prove=4/4
-[5/21]  fil_reader --prove    -> receipt=PASS prove=4/4
-[6/21]  frame_hunt --prove    -> receipt=PASS prove=9/9
-[7/21]  lag_hunt --prove      -> receipt=PASS prove=9/9
-[8/21]  xeno_scan --selftest  -> [selftest] ALL PASS
-[9/21]  xvm_sandbox --selftest-> receipt=PASS selftest=24/24
-[10/21] raster_hunt --prove  -> receipt=PASS prove=4/4
-[11/21] jerk_track --prove   -> receipt=PASS prove=4/4
-[12/21] scint_pol --prove    -> receipt=PASS prove=5/5
-[13/21] unify --prove        -> receipt=PASS prove=10/10
-[14/21] stack --prove        -> receipt=PASS prove=5/5
-[15/21] h5_reader --prove    -> receipt=PASS prove=4/4
-[16/21] waterfall --prove    -> receipt=PASS prove=5/5
-[17/21] packet_hunt --prove  -> packet_hunt: prove PASS (4/4 checks green)
-[18/21] frft_hunt --prove    -> receipt=PASS prove=5/5
-[19/21] perm_entropy --prove -> receipt=PASS prove=5/5
-[20/21] subspace_null --prove-> receipt=PASS prove=5/5
-[21/21] bispectrum --prove   -> receipt=PASS prove=5/5
-Core Battery Receipt: ALL 21 PROVE BATTERIES PASSED (receipt=PASS)
+Core Battery Receipt: ALL 25 PROVE BATTERIES PASSED (receipt=PASS)
 ```
+Full per-lane 4/4–10/10 receipts print in the prove log (bitslice, boxcar, config, drift, fil_reader, frame 9/9, lag 9/9, xeno, xvm 24/24, raster, jerk, scint, unify, stack, h5_reader, waterfall, packet, frft, perm, subspace_null, bispectrum + 4 keystones: ism_stamp 5/5, fec_ghost 6/6, gauss_perfection 4/4, pulsar_clock 4/4).
 
 ---
 
@@ -310,7 +293,7 @@ Core Battery Receipt: ALL 21 PROVE BATTERIES PASSED (receipt=PASS)
     # Log in memory.tsv
     try:
         run_cmd([str(ROOT / "scripts" / "memlog.exe"), "release", "publish",
-                 f"Published {tag} GitHub release with 21 instruments, 16 prove batteries, and waterfall engine",
+                 f"Published {tag} GitHub release with 26 instruments, 25 prove batteries, TRAPPIST-1 paper and benchmark",
                  f"tkc.exe,turbokain_core.exe,{zip_name},SHA256SUMS.txt"])
     except Exception as e:
         print(f"memlog note: {e}")
